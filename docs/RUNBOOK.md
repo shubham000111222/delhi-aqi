@@ -91,6 +91,8 @@ python -m tradebot robustness --days 4 --cost-multiplier 2
 python -m tradebot parity --minutes 1200         # must print MATCH
 python -m tradebot signals --days 1 --horizon 30 # screen + ladder + leakage checks
 python -m tradebot slippage --days 2             # measured vs assumed costs
+python -m tradebot meta --days 1                 # does a meta-label filter add anything?
+python -m tradebot stream --minutes 120          # streaming feed replay: contract holds?
 ```
 
 A strategy is promotable only if **all** of the following hold:
@@ -104,6 +106,32 @@ A strategy is promotable only if **all** of the following hold:
   trials logged in the `experiments` table.
 
 If any check fails, the honest action is to change the strategy, not the gate.
+
+## Streaming feed
+
+`--feed stream` runs the bot off a WebSocket instead of REST polling. Two commands matter:
+
+```bash
+python -m tradebot stream --minutes 120          # replay a recording through the feed
+python -m tradebot stream --live --seconds 30    # try the real socket (needs network)
+```
+
+The replay path sends klines, depth snapshots, trades, one malformed frame and one
+dropped connection through the production feed, and prints the verdict. You want:
+
+```
+  events   bars  151  books  15  ticks   48  decode errors 1
+  connection attempts 2  connects 2  error reconnects 0  gap-filled bars 5
+  verdict: stream contract holds
+```
+
+`decode errors 1` is the deliberately corrupted frame; `gap-filled bars` proves the
+outage was noticed and backfilled. A replay that prints `gaps_filled 0` means the feed
+is hiding an outage - stop and fix it before going near real money.
+
+In this sandbox `--live` reaches the socket and is refused (`ConnectionResetError`), then
+retries with backoff. That is the honest result: nothing here has ever decoded a frame
+from a real exchange.
 
 ## Fire drill (paper, monthly)
 

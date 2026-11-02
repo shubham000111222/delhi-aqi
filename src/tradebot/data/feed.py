@@ -588,6 +588,11 @@ def make_feed(config: Config, clock: Clock | None = None) -> BaseFeed:
     kind = config.settings.feed.value
     if kind == "ccxt":
         return CcxtFeed(config, clock)
+    if kind == "stream":
+        # Imported here because `stream` imports this module for `BaseFeed`.
+        from .stream import live_feed
+
+        return live_feed(config, clock)
     return SyntheticFeed(config, clock)
 
 

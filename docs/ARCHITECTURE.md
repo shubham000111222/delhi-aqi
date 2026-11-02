@@ -7,7 +7,7 @@ and live.** Only two things are swapped:
 
 | Concern | Backtest | Paper | Testnet | Live |
 | --- | --- | --- | --- | --- |
-| Feed | `ReplayFeed` / `SyntheticFeed` + `SimClock` | `SyntheticFeed` or `CcxtFeed` + `Clock` | `CcxtFeed` | `CcxtFeed` |
+| Feed | `ReplayFeed` / `SyntheticFeed` + `SimClock` | `SyntheticFeed`, `CcxtFeed` or `WebSocketFeed` + `Clock` | `WebSocketFeed` (falls back to `CcxtFeed`) | `WebSocketFeed` |
 | Adapter | `PaperAdapter` | `PaperAdapter` | `CcxtLiveAdapter(testnet=True)` | `CcxtLiveAdapter` |
 | Database | `:memory:` | `tradebot_paper.db` | `tradebot_testnet.db` | `tradebot_live.db` |
 
@@ -31,6 +31,14 @@ If a result cannot be reproduced by the paper path, it is not a result.
 ```
 feed.emit(kind, payload)  ──await──▶  asyncio.Queue(1_000)  ──▶  Engine.dispatch()
 ```
+
+The streaming feed emits exactly these three events, which is why swapping `CcxtFeed`
+for `WebSocketFeed` changes nothing downstream: `WebSocketFeed` decodes exchange frames
+into `bar`/`book`/`tick` payloads, rewrites `BTCUSDT` to the configured `BTC/USDT`, and
+fills the bars it missed while the socket was down through a REST gap filler before
+emitting the first frame of the new connection. A feed that silently skips minutes is
+worse than one that fails loudly, so the gap fill runs before the engine sees the
+reconnect.
 
 Awaiting the queue is the backpressure mechanism: the producer cannot outrun the
 engine, so during a backtest the simulated clock advances exactly with the events

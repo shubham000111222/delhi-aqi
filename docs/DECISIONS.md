@@ -25,6 +25,11 @@
 | 19 | **Promotion of a more complex model is enforced in code** | a rule kept in a document is a rule that gets ignored the first time the complex model looks good | `ladder.promote()` needs +10% net expectancy, profitable, in every window |
 | 20 | **Venue abstractions before the venue** | §18.8 asks for the seams now so an NSE adapter is an adapter job, not a rewrite | `venues/` exists with no NSE broker adapter behind it |
 | 21 | **Order-book features go NaN when the snapshot is stale** | carrying a five-minute-old imbalance forward produces confident, wrong numbers | staleness limit of five bars, tested |
+| 22 | **The stream transport is injected, not imported** | no exchange access here, so a feed that could only be tested against a live socket would be untested code on a money path | `WebSocketFeed(config, clock, transport=...)`; the tests feed it recorded Binance frames |
+| 23 | **Gap fill runs before the first frame after a reconnect, and windows end at that frame** | filling on connect used the wall clock, which on a replay never moves, so the window started where it ended and filled nothing - an outage that looks like continuity | the filled bars are emitted in order, ahead of the new frame; `stream` prints `gap-filled bars` |
+| 24 | **Exchange symbols are rewritten to the configured ones at the boundary** | Binance streams `BTCUSDT`; the engine keys on `BTC/USDT`, so every bar would land under a symbol nothing looks up and the bot would sit flat while believing it was receiving data | `WebSocketFeed._canonicalise`, asserted in tests |
+| 25 | **Meta-labelling may only remove trades** | a model that sizes positions is a second risk engine, unauthorized and unreviewed; §19.3 asks for a filter | the gate returns take/skip only; size stays with `portfolio/sizing.py` |
+| 26 | **Sentiment can only shrink a position, never grow it** | a lexicon (or an LLM) reading headlines is easily wrong and easily manipulated | multiplier in [0.5, 1.0]; a broken feed leaves sizing untouched |
 
 ## Decisions I need from you (plan §17.4)
 

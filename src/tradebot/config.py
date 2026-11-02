@@ -30,6 +30,7 @@ class Mode(StrEnum):
 class FeedKind(StrEnum):
     SYNTHETIC = "synthetic"
     CCXT = "ccxt"
+    STREAM = "stream"
 
 
 class _Strict(BaseModel):

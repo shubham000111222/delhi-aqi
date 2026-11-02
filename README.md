@@ -88,10 +88,13 @@ no API key is needed.
 | Complexity ladder (baseline → ridge → gradient boosting) with a promotion rule | done, and it **promotes nothing** on this data | `ai/ladder.py` |
 | Model registry + model cards; S4 wired to an approved card | done, **no model is registered** | `ai/registry.py`, `strategies/ml_signal.py` |
 | Slippage recorder and calibrated slippage model | done (median 0.0, p95 +26 bps measured) | `execution/slippage.py` |
+| WebSocket streaming feed: injected transport, Binance decoders, backoff, REST gap fill | done (`stream` replay verdict, live socket blocked here) | `data/stream.py` |
+| Meta-labelling: triple-barrier labels, logistic gate, promote/skip rule | done, and it **rejects every gate** on this data (|edge| ≈ 1–3 bps vs 20 bps costs) | `ai/meta.py` |
+| Reduce-only sentiment overlay (lexicon + optional FinBERT, RSS) | done, **no live news feed wired** | `ai/sentiment.py` |
 | Parquet/DuckDB archive for candles and order books | done | `data/archive.py` |
 | Telegram command bot with whitelist and confirm step | done (transport not exercised here) | `alerts/commands.py` |
 | NSE-ready seams: calendar, instruments, cost model, sessions, square-off | done | `venues/` |
-| FinBERT sentiment (S5), live exchange connectivity, LLM journal in production | **not built** — see `docs/ROADMAP.md` | — |
+| Live exchange connectivity, a real WebSocket session, LLM journal in production | **not built** — see `docs/ROADMAP.md` | — |
 
 ## One code path
 
@@ -174,7 +177,7 @@ therefore returns no signals — and says why.
 config/                settings.yaml · risk.yaml · strategies.yaml · symbols.yaml
 src/tradebot/
   core/                money (Decimal), models, clock, store (SQLite), bus, logging
-  data/                feed (synthetic / ccxt / replay), hub, series, tape, archive
+  data/                feed (synthetic / ccxt / replay / websocket), hub, series, tape, archive
   strategies/          base, ema_trend, meanrev, breakout, regime, indicators
   portfolio/           ledger, sizing
   risk/                engine (16 checks), killswitch, live_guards
@@ -182,7 +185,7 @@ src/tradebot/
   venues/              calendar, instruments, costs, session, square-off (NSE seams)
   backtest/            metrics, runner, walkforward, sensitivity, parity, robustness
   reporting/           daily report, tax ledger rows
-  ai/                  journal, features (32), signals (44), ladder, registry
+  ai/                  journal, features (32), signals (44), ladder, registry, meta, sentiment
   alerts/              notifier (Telegram + dedupe), commands (inbound bot)
   watchdog/            watchdog process
   dashboard/           FastAPI app + single-page UI
@@ -211,10 +214,12 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | `tradebot robustness --days N --cost-multiplier 2` | bootstrap, full 2x-cost rerun, benchmark, attribution |
 | `tradebot signals --days N --horizon H` | feature store → 44-signal screen → complexity ladder → leakage tests |
 | `tradebot slippage --days N` | measured slippage distribution and a calibrated model |
+| `tradebot meta --days N` | triple-barrier meta-labels, gate threshold search, promote/skip verdict |
+| `tradebot stream --minutes N` | replay a recorded session through the streaming feed and print its verdict |
 | `tradebot venues --venue nse --notional 100000` | session state, square-off deadline, round-trip cost comparison |
 | `tradebot archive --record-minutes N` | persist a session to Parquet and query it with DuckDB |
 
-`--mode paper|testnet|live`, `--feed synthetic|ccxt`, `--speed N` and `--config-dir`
+`--mode paper|testnet|live`, `--feed synthetic|ccxt|stream`, `--speed N` and `--config-dir`
 are accepted before or after the sub-command.
 
 ## Going live (read this first)

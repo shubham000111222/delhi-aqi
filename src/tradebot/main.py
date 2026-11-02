@@ -19,6 +19,7 @@ import json
 import os
 import signal
 import sys
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -394,7 +395,7 @@ def _add_shared(parser: argparse.ArgumentParser) -> None:
     """The same flags are accepted before or after the sub-command."""
     parser.add_argument("--config-dir", default=argparse.SUPPRESS, help="config directory (default: config)")
     parser.add_argument("--mode", choices=[m.value for m in Mode], default=argparse.SUPPRESS)
-    parser.add_argument("--feed", choices=["synthetic", "ccxt"], default=argparse.SUPPRESS)
+    parser.add_argument("--feed", choices=["synthetic", "ccxt", "stream"], default=argparse.SUPPRESS)
     parser.add_argument(
         "--speed", type=float, default=argparse.SUPPRESS,
         help="synthetic feed speed (simulated seconds per real second)",
@@ -499,6 +500,13 @@ def build_parser() -> argparse.ArgumentParser:
     arc.add_argument("--seed", type=int, default=7)
     arc.add_argument("--keep-days", type=int, default=None, help="delete book partitions older than this")
     arc.add_argument("--json", action="store_true")
+
+    stm = sub.add_parser("stream", help="streaming feed: replay a recording, or try the live socket")
+    stm.add_argument("--minutes", type=int, default=120, help="minutes of synthetic market to record")
+    stm.add_argument("--seed", type=int, default=7)
+    stm.add_argument("--live", action="store_true", help="try the real socket instead of a replay")
+    stm.add_argument("--seconds", type=float, default=10.0, help="how long to keep the live socket open")
+    stm.add_argument("--json", action="store_true")
 
     ven = sub.add_parser("venues", help="market calendar, square-off and cost comparison")
     ven.add_argument("--venue", default="crypto", choices=["crypto", "nse"])
@@ -1100,6 +1108,260 @@ def cmd_robustness(args: argparse.Namespace) -> int:
     return 0
 
 
+def _frame_ts(frame: Any) -> datetime | None:
+    """The instant an exchange frame refers to, if it says."""
+    data = frame.get("data") if isinstance(frame, dict) else None
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("E") or (data.get("k") or {}).get("t")
+    if raw is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(raw) / 1000, tz=UTC)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def cmd_stream(args: argparse.Namespace) -> int:
+    """Replay a recorded session through the streaming feed (or try the live socket).
+
+    The replay path is the point: it puts real frames - klines, book snapshots, trades,
+    one piece of garbage, one dropped connection - through the exact code that would run
+    against Binance, and reports the feed's health afterwards. Nothing here needs a
+    network, and nothing here is a mock of the feed.
+    """
+    from .core.clock import UTC, SimClock
+    from .data.feed import SyntheticFeed
+    from .data.stream import WebSocketFeed, summarise_events
+
+    cfg = _config(args)
+    if args.live:
+        return _run_live_stream(cfg, args)
+
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    clock = SimClock(start)
+    source = SyntheticFeed(cfg, clock)
+    source.rng.seed(args.seed)
+    symbols = cfg.symbol_names()
+    target = max(1, args.minutes) * max(1, len(symbols))
+    bars: list[Any] = []
+    books: list[Any] = []
+
+    async def _collect() -> None:
+        async def emit(kind: str, payload: Any) -> None:
+            if kind == "bar":
+                bars.append(payload)
+            elif kind == "book":
+                books.append(payload)
+            # The unpaced synthetic feed never suspends on its own, so without this the
+            # collector below never gets a turn and the command hangs (it did).
+            await asyncio.sleep(0)
+
+        task = asyncio.create_task(source.run(emit))
+        for _ in range(200_000):
+            if len(bars) >= target:
+                break
+            await asyncio.sleep(0)
+        source.stop()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(_collect())
+    if not bars:
+        print("error: the synthetic source produced no bars", file=sys.stderr)
+        return 2
+
+    # --- turn the recording into exchange-shaped frames -------------------
+    exchange_symbol = lambda symbol: str(symbol).replace("/", "")  # noqa: E731
+    frames: list[Any] = []
+    for index, bar in enumerate(bars):
+        frames.append(
+            {
+                "stream": f"{exchange_symbol(bar.symbol).lower()}@kline_1m",
+                "data": {
+                    "e": "kline",
+                    "s": exchange_symbol(bar.symbol),
+                    "k": {
+                        "t": int(bar.ts.timestamp() * 1000),
+                        "T": int(bar.close_time.timestamp() * 1000) - 1,
+                        "s": exchange_symbol(bar.symbol),
+                        "i": bar.timeframe,
+                        "o": str(bar.open),
+                        "c": str(bar.close),
+                        "h": str(bar.high),
+                        "l": str(bar.low),
+                        "v": str(bar.volume),
+                        "x": True,
+                    },
+                },
+            }
+        )
+        if index % 3 == 0:
+            frames.append(
+                {
+                    "data": {
+                        "e": "trade",
+                        "s": exchange_symbol(bar.symbol),
+                        "p": str(bar.close),
+                        "q": str(bar.volume / 2),
+                        "T": int(bar.close_time.timestamp() * 1000),
+                        "m": index % 2 == 0,
+                    }
+                }
+            )
+        if books and index % 10 == 0:
+            book = books[min(len(books) - 1, index)]
+            frames.append(
+                {
+                    "data": {
+                        "e": "depth20",
+                        "s": exchange_symbol(bar.symbol),
+                        "E": int(book.ts.timestamp() * 1000),
+                        "bids": [[str(lvl.price), str(lvl.qty)] for lvl in book.bids[:5]],
+                        "asks": [[str(lvl.price), str(lvl.qty)] for lvl in book.asks[:5]],
+                    }
+                }
+            )
+        if index and index % 97 == 0:
+            frames.append("{not json at all")  # the exchange will do this eventually
+
+    # One dropped connection in the middle, with the missed bars removed so the gap
+    # filler has something real to supply.
+    cut = len(frames) // 2
+    dropped = list(frames[cut : cut + 6])
+    first, second = frames[:cut], frames[cut + 6 :]
+
+    by_key = {(bar.symbol, bar.ts): bar for bar in bars}
+
+    async def gap_filler(symbol: str, since: datetime, until: datetime) -> list[Any]:
+        return [
+            bar
+            for (sym, ts), bar in sorted(by_key.items(), key=lambda item: item[0][1])
+            if sym == symbol and since <= ts < until
+        ]
+
+    #: Wall-clock instant of the first frame after the outage, so the replay can advance
+    #: its clock across the downtime the way real time would have.
+    resume_at = _frame_ts(second[0]) if second else None
+    attempts = {"n": 0}
+
+    async def transport(streams: Sequence[str]) -> Any:
+        attempts["n"] += 1
+        if attempts["n"] == 2 and resume_at is not None:
+            ahead = (resume_at - clock.now()).total_seconds()
+            if ahead > 0:
+                clock.advance(ahead)
+        chunk = first if attempts["n"] == 1 else second if attempts["n"] == 2 else []
+        for frame in chunk:
+            yield frame
+
+    feed = WebSocketFeed(
+        cfg,
+        clock,
+        transport=transport,
+        gap_filler=gap_filler,
+        max_backoff_seconds=0.0,
+        max_reconnects=1,
+    )
+    events: list[tuple[str, Any]] = []
+
+    async def emit(kind: str, payload: Any) -> None:
+        events.append((kind, payload))
+
+    asyncio.run(feed.run(emit))
+    stats = summarise_events(events)
+    health = feed.describe()
+    unknown = sorted({str(p.symbol) for _, p in events if str(getattr(p, "symbol", "")) not in symbols})
+    missing = [symbol for symbol in symbols if symbol not in stats.symbols]
+
+    report: dict[str, Any] = {
+        "mode": "replay",
+        "source": "synthetic recording",
+        "recorded_bars": len(bars),
+        "recorded_books": len(books),
+        "frames_sent": len(frames),
+        "frames_dropped_with_the_connection": len(dropped),
+        "attempts": attempts["n"],
+        "events": stats.as_dict(),
+        "health": health,
+        "symbols_missing_from_the_stream": missing,
+        "symbols_the_engine_would_not_recognise": unknown,
+        "gap_fill_worked": health["health"]["gaps_filled"] > 0,
+        "drop_detected": health["health"]["connects"] > 1,
+        "decoder_rejected_junk": health["health"]["decode_errors"] > 0,
+        "verdict": "",
+    }
+    ok = not missing and not unknown and report["gap_fill_worked"] and report["decoder_rejected_junk"]
+    report["verdict"] = (
+        "stream contract holds: every bar arrived under the engine's symbol, the dropped "
+        "connection was noticed and the missed bars backfilled"
+        if ok
+        else "stream contract FAILED - see the missing/unknown symbols above"
+    )
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+    else:
+        print(f"replayed {len(bars)} bars and {len(books)} books as {len(frames)} exchange frames")
+        print(
+            f"  events   bars {stats.bars:4d}  books {stats.books:3d}  ticks {stats.ticks:4d}"
+            f"   decode errors {health['health']['decode_errors']}"
+        )
+        print(
+            f"  connection attempts {attempts['n']}  connects {health['health']['connects']}"
+            f"  error reconnects {health['health']['reconnects']}"
+            f"  gap-filled bars {health['health']['gaps_filled']}"
+        )
+        print(f"  last error: {health['health']['last_error'] or 'none'}")
+        print(f"  verdict: {report['verdict']}")
+        print("  live mode (`--live`) needs `pip install websockets` and exchange access;")
+        print("  this sandbox has neither, so the socket itself stays unexercised.")
+    return 0 if ok else 4
+
+
+def _run_live_stream(cfg: Any, args: argparse.Namespace) -> int:
+    """Try the real socket for a few seconds and report exactly what happens."""
+    from .data.stream import live_feed
+
+    feed = live_feed(cfg)
+    events: list[Any] = []
+
+    async def emit(kind: str, payload: Any) -> None:
+        events.append((kind, payload))
+
+    async def _main() -> str:
+        task = asyncio.create_task(feed.run(emit))
+        try:
+            await asyncio.wait_for(task, timeout=max(1.0, args.seconds))
+            return "socket closed on its own"
+        except TimeoutError:
+            feed.stop()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            return f"ran for {args.seconds:.0f}s"
+        except Exception as exc:  # noqa: BLE001 - this is a diagnostic command
+            return f"{type(exc).__name__}: {exc}"
+
+    outcome = asyncio.run(_main())
+    health = feed.health
+    report = {
+        "mode": "live",
+        "symbols": len(cfg.symbol_names()),
+        "events": len(events),
+        "connects": health.connects,
+        "reconnects": health.reconnects,
+        "last_error": health.last_error,
+        "outcome": outcome,
+    }
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+    else:
+        print(f"live stream: {outcome}")
+        print(f"  events received: {len(events)}  connects {health.connects}  reconnects {health.reconnects}")
+        print(f"  last socket error: {health.last_error or 'none'}")
+        print("  a real socket needs network access; without it this reports the error rather than pretending")
+    return 0 if events else 4
+
+
 def cmd_archive(args: argparse.Namespace) -> int:
     """Record a session into the Parquet archive, then report what is there."""
     from .backtest.parity import _event_rows  # noqa: F401 - keep imports honest
@@ -1285,6 +1547,7 @@ def main(argv: list[str] | None = None) -> int:
         "signals": cmd_signals,
         "slippage": cmd_slippage,
         "meta": cmd_meta,
+        "stream": cmd_stream,
     }
     if args.command in ("pause", "resume", "kill", "lockdown"):
         args.action = args.command

@@ -11,7 +11,8 @@ a capability that exists but has not cleared its gates is marked as such.
 | --- | --- |
 | 2 Architecture | single asyncio process, separate watchdog and dashboard, SQLite state + event log |
 | 3 Modes and paper→live switch | paper/testnet/live, separate DBs and keys, seven live gates, enforced ramp |
-| 4 Data layer | 1m base bars, derived 15m/1h, spike quarantine, staleness guards, gap detector, self-healing reconnect policy for the synthetic feed |
+| 4 Data layer | 1m base bars, derived 15m/1h, spike quarantine, staleness guards, gap detector, self-healing reconnect policy |
+| 4 Streaming feed | `WebSocketFeed`: injected transport, Binance frame decoding (closed klines, depth snapshots, trades), symbol canonicalisation, exponential backoff with jitter, REST gap fill on reconnect, health counters, `--feed stream` and a `stream` replay command |
 | 4 / 18.1 Archive | partitioned Parquet candles and order books, DuckDB views, idempotent rewrites, retention job, `spread_stats()` from recorded books |
 | 5 Strategies | S1 EMA trend (ADX), S2 mean reversion (BB+RSI), S3 Donchian breakout, regime detector |
 | 6 Execution & paper exchange | idempotent ids, safe retries, rate limiter, book-walk fills, latency, rejects, injected failures |
@@ -27,7 +28,7 @@ a capability that exists but has not cleared its gates is marked as such.
 | 11 Dashboard | live equity, positions, risk usage, signals with reasons, trades, event log, controls, PNG export |
 | 12 Reliability & security | crash recovery, reconciliation, structured logs with redaction, heartbeats, disk guards, scoped auto-resume |
 | 12 Inbound commands | Telegram router: chat-id whitelist, confirm step with TTL and single use, audit line per command, transport-agnostic |
-| 13 Testing | 287 tests: unit (core, data, execution, risk, venues, ai) + integration (engine, dashboard, reports, parity) |
+| 13 Testing | 356 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
 | 18.1 Book recording | recorded on every session (`RecordingFeed`), archived to Parquet, summarised as spread statistics |
 | 18.6 Experiment tracking | `experiments` table, deterministic run ids, trial log used by the multiple-testing report |
 | 18.8 NSE-ready seams | `MarketCalendar` + `NSECalendar`, `Instrument` (tick/lot/band), `NSECostModel` (STT, GST, stamp, DP), daily-expiring sessions, square-off scheduler, engine hooks |
@@ -45,8 +46,8 @@ a capability that exists but has not cleared its gates is marked as such.
 | **Sentiment overlay S5 (FinBERT)** | Needs a model download and a news feed, and is the easiest place to import prompt-injection or garbage data | offline FinBERT scoring job, headline source with dedupe, score as a size modifier only |
 | **Neural / sequence models (ladder rung 4)** | The plan allows rung 4 only if it beats rung 3 net of costs; rung 3 has not earned promotion, so rung 4 has nothing to beat | not before rung 3 wins |
 | **Live exchange connectivity** | This sandbox has no exchange access; untestable code on money paths is a liability | run `ccxt_live` against testnet with keys, then a 2-week paper soak |
-| **WebSocket streaming** | Free `ccxt` has no WS; `ccxt.pro` is paid | add a `ccxt.pro` or native-WS feed implementing the same `BaseFeed` |
-| **Historical backfill via REST** | Same connectivity problem; a half-tested paginator is worse than none | paginate `fetch_ohlcv`, resumable, validated against the live candle builder |
+| **A WebSocket session against a real exchange** | The feed, its decoders and its reconnect/gap-fill logic are written and tested, but this sandbox blocks the socket (it was tried: `ConnectionResetError`, three reconnects, no frames) | run `python -m tradebot stream --live` from a networked host and watch `describe()` |
+| **Historical backfill via REST** | Reconnect gap fill exists (`fetch_ohlcv` per missed window), but a full multi-month paginator is untested here | paginate `fetch_ohlcv`, resumable, validated against the live candle builder |
 | **Live Telegram transport** | The router and confirm flow are tested against a fake transport; the long-poll client needs a token and network | implement `get_updates`/`send_message` over `httpx`, point it at the router |
 | **NSE execution adapter** | The seams exist (calendar, costs, instruments, sessions, square-off), but no Indian broker API is implemented | Kite/Zerodha adapter behind the same `ExchangeAdapter` interface; verify tariff constants against current circulars |
 | **MLflow experiment backend** | Schema and holdout lock exist in SQLite; no MLflow dependency | wire `save_experiment` to MLflow's file backend |
@@ -70,6 +71,9 @@ a capability that exists but has not cleared its gates is marked as such.
   simulator's depth, not Binance's.
 * **Live adapter is unproven.** `ccxt_live.py` is written against the same interface
   but has not been run against an exchange from this repository.
+* **The stream feed has never held a real socket.** Every frame it has decoded came
+  from a recording, and the live transport is the one line of it that no test here
+  exercises end to end.
 * **The watchdog can only escalate in paper mode.** Flattening requires its own
   exchange client, which exists as `LiveWatchdogActions` but needs live keys.
 * **NSE cost constants must be verified.** They are constructor arguments, not gospel:
