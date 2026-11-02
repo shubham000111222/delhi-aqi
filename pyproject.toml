@@ -26,6 +26,9 @@ dependencies = [
 png = [
     "pillow>=10.0",
 ]
+tracking = [
+    "mlflow>=2.10",   # optional: `tradebot experiments --export DIR` writes a file store
+]
 data = [
     "pyarrow>=15.0",
     "duckdb>=1.0",

@@ -107,6 +107,25 @@ A strategy is promotable only if **all** of the following hold:
 
 If any check fails, the honest action is to change the strategy, not the gate.
 
+## Experiment tracking (MLflow)
+
+Every backtest, grid cell and signal screen is already logged in the `experiments` table.
+To compare them in MLflow:
+
+```bash
+python -m tradebot experiments                                  # what is logged
+python -m tradebot experiments --export ./mlruns                 # write the file store
+MLFLOW_ALLOW_FILE_STORE=true mlflow ui --backend-store-uri file://$PWD/mlruns
+```
+
+`MLFLOW_ALLOW_FILE_STORE=true` is not optional on MLflow 3: the file store is in
+maintenance mode and refuses to open without it. The export does not need MLflow
+installed; the flag is only for the UI.
+
+A string metric - a verdict like `NOT PROMOTABLE` - is written as a tag, not a metric,
+because MLflow rejects non-numeric metrics. The export prints how many were moved so the
+count is visible rather than surprising.
+
 ## The NSE broker (Kite Connect)
 
 `venues --venue nse` prints the seams and, at the end, whether there is a broker behind

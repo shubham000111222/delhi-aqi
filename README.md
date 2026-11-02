@@ -84,6 +84,7 @@ no API key is needed.
 | Backtest-vs-paper parity test on a recorded tape | done (`MATCH`, 22/22 decisions, 8/8 fills) | `backtest/parity.py`, `data/tape.py` |
 | Robustness suite: block bootstrap, full cost-stress rerun, buy-and-hold benchmark, attribution | done | `backtest/robustness.py` |
 | Multiple-testing log and deflated Sharpe | done | `robustness.py`, `core/store.py` (`experiments`) |
+| MLflow export of the experiment log (file store, verified by MLflow itself) | done | `ai/tracking.py` |
 | Signal library: 44 signals in 8 families, IC screening, correlation pruning, leakage tests | done | `ai/features.py`, `ai/signals.py`, `ai/ladder.py` |
 | Complexity ladder (baseline → ridge → gradient boosting) with a promotion rule | done, and it **promotes nothing** on this data | `ai/ladder.py` |
 | Model registry + model cards; S4 wired to an approved card | done, **no model is registered** | `ai/registry.py`, `strategies/ml_signal.py` |
@@ -220,6 +221,7 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | `tradebot meta --days N` | triple-barrier meta-labels, gate threshold search, promote/skip verdict |
 | `tradebot stream --minutes N` | replay a recorded session through the streaming feed and print its verdict |
 | `tradebot backfill --days N --write` | paginate historical candles into the archive and report coverage and gaps |
+| `tradebot experiments --export DIR` | list the experiment log and write it as an MLflow file store |
 | `tradebot telegram` | check the inbound-command wiring: token, chat id, does Telegram answer |
 | `tradebot venues --venue nse --notional 100000` | session state, square-off deadline, round-trip cost comparison |
 | `tradebot archive --record-minutes N` | persist a session to Parquet and query it with DuckDB |

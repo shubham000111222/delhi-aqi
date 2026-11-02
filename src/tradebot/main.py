@@ -505,6 +505,12 @@ def build_parser() -> argparse.ArgumentParser:
     arc.add_argument("--keep-days", type=int, default=None, help="delete book partitions older than this")
     arc.add_argument("--json", action="store_true")
 
+    exp = sub.add_parser("experiments", help="the experiment log, and an MLflow export of it")
+    exp.add_argument("--limit", type=int, default=200)
+    exp.add_argument("--strategy", default=None)
+    exp.add_argument("--export", default=None, metavar="DIR", help="write an MLflow file store here")
+    exp.add_argument("--json", action="store_true")
+
     bfl = sub.add_parser("backfill", help="paginate historical candles into the archive")
     bfl.add_argument("--symbols", default=None, help="comma-separated; default: config symbols")
     bfl.add_argument("--timeframe", default="1m")
@@ -1269,6 +1275,58 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     return 0 if ok else 4
 
 
+def cmd_experiments(args: argparse.Namespace) -> int:
+    """Show the experiment log, and export it into MLflow's file store layout."""
+    from .ai.tracking import export_from_store
+
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    try:
+        rows = store.experiments(limit=args.limit, strategy=args.strategy or None)
+        report = None
+        if args.export:
+            report = export_from_store(store, args.export, limit=args.limit)
+    finally:
+        store.close()
+
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "experiments": len(rows),
+                    "export": report.as_dict() if report else None,
+                    "runs": [
+                        {
+                            "run_id": row["run_id"],
+                            "kind": row["kind"],
+                            "strategy": row["strategy"],
+                            "created_at": row["created_at"],
+                            "metrics": row["metrics"],
+                        }
+                        for row in rows[:20]
+                    ],
+                },
+                indent=2,
+                default=str,
+            )
+        )
+        return 0
+    if not rows:
+        print("no experiments logged yet: run a backtest, sensitivity grid or signal screen")
+        return 0
+    print(f"{len(rows)} experiment(s) in {cfg.settings.db_path}")
+    for row in rows[:10]:
+        metrics = ", ".join(f"{k}={v}" for k, v in list(row["metrics"].items())[:4])
+        print(f"  {row['created_at'][:19]}  {row['kind']:12s} {row['strategy']:16s} {row['run_id'][:12]}  {metrics}")
+    if report is not None:
+        print(f"exported {report.runs} run(s): {report.metrics} metrics, {report.params} params, "
+              f"{report.tags} tags, {report.runs_as_tags} non-numeric metrics moved to tags")
+        print(f"  open with: {report.as_dict()['ui']}")
+        if report.skipped:
+            print(f"  skipped: {report.skipped}")
+    return 0
+
+
 def _frame_ts(frame: Any) -> datetime | None:
     """The instant an exchange frame refers to, if it says."""
     data = frame.get("data") if isinstance(frame, dict) else None
@@ -1750,6 +1808,7 @@ def main(argv: list[str] | None = None) -> int:
         "stream": cmd_stream,
         "telegram": cmd_telegram,
         "backfill": cmd_backfill,
+        "experiments": cmd_experiments,
     }
     if args.command in ("pause", "resume", "kill", "lockdown"):
         args.action = args.command
