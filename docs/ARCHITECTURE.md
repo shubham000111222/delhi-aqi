@@ -66,6 +66,45 @@ signal → RiskContext snapshot → RiskEngine.approve_entry (16 checks, returns
 * a **separate** intent on the same signal (a partial exit, then the target exit)
   carries a different `tag` → a different id.
 
+## Research and validation pipeline
+
+Nothing above changes when a strategy is validated; the validators are separate and read
+the same engine through the same store.
+
+```
+              ┌──────────────── backtest/ ────────────────┐
+  ReplayFeed ─┤ runner ─ metrics ─ gates                 │  single run
+  SyntheticFeed┤ walkforward (purged folds)              │  rolling OOS
+              │ sensitivity (grid + plateau shape)       │  parameter stability
+              │ robustness (bootstrap, 2x cost rerun,    │  is it real
+              │   benchmark, attribution, trial log)     │
+              │ parity (record → replay → diff)          │  is paper = live
+              └───────────────────────────────────────────┘
+
+              ┌──────────────── ai/ ──────────────────────┐
+  bars/books ─┤ features (32, causal, rolling-normalised)│
+              │ signals  (44 in 8 families)               │
+              │ screen   (IC on non-overlapping samples,   │
+              │   stability, cost-adjusted PnL, corr prune)│
+              │ ladder   (baseline → ridge → boosting)    │
+              │ registry (model cards; approval enforced) │
+              └───────────────┬───────────────────────────┘
+                              │ only an approved card
+                       strategies/ml_signal.py (S4) ──▶ Signal (still risk-sized)
+
+              ┌──────────────── venues/ ──────────────────┐
+              │ calendar · instruments · costs · session  │  NSE seams
+              │ square-off scheduler                      │
+              └───────────────────────────────────────────┘
+```
+
+Two boundaries are enforced by tests rather than convention:
+
+* `risk/` never imports `ai/` - a model cannot reach the risk engine.
+* `ai/` never imports `execution/`, `engine/` or `risk/` - a model cannot place an order
+  even if it wanted to. It can only produce a score, which a strategy may turn into a
+  candidate Signal that the risk engine then vetoes or sizes.
+
 ## Persistence
 
 SQLite (WAL) holds everything that must survive a restart:
@@ -78,7 +117,7 @@ SQLite (WAL) holds everything that must survive a restart:
 | `equity` | equity snapshots used for drawdown, Sharpe and the dashboard curve |
 | `kill_events`, `incidents` | kill-switch history and incident summaries |
 | `kv` | kill state, day/week start equity, peak equity, streak counters, ramp stage, heartbeat |
-| `experiments`, `holdout_uses` | backtest registry and holdout lock (schema ready) |
+| `experiments`, `holdout_uses` | experiment registry (every sensitivity cell, ladder level and screen run) and the holdout lock |
 
 On startup: kill level is loaded from the store (never cleared by a restart), open
 positions are adopted, and reconciliation runs before anything trades.

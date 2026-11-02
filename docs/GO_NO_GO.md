@@ -10,12 +10,16 @@ days old** (`tradebot live-check` regenerates it).
 - [ ] Out-of-sample profit factor > 1.3 after costs
 - [ ] Sharpe > 1.0 and max drawdown < 15%
 - [ ] At least 200 trades in the out-of-sample window
-- [ ] Still profitable at 2× fees and 2× slippage
+- [ ] Still profitable when the **backtest is rerun** at 2× fees (`tradebot robustness`), not merely after subtracting the extra fees
 - [ ] Monte Carlo 95th percentile drawdown < 20%
 - [ ] Results split by regime: bear (2022), range, bull — none carried by one period
-- [ ] Deflated Sharpe check recorded with the number of variants tried
+- [ ] Multiple-testing: the best Sharpe beats the maximum expected from luck alone over the number of trials in `experiments` (`tradebot sensitivity` prints both)
 - [ ] Holdout window touched exactly once, and the run is flagged in the database
-- [ ] Parity: one recorded live day replayed through the engine matches decision-for-decision
+- [ ] Parity: one recorded live day replayed through the engine matches decision-for-decision (`tradebot parity --minutes 1200` prints `MATCH`; a short run with zero decisions does not count)
+- [ ] Sensitivity: the parameter plateau is broad *and* its best cell is profitable
+- [ ] Signal screen: any model used reports its IC noise band, and no signal is treated as proven when its IC sits below that band
+- [ ] Leakage checks pass: shuffled labels collapse, far-shift IC is inside the noise band, and no single feature carries > 40% of the model's weight
+- [ ] Slippage model calibrated on real recorded books, and its calibration is not optimistic for more than 60% of fills
 
 ## Paper soak
 

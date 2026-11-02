@@ -79,6 +79,32 @@ test fails, roll back and stay at L1.
 **Canary rule:** any strategy or risk change runs in shadow (paper) mode for at least
 three days before promotion.
 
+## Re-validating before promoting anything
+
+Run these in order. Each one is allowed to say "no" - that is what they are for.
+
+```bash
+python -m tradebot backtest --days 10            # single run + gates
+python -m tradebot walk-forward --train-days 3 --test-days 1 --windows 3
+python -m tradebot sensitivity --strategy S1_ema_trend --days 2
+python -m tradebot robustness --days 4 --cost-multiplier 2
+python -m tradebot parity --minutes 1200         # must print MATCH
+python -m tradebot signals --days 1 --horizon 30 # screen + ladder + leakage checks
+python -m tradebot slippage --days 2             # measured vs assumed costs
+```
+
+A strategy is promotable only if **all** of the following hold:
+
+* OOS profit factor > 1.3, Sharpe > 1.0, max drawdown < 15%, at least 200 trades;
+* still profitable in the 2x-cost *rerun* (not the post-hoc subtraction);
+* MC p95 drawdown < 20%;
+* sensitivity verdict is a plateau, and the best cell is profitable;
+* parity prints `MATCH`;
+* multiple-testing: the best Sharpe beats what luck would produce over the number of
+  trials logged in the `experiments` table.
+
+If any check fails, the honest action is to change the strategy, not the gate.
+
 ## Fire drill (paper, monthly)
 
 ```bash

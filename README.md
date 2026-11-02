@@ -79,7 +79,19 @@ no API key is needed.
 | Backtest through the *same* engine, metrics, Monte Carlo, acceptance gates | done | `backtest/` |
 | Live-mode guards: two switches, typed confirmation, go/no-go record, key permissions, ramp | done (adapter path untested without keys) | `risk/live_guards.py` |
 | Live ccxt adapter | implemented, **not exercised here** (no exchange access from this sandbox) | `execution/adapters/ccxt_live.py` |
-| ML signal (S4), FinBERT sentiment (S5), walk-forward CV, Telegram command bot | **not built** — deliberately, see `docs/ROADMAP.md` | — |
+| Walk-forward validation with purged, embargoed folds | done | `backtest/walkforward.py` |
+| Parameter sensitivity grid with plateau / isolated-peak verdicts | done | `backtest/sensitivity.py` |
+| Backtest-vs-paper parity test on a recorded tape | done (`MATCH`, 22/22 decisions, 8/8 fills) | `backtest/parity.py`, `data/tape.py` |
+| Robustness suite: block bootstrap, full cost-stress rerun, buy-and-hold benchmark, attribution | done | `backtest/robustness.py` |
+| Multiple-testing log and deflated Sharpe | done | `robustness.py`, `core/store.py` (`experiments`) |
+| Signal library: 44 signals in 8 families, IC screening, correlation pruning, leakage tests | done | `ai/features.py`, `ai/signals.py`, `ai/ladder.py` |
+| Complexity ladder (baseline → ridge → gradient boosting) with a promotion rule | done, and it **promotes nothing** on this data | `ai/ladder.py` |
+| Model registry + model cards; S4 wired to an approved card | done, **no model is registered** | `ai/registry.py`, `strategies/ml_signal.py` |
+| Slippage recorder and calibrated slippage model | done (median 0.0, p95 +26 bps measured) | `execution/slippage.py` |
+| Parquet/DuckDB archive for candles and order books | done | `data/archive.py` |
+| Telegram command bot with whitelist and confirm step | done (transport not exercised here) | `alerts/commands.py` |
+| NSE-ready seams: calendar, instruments, cost model, sessions, square-off | done | `venues/` |
+| FinBERT sentiment (S5), live exchange connectivity, LLM journal in production | **not built** — see `docs/ROADMAP.md` | — |
 
 ## One code path
 
@@ -132,8 +144,29 @@ verdict: NOT PROMOTABLE
 That verdict is the system working as designed. S1–S3 are untuned reference
 implementations and the synthetic market is not a forecast of anything: the gates
 exist so that nobody ships a strategy because it "looks okay". Turnover alone
-(≈1.6% of equity in fees over ten days) is enough to kill an edge at 15-minute
+(≈2.8% of equity in fees over ten days) is enough to kill an edge at 15-minute
 signals, which is exactly the cost problem section 17.2 of the plan warns about.
+
+### The validation suite, on the same data
+
+Every one of these ran and every one of them agrees with the verdict above. They are
+reported here because a failing strategy that is *proved* to fail is the deliverable:
+
+| Check | Result |
+| --- | --- |
+| Walk-forward (3 windows × 1 day, seed 5) | Windows −2.04%, +0.21%, ... → compound **−1.42%**, "inconsistent"; OOS PF 0.20, Sharpe −11.4, 19 trades → **NOT PROMOTABLE** |
+| Parameter sensitivity (S1 × `ema_fast` 12/20/30) | Best cell −0.98%, neighbour median −1.0%, plateau share 0.67 → **"no edge — best cell is not profitable"** (a wide plateau of losses is still a loss) |
+| Parity (recorded tape, 1 200 minutes) | **MATCH**: 22/22 decisions, 8/8 fills, 24 984 tape events |
+| Robustness (4 days, 2× costs rerun) | Nominal +1.02%, at 2× costs **+0.03%** → survives by a rounding error, and the command says "thin margin" rather than PASS. 82% of gross P&L went to fees |
+| Benchmark | Strategy beat buy-and-hold by 1.4 points over 4 days — on a sample far too small to mean anything |
+| Signal screen (44 signals, 1 day, horizon 30 bars) | A handful survive; the IC noise band at 46 non-overlapping samples is ±0.29, so most survivors are labelled **thin**, not proven |
+| Complexity ladder | Baseline (IC-weighted) is retained; **ridge and boosting are rejected** — they lose money net of 10 bps a side where the baseline does not |
+| Slippage (2 days) | median 0.0 bps, p95 **+26 bps**, worst +36 bps — the number the backtester had been silently assuming was zero |
+
+That is what "the AI layer" looks like when it is not allowed to lie: forty-four
+candidate signals, a screen that throws most of them away, a gradient-boosted model that
+loses to a weighted average once costs are charged, and no model card committed. S4
+therefore returns no signals — and says why.
 
 ## Layout
 
@@ -141,15 +174,16 @@ signals, which is exactly the cost problem section 17.2 of the plan warns about.
 config/                settings.yaml · risk.yaml · strategies.yaml · symbols.yaml
 src/tradebot/
   core/                money (Decimal), models, clock, store (SQLite), bus, logging
-  data/                feed (synthetic / ccxt / replay), hub, series
+  data/                feed (synthetic / ccxt / replay), hub, series, tape, archive
   strategies/          base, ema_trend, meanrev, breakout, regime, indicators
   portfolio/           ledger, sizing
   risk/                engine (16 checks), killswitch, live_guards
-  execution/           order_manager, rate_limit, adapters/{base,paper,ccxt_live}
-  backtest/            metrics, runner (metrics + Monte Carlo + gates)
+  execution/           order_manager, rate_limit, slippage, adapters/{base,paper,ccxt_live}
+  venues/              calendar, instruments, costs, session, square-off (NSE seams)
+  backtest/            metrics, runner, walkforward, sensitivity, parity, robustness
   reporting/           daily report, tax ledger rows
-  ai/                  journal (template + optional grounded LLM)
-  alerts/              notifier (Telegram + dedupe)
+  ai/                  journal, features (32), signals (44), ladder, registry
+  alerts/              notifier (Telegram + dedupe), commands (inbound bot)
   watchdog/            watchdog process
   dashboard/           FastAPI app + single-page UI
   engine.py main.py
@@ -171,6 +205,14 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | `tradebot report` | build today's report now |
 | `tradebot pause` / `resume` / `kill` / `lockdown` | manual kill-switch controls |
 | `tradebot drill` | fire drill: flatten and measure time-to-flat |
+| `tradebot walk-forward --train-days N --test-days M --windows K` | rolling train/test windows, out-of-sample gates |
+| `tradebot sensitivity --strategy S1 --param ema_fast=12,20,30` | parameter grid with plateau / spike verdicts, every cell logged |
+| `tradebot parity --minutes N` | record a session, replay it, diff decisions and fills |
+| `tradebot robustness --days N --cost-multiplier 2` | bootstrap, full 2x-cost rerun, benchmark, attribution |
+| `tradebot signals --days N --horizon H` | feature store → 44-signal screen → complexity ladder → leakage tests |
+| `tradebot slippage --days N` | measured slippage distribution and a calibrated model |
+| `tradebot venues --venue nse --notional 100000` | session state, square-off deadline, round-trip cost comparison |
+| `tradebot archive --record-minutes N` | persist a session to Parquet and query it with DuckDB |
 
 `--mode paper|testnet|live`, `--feed synthetic|ccxt`, `--speed N` and `--config-dir`
 are accepted before or after the sub-command.

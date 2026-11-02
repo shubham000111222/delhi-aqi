@@ -15,7 +15,16 @@
 | 9 | **Entry plans are keyed by client order id** | two limit entries on the same symbol-strategy must not share a plan, and a fill that arrives inside `place_order` must still find it | `OrderManager.plans` + `plan_for(order_id)` |
 | 10 | **The dashboard can host the bot** | one command should give a working demo | `--no-bot` for read-only against a separately running bot |
 | 11 | **The LLM journal is template-first** | a report must never depend on an API call, and numbers must be checkable | every number in LLM output is cross-checked against the day's JSON or the template wins |
-| 12 | **Strategies S4/S5 are inert, not stubbed with fake signals** | a strategy that ships without validation teaches the wrong lesson | `MlSignal.evaluate` returns `None` and says so |
+| 12 | **Strategies S4/S5 are inert, not stubbed with fake signals** | a strategy that ships without validation teaches the wrong lesson | `MlSignal.evaluate` returns `None` until an approved model card exists |
+| 13 | **Sensitivity judges the sign before the shape** | a wide, smooth plateau of *negative* scores was being reported as "broad plateau", which reads like approval | best cell ≤ 0 ⇒ "no edge", whatever the shape |
+| 14 | **Parity needs a 1 200-minute tape, not 240** | short runs produced 0 decisions, so a "MATCH" proved nothing; the test now asserts decisions and fills are non-zero | parity is slow (minutes) and worth it |
+| 15 | **IC is measured on non-overlapping samples** | forward returns over a horizon overlap bar to bar; counting the same move H times inflates the IC and shrinks its standard error to fiction | fewer observations, an honest noise band printed alongside every IC |
+| 16 | **Fills are measured against the decision price** | the paper adapter used the fill price as the benchmark for market orders, so measured slippage was identically zero | `Order.reference_price`; slippage p95 is now +26 bps rather than 0 |
+| 17 | **Cost stress reruns the backtest instead of subtracting fees** | a 2× cost world also changes which orders fill and which stops trigger; post-hoc subtraction flatters the result | `tradebot robustness` runs the engine twice |
+| 18 | **No model card is committed, and `models/*.json` is gitignored** | a model trained on the synthetic generator would otherwise be able to trade after a `git pull` | `S4` reports `not_promoted` and returns nothing |
+| 19 | **Promotion of a more complex model is enforced in code** | a rule kept in a document is a rule that gets ignored the first time the complex model looks good | `ladder.promote()` needs +10% net expectancy, profitable, in every window |
+| 20 | **Venue abstractions before the venue** | §18.8 asks for the seams now so an NSE adapter is an adapter job, not a rewrite | `venues/` exists with no NSE broker adapter behind it |
+| 21 | **Order-book features go NaN when the snapshot is stale** | carrying a five-minute-old imbalance forward produces confident, wrong numbers | staleness limit of five bars, tested |
 
 ## Decisions I need from you (plan §17.4)
 
@@ -35,8 +44,10 @@
 
 ## Next three moves (in order)
 
-1. Get **real 1-minute history** for the five coins (backfill), then re-run the
-   backtest and the gates on real data. Expect some strategies to be rejected.
-2. Add the **walk-forward runner and parity test** so a strategy can be validated
-   properly, and start the 30-day paper soak on live prices (`--feed ccxt`).
-3. Only then consider testnet, keys, and the live ramp.
+1. Get **real 1-minute history** for the five coins (backfill into the Parquet archive),
+   then re-run `backtest`, `walk-forward`, `sensitivity`, `robustness` and `signals` on
+   real data. Expect most strategies to be rejected; the suite is built to say so.
+2. Start the **30-day paper soak** on live prices (`--feed ccxt`), recording books to the
+   archive so the slippage model is calibrated on a real venue instead of the simulator.
+3. Only then consider testnet, keys, and the live ramp - and only for a strategy that
+   cleared every gate, including the 2× cost rerun.
