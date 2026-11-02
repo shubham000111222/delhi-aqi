@@ -1,0 +1,40 @@
+# Paper trading stack. `docker compose up` runs the bot, its watchdog and the dashboard.
+# Nothing here can trade real money: LIVE_TRADING_ENABLED is false unless you change it,
+# and live mode additionally needs the confirmation and go/no-go gates.
+
+x-common: &common
+  build: .
+  image: tradebot:local
+  restart: unless-stopped
+  env_file:
+    - .env
+  volumes:
+    - ./config:/app/config:ro
+    - ./data:/app/data
+    - ./reports:/app/reports
+    - ./logs:/app/logs
+  working_dir: /app
+
+services:
+  bot:
+    <<: *common
+    container_name: tradebot-bot
+    command: ["python", "-m", "tradebot.main", "run"]
+    environment:
+      LIVE_TRADING_ENABLED: "false"
+
+  watchdog:
+    <<: *common
+    container_name: tradebot-watchdog
+    command: ["python", "-m", "tradebot.watchdog.watchdog"]
+    depends_on:
+      - bot
+
+  dashboard:
+    <<: *common
+    container_name: tradebot-dashboard
+    command: ["python", "-m", "tradebot.main", "dashboard", "--no-bot"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      - bot
