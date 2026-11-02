@@ -1,0 +1,883 @@
+"""SQLite persistence: state + an append-only event log.
+
+WAL mode, one file per mode (paper / testnet / live). Everything the bot needs to
+survive a restart lives here: kill-switch level, open orders, positions, equity,
+day-start equity, peak equity, loss streaks, ramp stage and the audit chain.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from datetime import datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+from .clock import iso, utc, utcnow
+from .models import (
+    EquitySnapshot,
+    Fill,
+    Order,
+    OrderStatus,
+    OrderType,
+    Position,
+    RiskVerdict,
+    Side,
+    Signal,
+    TimeInForce,
+)
+from .money import ZERO, D, money_json, to_str
+
+SCHEMA_VERSION = 1
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    level TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT 'bot',
+    payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind, ts);
+
+CREATE TABLE IF NOT EXISTS signals (
+    id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    stop TEXT,
+    target TEXT,
+    confidence TEXT,
+    reason TEXT,
+    payload TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS risk_verdicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    signal_id TEXT NOT NULL,
+    approved INTEGER NOT NULL,
+    reason TEXT,
+    failed_check TEXT,
+    payload TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+    client_order_id TEXT PRIMARY KEY,
+    exchange_order_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    qty TEXT NOT NULL,
+    price TEXT,
+    filled_qty TEXT NOT NULL DEFAULT '0',
+    avg_fill_price TEXT NOT NULL DEFAULT '0',
+    fee TEXT NOT NULL DEFAULT '0',
+    strategy TEXT,
+    signal_id TEXT,
+    payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS fills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    order_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    price TEXT NOT NULL,
+    qty TEXT NOT NULL,
+    fee TEXT NOT NULL,
+    liquidity TEXT,
+    payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fills_ts ON fills(ts);
+CREATE INDEX IF NOT EXISTS idx_fills_symbol ON fills(symbol, ts);
+
+CREATE TABLE IF NOT EXISTS positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    opened_at TEXT NOT NULL,
+    closed_at TEXT,
+    qty TEXT NOT NULL,
+    avg_entry TEXT NOT NULL,
+    exit_price TEXT,
+    exit_reason TEXT,
+    realized_pnl TEXT NOT NULL DEFAULT '0',
+    fees TEXT NOT NULL DEFAULT '0',
+    payload TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_positions_open
+    ON positions(symbol, strategy) WHERE closed_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS equity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    equity TEXT NOT NULL,
+    cash TEXT NOT NULL,
+    positions_value TEXT NOT NULL,
+    realized TEXT NOT NULL,
+    unrealized TEXT NOT NULL,
+    fees TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_equity_ts ON equity(ts);
+
+CREATE TABLE IF NOT EXISTS kv (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS kill_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    level TEXT NOT NULL,
+    previous TEXT,
+    trigger TEXT,
+    reason TEXT,
+    actor TEXT,
+    cooldown_until TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_kill_ts ON kill_events(ts);
+
+CREATE TABLE IF NOT EXISTS incidents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    level TEXT NOT NULL,
+    trigger TEXT,
+    summary TEXT,
+    payload TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS experiments (
+    run_id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    name TEXT,
+    strategy TEXT,
+    params TEXT,
+    data_hash TEXT,
+    git_commit TEXT,
+    split TEXT,
+    seed INTEGER,
+    metrics TEXT,
+    artifacts TEXT,
+    notes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS holdout_uses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    run_id TEXT,
+    override INTEGER NOT NULL DEFAULT 0,
+    notes TEXT
+);
+"""
+
+
+class Store:
+    def __init__(self, path: Path | str = ":memory:") -> None:
+        self.path = str(path)
+        if self.path != ":memory:":
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
+        self._conn.row_factory = sqlite3.Row
+        self._configure()
+        self._migrate()
+
+    # --- plumbing ---------------------------------------------------------
+    def _configure(self) -> None:
+        cur = self._conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA synchronous=NORMAL")
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.execute("PRAGMA busy_timeout=5000")
+
+    def _migrate(self) -> None:
+        with self._lock:
+            self._conn.executescript(_SCHEMA)
+            row = self._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+            if row is None:
+                self._conn.execute(
+                    "INSERT INTO meta(key,value) VALUES('schema_version',?)", (str(SCHEMA_VERSION),)
+                )
+            elif int(row["value"]) > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"database schema {row['value']} is newer than this code ({SCHEMA_VERSION}); "
+                    "roll back the image instead of downgrading the database"
+                )
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield self._conn
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+            else:
+                self._conn.execute("COMMIT")
+
+    def _exec(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
+        with self._lock:
+            return self._conn.execute(sql, tuple(params))
+
+    def _query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
+        with self._lock:
+            return list(self._conn.execute(sql, tuple(params)).fetchall())
+
+    # --- events (append-only) --------------------------------------------
+    def log_event(
+        self,
+        kind: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        level: str = "INFO",
+        actor: str = "bot",
+        ts: datetime | None = None,
+    ) -> int:
+        cur = self._exec(
+            "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+            (iso(ts or utcnow()), level, kind, actor, json.dumps(payload or {}, default=str)),
+        )
+        return int(cur.lastrowid or 0)
+
+    def events(
+        self,
+        limit: int = 200,
+        kinds: Iterable[str] | None = None,
+        since: datetime | None = None,
+        level: str | None = None,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM events WHERE 1=1"
+        params: list[Any] = []
+        if kinds:
+            kinds = list(kinds)
+            sql += f" AND kind IN ({','.join('?' * len(kinds))})"
+            params.extend(kinds)
+        if since:
+            sql += " AND ts >= ?"
+            params.append(iso(since))
+        if level:
+            sql += " AND level = ?"
+            params.append(level)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        rows = self._query(sql, params)
+        return [
+            {
+                "id": r["id"],
+                "ts": r["ts"],
+                "level": r["level"],
+                "kind": r["kind"],
+                "actor": r["actor"],
+                "payload": json.loads(r["payload"]),
+            }
+            for r in rows
+        ]
+
+    def count_events(self, kind: str, since: datetime | None = None) -> int:
+        if since:
+            row = self._query(
+                "SELECT COUNT(*) AS c FROM events WHERE kind=? AND ts>=?", (kind, iso(since))
+            )[0]
+        else:
+            row = self._query("SELECT COUNT(*) AS c FROM events WHERE kind=?", (kind,))[0]
+        return int(row["c"])
+
+    # --- signals and risk verdicts ---------------------------------------
+    def save_signal(self, signal: Signal) -> None:
+        self._exec(
+            """INSERT OR REPLACE INTO signals
+               (id,ts,strategy,symbol,side,timeframe,stop,target,confidence,reason,payload)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                signal.id,
+                iso(signal.ts),
+                signal.strategy,
+                signal.symbol,
+                signal.side.value,
+                signal.timeframe,
+                money_json(signal.stop),
+                money_json(signal.target),
+                to_str(signal.confidence, 4),
+                signal.reason,
+                json.dumps(signal.to_dict(), default=str),
+            ),
+        )
+
+    def save_verdict(self, signal_id: str, verdict: RiskVerdict, ts: datetime | None = None) -> None:
+        failed = verdict.failed[0].name if verdict.failed else None
+        self._exec(
+            """INSERT INTO risk_verdicts(ts,signal_id,approved,reason,failed_check,payload)
+               VALUES(?,?,?,?,?,?)""",
+            (
+                iso(ts or utcnow()),
+                signal_id,
+                int(verdict.approved),
+                verdict.reason,
+                failed,
+                json.dumps(verdict.to_dict(), default=str),
+            ),
+        )
+
+    def signals(self, limit: int = 100, since: datetime | None = None) -> list[dict[str, Any]]:
+        if since:
+            rows = self._query(
+                "SELECT * FROM signals WHERE ts>=? ORDER BY ts DESC LIMIT ?", (iso(since), limit)
+            )
+        else:
+            rows = self._query("SELECT * FROM signals ORDER BY ts DESC LIMIT ?", (limit,))
+        return [json.loads(r["payload"]) for r in rows]
+
+    def verdicts(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self._query("SELECT * FROM risk_verdicts ORDER BY id DESC LIMIT ?", (limit,))
+        return [
+            {
+                "ts": r["ts"],
+                "signal_id": r["signal_id"],
+                "approved": bool(r["approved"]),
+                "reason": r["reason"],
+                "failed_check": r["failed_check"],
+                "checks": json.loads(r["payload"]).get("checks", []),
+            }
+            for r in rows
+        ]
+
+    # --- orders / fills ---------------------------------------------------
+    def upsert_order(self, order: Order) -> None:
+        now = iso(utcnow())
+        self._exec(
+            """INSERT INTO orders(client_order_id,exchange_order_id,created_at,updated_at,symbol,side,
+                    type,status,qty,price,filled_qty,avg_fill_price,fee,strategy,signal_id,payload)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(client_order_id) DO UPDATE SET
+                    exchange_order_id=excluded.exchange_order_id,
+                    updated_at=excluded.updated_at,
+                    status=excluded.status,
+                    filled_qty=excluded.filled_qty,
+                    avg_fill_price=excluded.avg_fill_price,
+                    fee=excluded.fee,
+                    payload=excluded.payload""",
+            (
+                order.client_order_id,
+                order.exchange_order_id,
+                iso(order.created_at or utcnow()),
+                now,
+                order.symbol,
+                order.side.value,
+                order.type.value,
+                order.status.value,
+                to_str(order.qty),
+                money_json(order.price),
+                to_str(order.filled_qty),
+                to_str(order.avg_fill_price),
+                to_str(order.fee),
+                order.strategy,
+                order.signal_id,
+                json.dumps(order.to_dict(), default=str),
+            ),
+        )
+
+    def add_fill(self, fill: Fill) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """INSERT INTO fills(ts,order_id,symbol,side,price,qty,fee,liquidity,payload)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    iso(fill.ts),
+                    fill.order_id,
+                    fill.symbol,
+                    fill.side.value,
+                    to_str(fill.price),
+                    to_str(fill.qty),
+                    to_str(fill.fee),
+                    fill.liquidity,
+                    json.dumps(fill.to_dict(), default=str),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                (iso(fill.ts), "INFO", "fill", "execution", json.dumps(fill.to_dict(), default=str)),
+            )
+
+    def fills(
+        self,
+        limit: int = 500,
+        symbol: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM fills WHERE 1=1"
+        params: list[Any] = []
+        if symbol:
+            sql += " AND symbol=?"
+            params.append(symbol)
+        if since:
+            sql += " AND ts>=?"
+            params.append(iso(since))
+        if until:
+            sql += " AND ts<?"
+            params.append(iso(until))
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        return [json.loads(r["payload"]) for r in self._query(sql, params)]
+
+    def open_orders(self) -> list[dict[str, Any]]:
+        rows = self._query(
+            "SELECT * FROM orders WHERE status IN ('NEW','SUBMITTED','PARTIALLY_FILLED') ORDER BY created_at"
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
+    def orders(self, limit: int = 200) -> list[dict[str, Any]]:
+        rows = self._query("SELECT * FROM orders ORDER BY created_at DESC LIMIT ?", (limit,))
+        return [json.loads(r["payload"]) for r in rows]
+
+    def order_status_counts(self, since: datetime) -> dict[str, int]:
+        rows = self._query(
+            "SELECT status, COUNT(*) AS c FROM orders WHERE created_at>=? GROUP BY status", (iso(since),)
+        )
+        return {r["status"]: int(r["c"]) for r in rows}
+
+    # --- positions --------------------------------------------------------
+    def save_position(self, pos: Position) -> int:
+        payload = json.dumps(_position_payload(pos), default=str)
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT id FROM positions WHERE symbol=? AND strategy=? AND closed_at IS NULL",
+                (pos.symbol, pos.strategy),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE positions SET qty=?, avg_entry=?, realized_pnl=?, fees=?, payload=? WHERE id=?",
+                    (to_str(pos.qty), to_str(pos.avg_entry), to_str(pos.realized_pnl), to_str(pos.fees), payload, row["id"]),
+                )
+                return int(row["id"])
+            cur = conn.execute(
+                """INSERT INTO positions(symbol,strategy,opened_at,closed_at,qty,avg_entry,realized_pnl,fees,payload)
+                   VALUES(?,?,?,NULL,?,?,?,?,?)""",
+                (
+                    pos.symbol,
+                    pos.strategy,
+                    iso(pos.opened_at),
+                    to_str(pos.qty),
+                    to_str(pos.avg_entry),
+                    to_str(pos.realized_pnl),
+                    to_str(pos.fees),
+                    payload,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def close_position(
+        self, pos: Position, exit_price: Decimal, exit_reason: str, closed_at: datetime | None = None
+    ) -> None:
+        """Persist the closing side of a position with everything reports need.
+
+        The payload is denormalised on purpose: a closed trade must be readable
+        without joining back to the position and without recomputing R multiples.
+        """
+        risk = pos.avg_entry - pos.initial_stop
+        r_multiple = ((exit_price - pos.avg_entry) / risk) if risk > 0 else ZERO
+        payload = json.dumps(
+            _position_payload(pos)
+            | {
+                "exit_price": to_str(exit_price, 8),
+                "exit": to_str(exit_price, 8),
+                "entry": to_str(pos.avg_entry, 8),
+                "exit_reason": exit_reason,
+                "closed_at": iso(closed_at or utcnow()),
+                "pnl": to_str(pos.realized_pnl, 8),
+                "r_multiple": to_str(r_multiple, 4),
+            },
+            default=str,
+        )
+        self._exec(
+            """UPDATE positions SET closed_at=?, exit_price=?, exit_reason=?, qty=?, realized_pnl=?,
+                   fees=?, payload=?
+               WHERE symbol=? AND strategy=? AND closed_at IS NULL""",
+            (
+                iso(closed_at or utcnow()),
+                to_str(exit_price),
+                exit_reason,
+                to_str(pos.qty),
+                to_str(pos.realized_pnl),
+                to_str(pos.fees),
+                payload,
+                pos.symbol,
+                pos.strategy,
+            ),
+        )
+
+    def open_positions(self) -> list[Position]:
+        rows = self._query("SELECT * FROM positions WHERE closed_at IS NULL ORDER BY opened_at")
+        return [_position_from_row(r) for r in rows]
+
+    def closed_positions(self, since: datetime | None = None, limit: int = 1000) -> list[dict[str, Any]]:
+        if since:
+            rows = self._query(
+                "SELECT * FROM positions WHERE closed_at IS NOT NULL AND closed_at>=? ORDER BY closed_at DESC LIMIT ?",
+                (iso(since), limit),
+            )
+        else:
+            rows = self._query(
+                "SELECT * FROM positions WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT ?", (limit,)
+            )
+        out = []
+        for row in rows:
+            payload = json.loads(row["payload"])
+            payload.setdefault("closed_at", row["closed_at"])
+            payload.setdefault("exit_price", row["exit_price"])
+            payload.setdefault("exit_reason", row["exit_reason"])
+            payload.setdefault("pnl", payload.get("realized_pnl", "0"))
+            out.append(payload)
+        return out
+
+    # --- equity -----------------------------------------------------------
+    def add_equity(self, snap: EquitySnapshot) -> None:
+        self._exec(
+            "INSERT INTO equity(ts,equity,cash,positions_value,realized,unrealized,fees) VALUES(?,?,?,?,?,?,?)",
+            (
+                iso(snap.ts),
+                to_str(snap.equity),
+                to_str(snap.cash),
+                to_str(snap.positions_value),
+                to_str(snap.realized_pnl),
+                to_str(snap.unrealized_pnl),
+                to_str(snap.fees),
+            ),
+        )
+
+    def equity_series(self, since: datetime | None = None, limit: int = 5000) -> list[dict[str, Any]]:
+        if since:
+            rows = self._query("SELECT * FROM equity WHERE ts>=? ORDER BY ts LIMIT ?", (iso(since), limit))
+        else:
+            rows = self._query("SELECT * FROM equity ORDER BY ts DESC LIMIT ?", (limit,))
+            rows = list(reversed(rows))
+        return [
+            {
+                "ts": r["ts"],
+                "equity": D(r["equity"]),
+                "cash": D(r["cash"]),
+                "positions_value": D(r["positions_value"]),
+                "realized": D(r["realized"]),
+                "unrealized": D(r["unrealized"]),
+                "fees": D(r["fees"]),
+            }
+            for r in rows
+        ]
+
+    def equity_at(self, ts: datetime) -> Decimal | None:
+        rows = self._query("SELECT equity FROM equity WHERE ts<=? ORDER BY ts DESC LIMIT 1", (iso(ts),))
+        return D(rows[0]["equity"]) if rows else None
+
+    def last_equity(self) -> Decimal | None:
+        rows = self._query("SELECT equity FROM equity ORDER BY id DESC LIMIT 1")
+        return D(rows[0]["equity"]) if rows else None
+
+    def peak_equity(self) -> Decimal | None:
+        rows = self._query("SELECT MAX(CAST(equity AS REAL)) AS m FROM equity")
+        return D(rows[0]["m"]) if rows and rows[0]["m"] is not None else None
+
+    # --- kv (survives restart) -------------------------------------------
+    def kv_set(self, key: str, value: Any, ts: datetime | None = None) -> None:
+        self._exec(
+            "INSERT INTO kv(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, json.dumps(value, default=str), iso(ts or utcnow())),
+        )
+
+    def kv_get(self, key: str, default: Any = None) -> Any:
+        rows = self._query("SELECT value FROM kv WHERE key=?", (key,))
+        return json.loads(rows[0]["value"]) if rows else default
+
+    def kv_delete(self, key: str) -> None:
+        self._exec("DELETE FROM kv WHERE key=?", (key,))
+
+    # --- kill switch ------------------------------------------------------
+    def set_kill_state(
+        self,
+        level: str,
+        *,
+        trigger: str = "",
+        reason: str = "",
+        actor: str = "system",
+        cooldown_until: datetime | None = None,
+        ts: datetime | None = None,
+    ) -> None:
+        now = ts or utcnow()
+        previous = self.kill_level()
+        with self.transaction() as conn:
+            conn.execute(
+                """INSERT INTO kill_events(ts,level,previous,trigger,reason,actor,cooldown_until)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (
+                    iso(now),
+                    level,
+                    previous,
+                    trigger,
+                    reason,
+                    actor,
+                    iso(cooldown_until) if cooldown_until else None,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO kv(key,value,updated_at) VALUES('kill_state',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (
+                    json.dumps(
+                        {
+                            "level": level,
+                            "trigger": trigger,
+                            "reason": reason,
+                            "actor": actor,
+                            "ts": iso(now),
+                            "cooldown_until": iso(cooldown_until) if cooldown_until else None,
+                        }
+                    ),
+                    iso(now),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                (
+                    iso(now),
+                    "CRIT" if level in ("L2", "L3") else "WARN",
+                    "kill_switch",
+                    actor,
+                    json.dumps({"level": level, "previous": previous, "trigger": trigger, "reason": reason}),
+                ),
+            )
+
+    def kill_state(self) -> dict[str, Any]:
+        state = self.kv_get("kill_state", {"level": "L0"}) or {"level": "L0"}
+        state.setdefault("level", "L0")
+        return state
+
+    def kill_level(self) -> str:
+        return str(self.kill_state().get("level", "L0"))
+
+    def kill_history(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self._query("SELECT * FROM kill_events ORDER BY id DESC LIMIT ?", (limit,))
+        return [dict(r) for r in rows]
+
+    # --- incidents --------------------------------------------------------
+    def add_incident(
+        self,
+        level: str,
+        trigger: str,
+        summary: str,
+        payload: dict[str, Any] | None = None,
+        ts: datetime | None = None,
+    ) -> int:
+        payload = payload or {}
+        cur = self._exec(
+            "INSERT INTO incidents(ts,level,trigger,summary,payload) VALUES(?,?,?,?,?)",
+            (iso(ts or utcnow()), level, trigger, summary, json.dumps(payload, default=str)),
+        )
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                (
+                    iso(ts or utcnow()),
+                    "CRIT" if level in ("L2", "L3") else "WARN",
+                    "incident",
+                    "system",
+                    json.dumps({"level": level, "trigger": trigger, "summary": summary} | payload, default=str),
+                ),
+            )
+        return int(cur.lastrowid or 0)
+
+    def incidents(self, limit: int = 50, since: datetime | None = None) -> list[dict[str, Any]]:
+        if since:
+            rows = self._query(
+                "SELECT * FROM incidents WHERE ts>=? ORDER BY id DESC LIMIT ?", (iso(since), limit)
+            )
+        else:
+            rows = self._query("SELECT * FROM incidents ORDER BY id DESC LIMIT ?", (limit,))
+        return [
+            {
+                "id": r["id"],
+                "ts": r["ts"],
+                "level": r["level"],
+                "trigger": r["trigger"],
+                "summary": r["summary"],
+                "payload": json.loads(r["payload"]),
+            }
+            for r in rows
+        ]
+
+    # --- experiments (backtest tracking, section 18.6) --------------------
+    def save_experiment(
+        self,
+        run_id: str,
+        *,
+        kind: str,
+        name: str = "",
+        strategy: str = "",
+        params: dict[str, Any] | None = None,
+        data_hash: str = "",
+        git_commit: str = "",
+        split: str = "",
+        seed: int | None = None,
+        metrics: dict[str, Any] | None = None,
+        artifacts: dict[str, Any] | None = None,
+        notes: str = "",
+    ) -> None:
+        self._exec(
+            """INSERT OR REPLACE INTO experiments
+               (run_id,created_at,kind,name,strategy,params,data_hash,git_commit,split,seed,metrics,artifacts,notes)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                run_id,
+                iso(utcnow()),
+                kind,
+                name,
+                strategy,
+                json.dumps(params or {}, default=str),
+                data_hash,
+                git_commit,
+                split,
+                seed,
+                json.dumps(metrics or {}, default=str),
+                json.dumps(artifacts or {}, default=str),
+                notes,
+            ),
+        )
+
+    def experiments(self, limit: int = 100, strategy: str | None = None) -> list[dict[str, Any]]:
+        if strategy:
+            rows = self._query(
+                "SELECT * FROM experiments WHERE strategy=? ORDER BY created_at DESC LIMIT ?",
+                (strategy, limit),
+            )
+        else:
+            rows = self._query("SELECT * FROM experiments ORDER BY created_at DESC LIMIT ?", (limit,))
+        out = []
+        for r in rows:
+            item = dict(r)
+            for key in ("params", "metrics", "artifacts"):
+                item[key] = json.loads(item[key]) if item[key] else {}
+            out.append(item)
+        return out
+
+    def count_experiments(self, strategy: str) -> int:
+        row = self._query("SELECT COUNT(*) AS c FROM experiments WHERE strategy=?", (strategy,))[0]
+        return int(row["c"])
+
+    def holdout_locked(self, strategy: str) -> bool:
+        row = self._query("SELECT COUNT(*) AS c FROM holdout_uses WHERE strategy=?", (strategy,))[0]
+        return int(row["c"]) > 0
+
+    def record_holdout_use(
+        self, strategy: str, run_id: str = "", override: bool = False, notes: str = ""
+    ) -> None:
+        self._exec(
+            "INSERT INTO holdout_uses(ts,strategy,run_id,override,notes) VALUES(?,?,?,?,?)",
+            (iso(utcnow()), strategy, run_id, int(override), notes),
+        )
+
+    # --- housekeeping -----------------------------------------------------
+    def stats(self) -> dict[str, Any]:
+        tables = ("events", "signals", "orders", "fills", "positions", "equity", "incidents")
+        out: dict[str, Any] = {}
+        for t in tables:
+            out[t] = int(self._query(f"SELECT COUNT(*) AS c FROM {t}")[0]["c"])
+        out["kill_level"] = self.kill_level()
+        out["path"] = self.path
+        return out
+
+
+# --- (de)serialisation helpers -------------------------------------------
+def _position_payload(pos: Position) -> dict[str, Any]:
+    return {
+        "symbol": pos.symbol,
+        "strategy": pos.strategy,
+        "qty": to_str(pos.qty),
+        "avg_entry": to_str(pos.avg_entry),
+        "stop": to_str(pos.stop),
+        "target": to_str(pos.target),
+        "initial_stop": to_str(pos.initial_stop),
+        "opened_at": iso(pos.opened_at),
+        "bars_held": pos.bars_held,
+        "realized_pnl": to_str(pos.realized_pnl),
+        "fees": to_str(pos.fees),
+        "partial_taken": pos.partial_taken,
+        "trailing_stop": to_str(pos.trailing_stop) if pos.trailing_stop is not None else None,
+        "atr_at_entry": to_str(pos.atr_at_entry),
+        "stop_order_id": pos.stop_order_id,
+        "risk_per_unit": to_str(pos.risk_per_unit),
+        "initial_qty": to_str(pos.initial_qty),
+        "highest_price": to_str(pos.highest_price),
+    }
+
+
+def _position_from_row(row: sqlite3.Row) -> Position:
+    p = json.loads(row["payload"])
+    trailing = p.get("trailing_stop")
+    return Position(
+        symbol=p["symbol"],
+        strategy=p["strategy"],
+        qty=D(p["qty"]),
+        avg_entry=D(p["avg_entry"]),
+        stop=D(p["stop"]),
+        target=D(p["target"]),
+        initial_stop=D(p["initial_stop"]),
+        opened_at=datetime.fromisoformat(p["opened_at"].replace("Z", "+00:00")),
+        bars_held=int(p.get("bars_held", 0)),
+        realized_pnl=D(p.get("realized_pnl", "0")),
+        fees=D(p.get("fees", "0")),
+        partial_taken=bool(p.get("partial_taken", False)),
+        trailing_stop=D(trailing) if trailing else None,
+        atr_at_entry=D(p.get("atr_at_entry", "0")),
+        stop_order_id=p.get("stop_order_id"),
+        risk_per_unit=D(p.get("risk_per_unit", "0")),
+        initial_qty=D(p.get("initial_qty") or p["qty"]),
+        highest_price=D(p.get("highest_price", "0")),
+    )
+
+
+def order_from_dict(data: dict[str, Any]) -> Order:
+    return Order(
+        client_order_id=data["client_order_id"],
+        symbol=data["symbol"],
+        side=Side(data["side"]),
+        type=OrderType(data["type"]),
+        qty=D(data["qty"]),
+        price=D(data["price"]) if data.get("price") else None,
+        status=OrderStatus(data["status"]),
+        strategy=data.get("strategy", ""),
+        signal_id=data.get("signal_id", ""),
+        stop_price=D(data["stop_price"]) if data.get("stop_price") else None,
+        time_in_force=TimeInForce(data.get("time_in_force", "GTC")),
+        reduce_only=bool(data.get("reduce_only", False)),
+        exchange_order_id=data.get("exchange_order_id"),
+        filled_qty=D(data.get("filled_qty") or "0"),
+        avg_fill_price=D(data.get("avg_fill_price") or "0"),
+        fee=D(data.get("fee") or "0"),
+        created_at=utc(datetime.fromisoformat(data["created_at"].replace("Z", "+00:00")))
+        if data.get("created_at")
+        else None,
+    )

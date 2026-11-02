@@ -1,0 +1,31 @@
+# secrets
+.env
+*.pem
+*.key
+
+# runtime state / data / output
+data/
+reports/
+logs/
+*.db
+*.db-wal
+*.db-shm
+*.parquet
+*.duckdb
+KILL
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# os
+.DS_Store

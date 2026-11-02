@@ -1,0 +1,44 @@
+# Tradable universe. Rules below are *defaults*; at runtime the adapter replaces them
+# from the exchange (tick size, lot size, min notional, fees) and the risk engine always
+# uses the adapter's values, not these.
+symbols:
+  - symbol: BTC/USDT
+    enabled: true
+    strategy_timeframes: ["15m", "1h"]
+    tick_size: "0.1"
+    lot_step: "0.00001"
+    min_qty: "0.00001"
+    min_notional: "5"
+    basis: "BTC"
+  - symbol: ETH/USDT
+    enabled: true
+    strategy_timeframes: ["15m", "1h"]
+    tick_size: "0.01"
+    lot_step: "0.0001"
+    min_qty: "0.0001"
+    min_notional: "5"
+    basis: "ETH"
+  - symbol: SOL/USDT
+    enabled: true
+    strategy_timeframes: ["15m"]
+    tick_size: "0.01"
+    lot_step: "0.001"
+    min_qty: "0.001"
+    min_notional: "5"
+    basis: "SOL"
+  - symbol: BNB/USDT
+    enabled: true
+    strategy_timeframes: ["15m"]
+    tick_size: "0.01"
+    lot_step: "0.001"
+    min_qty: "0.001"
+    min_notional: "5"
+    basis: "BNB"
+  - symbol: XRP/USDT
+    enabled: true
+    strategy_timeframes: ["15m"]
+    tick_size: "0.0001"
+    lot_step: "0.1"
+    min_qty: "0.1"
+    min_notional: "5"
+    basis: "XRP"

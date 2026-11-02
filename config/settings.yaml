@@ -1,0 +1,101 @@
+# Runtime settings. Risk limits live in risk.yaml, strategy params in strategies.yaml,
+# tradable universe in symbols.yaml. Values here are safe defaults for paper trading.
+
+mode: paper                  # paper | testnet | live
+environment: dev
+
+quote_currency: USDT
+base_timeframe: 1m           # data / stop-monitoring / execution granularity
+strategy_timeframes: ["15m", "1h"]
+
+starting_capital_usdt: "1000"
+max_capital_usdt: "250"      # hard cap: the bot never deploys more than this, even if the account holds more
+
+# --- market data feed ---
+feed: synthetic              # synthetic | ccxt
+synthetic:
+  seed: 7
+  speed: 60                  # simulated seconds per real second (60 = 1 hour of market per minute)
+  start_ts: "2024-01-01T00:00:00Z"
+  equity_regime: mixed      # mixed | bull | bear | range
+ccxt:
+  exchange_id: binance
+  testnet: false
+  depth_levels: 20
+  rest_poll_seconds: 5
+
+# --- execution / paper exchange realism ---
+paper:
+  maker_fee: "0.001"
+  taker_fee: "0.001"
+  latency_ms: [100, 500]
+  api_fail_rate: "0.001"
+  reject_rate_min_notional: true
+  book_levels: 20
+  book_depth_usdt: "250000"
+
+# --- fees assumed for live (used by reports and cost tracking) ---
+live_fees:
+  maker: "0.001"
+  taker: "0.001"
+
+# --- data quality guards (section 4) ---
+data_quality:
+  stale_symbol_seconds: 15
+  stale_all_seconds: 60
+  spike_pct: "0.05"
+  ntp_max_drift_seconds: 1.0
+
+# --- reporting / scheduler ---
+report:
+  day_boundary_utc: "00:00"
+  display_timezone: Asia/Kolkata
+  dir: reports
+  send_within_seconds: 300
+
+alerts:
+  min_level: WARN            # INFO | WARN | CRIT
+  dedupe_seconds: 120
+
+# --- live-mode guards (section 3). All must pass or the bot refuses to start live. ---
+live_guards:
+  require_confirmation: true          # typed capital amount + the word LIVE
+  go_nogo_max_age_days: 14
+  require_withdrawals_disabled: true
+  require_ip_whitelist: true
+  ramp_multipliers: [0.10, 0.25, 0.50, 1.00]
+  ramp_min_days: [7, 7, 7, 0]
+  ramp_max_cost_slippage_ratio: "1.50"
+  require_reconciliation_clean: true
+
+# --- portfolio / allocator ---
+portfolio:
+  max_open_positions: 5
+  correlated_buckets:
+    major: [BTC/USDT, ETH/USDT, SOL/USDT]
+    alt: [BNB/USDT, XRP/USDT]
+  strategy_capital_weights:
+    S1_ema_trend: "0.40"
+    S2_meanrev: "0.25"
+    S3_breakout: "0.25"
+    S4_reserve: "0.10"
+
+# --- order lifecycle ---
+execution:
+  entry_timeout_seconds: 120      # limit entries are cancelled if unfilled by then
+  retry_attempts: 3               # only for safe errors (network / 429 / 5xx)
+  retry_backoff_seconds: 0.5
+  stop_placement_deadline_seconds: 3.0   # flatten if protection cannot be placed in time
+  health_check_seconds: 5.0
+  equity_snapshot_bars: 1
+  order_status_poll_seconds: 5.0
+
+# --- circuit / watchdog ---
+watchdog:
+  heartbeat_seconds: 2
+  heartbeat_lost_seconds: 10
+
+logging:
+  level: INFO
+  json: true
+  file: logs/tradebot.log

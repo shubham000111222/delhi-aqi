@@ -1,0 +1,58 @@
+# Hard risk limits (section 7). Every limit here is enforced by the risk engine and
+# may only be *loosened* through a logged change that takes effect after a 24h delay.
+
+# sizing
+risk_per_trade: "0.005"          # 0.5% of equity at stop
+per_symbol_exposure: "0.20"
+total_exposure: "0.60"
+correlated_bucket_exposure: "0.40"
+max_open_positions: 5
+compounding_cap_mult: "1.50"     # sizing equity never exceeds this x starting capital
+
+# execution guards
+max_spread_pct: "0.0015"         # 0.15%
+fat_finger_pct: "0.01"           # price within 1% of mid
+min_notional: "10"
+max_notional: "150"
+max_order_book_pct: "0.10"       # order size <= 10% of top-10 book depth
+orders_per_minute: 10
+orders_per_day: 300
+
+# loss handling
+consecutive_losses_halve: 4
+consecutive_losses_pause: 6
+consecutive_losses_pause_hours: 24
+daily_loss_stop_new_entries: "-0.02"
+daily_loss_flatten: "-0.03"
+weekly_loss_pause: "-0.05"
+max_drawdown_lockdown: "-0.10"
+cooldown_minutes_after_stop: 15
+time_stop_bars: 64               # close trades that go nowhere after N strategy bars
+
+# profit handling
+partial_tp_r: "1.5"
+partial_tp_fraction: "0.50"
+breakeven_after_partial: true
+trail_atr_mult: "3.0"
+profit_lock_half_size_at: "0.03"
+profit_lock_no_entries_at: "0.05"
+
+# stops
+atr_stop_mult: "1.75"
+min_stop_atr_mult: "1.5"
+max_stop_atr_mult: "2.0"
+stop_slippage_alert_mult: "2.0"  # fill worse than 2x expected slippage -> alert
+
+# tax / accounting (India: flat 30% on VDA gains, no loss set-off, 1% TDS on sales.
+# Verify current rules with a professional before real money.)
+tax_reserve_pct: "0.30"
+tds_pct_on_sales: "0.01"
+
+# circuit breakers
+exchange_error_rate_limit: "0.20"     # over 5 min
+exchange_error_rate_window_seconds: 300
+rejects_limit: 5
+rejects_window_seconds: 300
+clock_drift_max_seconds: 1.0
+disk_warn_pct: 0.80
+disk_pause_pct: 0.95
