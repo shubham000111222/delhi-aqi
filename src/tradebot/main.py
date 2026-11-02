@@ -464,6 +464,13 @@ def build_parser() -> argparse.ArgumentParser:
     sens.add_argument("--seed", type=int, default=None)
     sens.add_argument("--json", action="store_true")
 
+    mt = sub.add_parser("meta", help="meta-labelling: gate rule-based candidates with a second model")
+    mt.add_argument("--days", type=int, default=1)
+    mt.add_argument("--seed", type=int, default=1)
+    mt.add_argument("--horizon", type=int, default=30, help="forward horizon used by the screen")
+    mt.add_argument("--max-bars", type=int, default=120, help="vertical barrier for labels")
+    mt.add_argument("--json", action="store_true")
+
     slp = sub.add_parser("slippage", help="measure realised slippage and calibrate a model")
     slp.add_argument("--days", type=int, default=2)
     slp.add_argument("--seed", type=int, default=5)
@@ -997,6 +1004,66 @@ def _save_promoted_model(
     return {"saved": True, "path": str(path), "card": card.as_dict()}
 
 
+async def _run_meta(cfg: Config, days: int, seed: int | None, horizon: int, max_bars: int) -> dict[str, Any]:
+    """Candidates from the screened signals, then the meta-model that would gate them."""
+    from .ai.meta import evaluate_meta
+    from .ai.signals import evaluate, screen
+
+    _unused, frames, meta = await _collect_frames(cfg, days, seed)
+    import numpy as np
+
+    results: dict[str, Any] = {}
+    for symbol, frame in frames.items():
+        kept = screen(frame, primary_horizon=horizon).kept
+        if not kept:
+            results[symbol] = {"kept": 0, "reason": "no signals survived the screen"}
+            continue
+        # a candidate is any bar where the surviving signals agree on direction
+        votes = np.zeros(len(frame))
+        for spec in kept:
+            evaluation = evaluate(frame, spec, primary_horizon=horizon)
+            votes += np.sign(np.nan_to_num(spec.compute(frame))) * abs(evaluation.ic)
+        candidates = votes > 0
+        report, model, threshold = evaluate_meta(
+            frame, candidates=candidates, max_bars=max_bars, n_folds=3
+        )
+        results[symbol] = {
+            "kept_signals": [spec.name for spec in kept],
+            "candidates": int(candidates.sum()),
+            "report": report.as_dict(),
+            "model_ready": model.ready,
+            "threshold": threshold,
+        }
+    return {"days": days, "seed": seed, "horizon": horizon, "max_bars": max_bars,
+            "meta": meta, "symbols": results}
+
+
+def cmd_meta(args: argparse.Namespace) -> int:
+    """Meta-labelling: would a second model improve the trades the rules propose?"""
+    cfg = _config(args)
+    report = asyncio.run(_run_meta(cfg, args.days, args.seed, args.horizon, args.max_bars))
+    if args.json:
+        _print(report)
+        return 0
+
+    for symbol, data in report["symbols"].items():
+        print(f"{symbol}:")
+        if not data.get("report"):
+            print(f"  {data.get('reason', 'no data')}")
+            continue
+        row = data["report"]
+        print(f"  {data['candidates']} candidate setups from {len(data['kept_signals'])} signals")
+        print(f"  base win rate {row['base_rate']:.1%} | AUC {row['auc']:.3f} "
+              f"| folds {row['folds']}")
+        print(f"  gate at p>={row['threshold']:.2f}: takes {row['trades_taken']}, "
+              f"skips {row['trades_skipped']}")
+        print(f"  expectancy per trade: all {row['expectancy_all'] * 10_000:+.1f} bps | "
+              f"taken {row['expectancy_taken'] * 10_000:+.1f} bps | "
+              f"skipped {row['expectancy_skipped'] * 10_000:+.1f} bps")
+        print(f"  verdict: {row['verdict']}")
+    return 0
+
+
 def cmd_robustness(args: argparse.Namespace) -> int:
     cfg = _config(args)
     report = asyncio.run(_run_robustness(cfg, args.days, args.seed, args.cost_multiplier))
@@ -1217,6 +1284,7 @@ def main(argv: list[str] | None = None) -> int:
         "robustness": cmd_robustness,
         "signals": cmd_signals,
         "slippage": cmd_slippage,
+        "meta": cmd_meta,
     }
     if args.command in ("pause", "resume", "kill", "lockdown"):
         args.action = args.command

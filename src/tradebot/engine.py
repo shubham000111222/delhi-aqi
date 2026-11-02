@@ -139,6 +139,9 @@ class Engine:
 
         self.calendar: Any = AlwaysOpenCalendar()
         self.squareoff: Any = SquareOffScheduler(self.calendar)
+        # Sentiment overlay (§19.4): a *reduce-only* size modifier. None means "no news
+        # feed configured", which is the default and changes nothing.
+        self.sentiment: Any = None
         self._squareoff_done_for: str | None = None
         # fills the venue has booked but this process has not applied yet
         self.unapplied_fills = 0
@@ -446,6 +449,10 @@ class Engine:
                 actor="risk",
             )
             return
+        qty = decision.qty
+        if self.sentiment is not None:
+            qty = self._apply_sentiment(signal, qty, rules)
+
         plan = EntryPlan(
             symbol=signal.symbol,
             strategy=signal.strategy,
@@ -454,8 +461,41 @@ class Engine:
             signal_id=signal.id,
             atr=D(ctx.atr) if ctx.atr == ctx.atr else ZERO,
         )
-        await self.om.submit_entry(signal, decision.qty, price=decision.entry_price, plan=plan)
+        await self.om.submit_entry(signal, qty, price=decision.entry_price, plan=plan)
         self.stats.orders += 1
+
+    def _apply_sentiment(self, signal: Signal, qty: Decimal, rules: Any) -> Decimal:
+        """Sentiment may shrink an approved size. It may never grow it.
+
+        The risk engine has already decided what is acceptable; this can only take away.
+        If the modifier cuts the order to zero lots, the entry is skipped and the reason is
+        recorded, because a silently dropped order is worse than a logged one.
+        """
+        from .core.money import round_qty as _round_qty
+
+        try:
+            decision = self.sentiment.modifier(signal.symbol, self.clock.now())
+        except Exception as exc:  # noqa: BLE001 - a broken news feed must not stop trading
+            self._log("sentiment_error", {"symbol": signal.symbol, "error": str(exc)}, level="WARN",
+                      actor="sentiment")
+            return qty
+        multiplier = min(1.0, max(0.0, float(decision.get("multiplier", 1.0))))
+        if multiplier >= 0.999:
+            return qty
+        reduced = _round_qty(qty * D(str(multiplier)), rules.lot_step)
+        self._log(
+            "sentiment_sizing",
+            {
+                "symbol": signal.symbol,
+                "from_qty": str(qty),
+                "to_qty": str(reduced),
+                "multiplier": multiplier,
+                "reason": decision.get("reason", ""),
+                "sentiment_score": decision.get("score"),
+            },
+            actor="sentiment",
+        )
+        return reduced
 
     def _veto(self, name: str, detail: str):
         from .core.models import RiskCheck, RiskVerdict
