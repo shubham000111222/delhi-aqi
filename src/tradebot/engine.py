@@ -23,7 +23,7 @@ from decimal import Decimal
 from typing import Any
 
 from .config import Config, Mode
-from .core.clock import Clock, SimClock, iso, utc, utcnow
+from .core.clock import Clock, SimClock, iso, timeframe_seconds, utc, utcnow
 from .core.logging import JsonMessage, get_logger
 from .core.models import (
     Candle,
@@ -127,6 +127,9 @@ class Engine:
         self._consecutive_losses: dict[str, int] = {}
         self._last_day: str = ""
         self._last_health = 0.0
+        self._last_health_check: datetime | None = None
+        # fills the venue has booked but this process has not applied yet
+        self.unapplied_fills = 0
         self._last_snapshot: datetime | None = None
         self._equity_points = 0
         self._reconcile_state = "ok"
@@ -232,7 +235,14 @@ class Engine:
         await self.queue.put((kind, payload))
 
     def enqueue_fill(self, fill: Fill) -> None:
-        """Adapter fills arrive synchronously, possibly while the queue is full."""
+        """Adapter fills arrive synchronously, possibly while the queue is full.
+
+        The adapter has already moved its own cash by the time we get here, so the fill
+        is counted as unapplied until the engine loop books it. Reconciliation must not
+        compare the two ledgers in that window: it would report our own queue as a
+        mismatch and pause trading.
+        """
+        self.unapplied_fills += 1
         try:
             self.queue.put_nowait(("fill", fill))
         except asyncio.QueueFull:
@@ -315,6 +325,12 @@ class Engine:
                     actor="market",
                 )
         await self._snapshot_equity()
+        if isinstance(self.clock, SimClock) and self.clock.pace > 0:
+            # A *paced* simulated clock drives the dashboard demo: it has no wall time
+            # to wait on either, so the periodic health work (staleness, expiry,
+            # reconciliation) is driven by market minutes. An unpaced SimClock is a
+            # backtest, and a backtest must not depend on wall-clock health policies.
+            await self._market_health_check()
 
     async def _run_strategies(self, bar: Candle) -> None:
         series = self.market.candles(bar.symbol, bar.timeframe)
@@ -452,6 +468,7 @@ class Engine:
     # ------------------------------------------------------------------
     async def _on_fill(self, fill: Fill) -> None:
         self.stats.fills += 1
+        self.unapplied_fills = max(self.unapplied_fills - 1, 0)
         key = (fill.symbol, fill.strategy)
         pos_before = self.ledger.get(fill.symbol, fill.strategy)
         qty_before = pos_before.qty if pos_before else ZERO
@@ -713,9 +730,21 @@ class Engine:
     # ------------------------------------------------------------------
     # equity, health, kill switch
     # ------------------------------------------------------------------
-    async def _snapshot_equity(self) -> None:
+    async def _snapshot_equity(self, force: bool = False) -> None:
+        """One equity row per N market minutes, not one per symbol bar.
+
+        Bars arrive per symbol, so five symbols would otherwise write five identical
+        rows per minute. With the feed running hundreds of times faster than real time
+        that is the difference between a readable curve and a database that grows by
+        tens of megabytes an hour.
+        """
         marks = self.marks
         if not marks:
+            return
+        now = self.clock.now()
+        bars = max(int(self.cfg.settings.execution.equity_snapshot_bars), 1)
+        gap = timedelta(seconds=timeframe_seconds(self.cfg.settings.base_timeframe) * bars)
+        if not force and self._last_snapshot is not None and now - self._last_snapshot < gap:
             return
         snap = EquitySnapshot(
             ts=self.clock.now(),
@@ -805,6 +834,9 @@ class Engine:
 
     async def reconcile(self) -> str:
         """Compare the ledger with the venue. Any mismatch is an incident."""
+        if self.unapplied_fills > 0:
+            # the venue is ahead of us by design: our own fill queue has not drained
+            return "ok"
         try:
             balances = await self.adapter.get_balances()
         except Exception as exc:  # noqa: BLE001
@@ -822,12 +854,15 @@ class Engine:
         except Exception as exc:  # noqa: BLE001
             return f"open order query failed: {exc}"
         known = {entry.order.client_order_id for entry in self.om.pending.values()}
+        # a resting protective stop is ours, and it lives on the venue by design
+        known |= {pos.stop_order_id for pos in self.ledger.open_positions if pos.stop_order_id}
+        exit_types = (OrderType.LIMIT, OrderType.STOP_MARKET, OrderType.STOP_LIMIT)
         unknown = [
             o
             for o in open_orders
             if o.status.is_open
             and o.client_order_id not in known
-            and not (o.reduce_only and o.type is OrderType.LIMIT)
+            and not (o.reduce_only and o.type in exit_types)
         ]
         if unknown:
             detail = "unknown open orders: " + ", ".join(f"{o.symbol}:{o.client_order_id}" for o in unknown)
@@ -993,6 +1028,21 @@ class Engine:
                 await self.health_check()
             except Exception:  # noqa: BLE001
                 log.exception('{"event":"health_check_failed"}')
+
+    async def _market_health_check(self) -> None:
+        """Run the health check at most once per `health_check_seconds` of market time."""
+        interval = max(float(self.cfg.settings.execution.health_check_seconds), 1.0)
+        now = self.clock.now()
+        if (
+            self._last_health_check is not None
+            and (now - self._last_health_check).total_seconds() < interval
+        ):
+            return
+        self._last_health_check = now
+        try:
+            await self.health_check()
+        except Exception:  # noqa: BLE001 - health must never kill the trading loop
+            log.exception('{"event":"health_check_failed"}')
 
     # ------------------------------------------------------------------
     # controls (dashboard / CLI / telegram all call these)

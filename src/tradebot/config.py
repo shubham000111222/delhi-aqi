@@ -408,6 +408,7 @@ def load_config(
     *,
     environ: dict[str, str] | None = None,
     overrides: dict[str, Any] | None = None,
+    risk_overrides: dict[str, Any] | None = None,
 ) -> Config:
     """Load and validate every config file. Raises on any problem; nothing is guessed."""
     cdir = Path(config_dir)
@@ -418,7 +419,12 @@ def load_config(
     settings.config_dir = cdir
     settings.state_dir = Path(settings.data_dir) / "state"
 
-    risk = RiskLimits(**_read_yaml(cdir / "risk.yaml"))
+    risk_raw = _read_yaml(cdir / "risk.yaml")
+    if risk_overrides:
+        # only ever used to scale wall-clock *rate* limits for an accelerated feed;
+        # the hard envelope below is still enforced afterwards
+        risk_raw = {**risk_raw, **risk_overrides}
+    risk = RiskLimits(**risk_raw)
     risk.validate_envelope()
     strategies = StrategiesFile(**_read_yaml(cdir / "strategies.yaml"))
     symbols = SymbolsFile(**_read_yaml(cdir / "symbols.yaml"))

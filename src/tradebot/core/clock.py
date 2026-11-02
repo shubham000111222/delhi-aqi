@@ -51,11 +51,17 @@ class SimClock(Clock):
 
     Backtests and replays never block, and the engine code is unchanged:
     the paper adapter's 100-500 ms latency still lands on a later tick.
+
+    ``pace`` is simulated seconds per real second and is only used by the dashboard
+    demo: 0 (the default) means "never wait", which is what a backtest wants, while
+    pace=600 means an hour of market per minute of wall time. Even when paced, the
+    engine still measures every timeout, cooldown and day boundary on simulated time.
     """
 
-    def __init__(self, start: datetime | None = None) -> None:
+    def __init__(self, start: datetime | None = None, pace: float = 0.0) -> None:
         self._now = utc(start or utcnow())
         self._mono = 0.0
+        self.pace = float(pace)
 
     def now(self) -> datetime:
         return self._now
@@ -78,6 +84,8 @@ class SimClock(Clock):
 
     async def sleep(self, seconds: float) -> None:
         self.advance(seconds)
+        if self.pace > 0 and seconds > 0:
+            await asyncio.sleep(seconds / self.pace)
 
 
 TIMEFRAME_SECONDS: dict[str, int] = {

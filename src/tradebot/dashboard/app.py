@@ -71,11 +71,18 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if run_bot and state.engine is None:
+            from ..core.clock import SimClock, utcnow
             from ..data.feed import SyntheticFeed
             from ..engine import Engine
 
-            feed = SyntheticFeed(config, None)
-            state.engine = await Engine.build(config, feed=feed)
+            # A paced simulated clock: the demo advances `synthetic.speed` market
+            # seconds per real second, and every timeout, cooldown, staleness window
+            # and day boundary is measured on that one timeline.
+            speed = max(float(config.settings.synthetic.speed), 1.0)
+            clock = SimClock(utcnow(), pace=speed)
+            config.ensure_dirs()
+            feed = SyntheticFeed(config, clock)
+            state.engine = await Engine.build(config, clock=clock, feed=feed)
             state.store = state.engine.store
             state._task = asyncio.create_task(state.engine.run(), name="demo-engine")
         yield

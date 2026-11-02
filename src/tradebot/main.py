@@ -36,13 +36,26 @@ log = get_logger("tradebot.main")
 # ----------------------------------------------------------------------------
 def _config(args: argparse.Namespace) -> Config:
     overrides: dict[str, object] = {}
+    risk_overrides: dict[str, object] = {}
     if getattr(args, "mode", None):
         overrides["mode"] = args.mode
     if getattr(args, "feed", None):
         overrides["feed"] = args.feed
     if getattr(args, "speed", None):
         overrides["synthetic"] = {"speed": args.speed}
-    cfg = load_config(args.config_dir, overrides=overrides or None)
+        # Order-rate limits are wall-clock on purpose. A synthetic feed running faster
+        # than real time would trip them on replay volume alone, so scale the *limit*
+        # rather than the clock: the engine stays honest and the demo stays tradable.
+        speed = float(args.speed)
+        if speed > 1:
+            base = load_config(args.config_dir).risk
+            risk_overrides = {
+                "orders_per_minute": max(base.orders_per_minute, int(base.orders_per_minute * speed)),
+                "orders_per_day": max(base.orders_per_day, int(base.orders_per_day * speed)),
+            }
+    cfg = load_config(
+        args.config_dir, overrides=overrides or None, risk_overrides=risk_overrides or None
+    )
     level = "DEBUG" if getattr(args, "verbose", False) else cfg.settings.logging.level
     setup_logging(level, cfg.settings.logging.json_logs, cfg.settings.logging.file)
     return cfg
