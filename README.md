@@ -52,6 +52,7 @@ python -m tradebot backtest --days 10      # full engine run over synthetic data
 python -m tradebot drill                   # kill-switch fire drill, measures time-to-flat
 python -m tradebot metrics                 # metrics + validation gates for the paper DB
 python -m tradebot status                  # positions, kill switch, recent events
+python -m tradebot dashboard-png           # render the dashboard to reports/dashboard.png
 ```
 
 Everything runs on a **seeded synthetic market** by default: five coins, regime
@@ -73,7 +74,8 @@ no API key is needed.
 | Reconciliation against the venue every health tick | done | `engine.reconcile` |
 | Daily report (11 sections) → markdown, HTML, JSON, Telegram text, trades CSV, tax CSV | done | `reporting/daily.py` |
 | Tax reserve (30%) and TDS tracking for Schedule VDA records | done | `portfolio/ledger.py`, `reporting/` |
-| Dashboard: equity curve, positions, risk usage, signals with reasons, trades, event log, controls | done | `dashboard/` |
+| Dashboard: equity curve, positions, risk usage, signals with reasons, trades, event log, controls, live connection bar | done | `dashboard/` |
+| Dashboard PNG export for environments where a page will not render | done | `dashboard/render.py` |
 | Backtest through the *same* engine, metrics, Monte Carlo, acceptance gates | done | `backtest/` |
 | Live-mode guards: two switches, typed confirmation, go/no-go record, key permissions, ramp | done (adapter path untested without keys) | `risk/live_guards.py` |
 | Live ccxt adapter | implemented, **not exercised here** (no exchange access from this sandbox) | `execution/adapters/ccxt_live.py` |
@@ -97,8 +99,13 @@ path, the same risk vetoes and the same ledger as a live run.
 * **Fail closed.** If a live gate cannot be *verified*, it counts as failed.
 * **Risk first, then exposure caps.** Size = risk budget ÷ stop distance, then every
   cap is applied and the smallest wins; the binding constraint is recorded.
-* **Stop anything that looks wrong.** The kill switch escalates automatically and only
-  a human can reset it. L3 needs a written reason and a one-hour cooldown.
+* **Stop anything that looks wrong.** The kill switch escalates automatically. It comes
+  back down narrowly and on the record: an **L1** caused by a *transient
+  infrastructure* fault (stale feed, error-rate storm, reconciliation mismatch, disk)
+  lifts only after ten minutes of verified health, and the **daily** loss limit lifts at
+  the next trading day because its baseline is re-based. Everything else — the weekly
+  limit, a drawdown, a manual pause, L2 and L3 — needs a human. L3 also needs a written
+  reason and a one-hour cooldown. Every automatic change is written to the event log.
 * **Never trust memory.** Kill level, positions, equity and the audit chain live in
   SQLite; a restart adopts open positions instead of forgetting them.
 * **No secrets in logs.** Keys come from `.env` only, and a log filter redacts them.
@@ -112,13 +119,13 @@ Honest, small, and from synthetic data. Ten simulated days, five coins, default
 config, `python -m tradebot backtest --days 10`:
 
 ```
-closed trades 57 | win rate 36.8% | fees 16.35 USDT | end equity 987.77 (start 1000)
+closed trades 97 | win rate 38.1% | fees 27.69 USDT | end equity 971.23 (start 1000)
 validation gates:
-FAIL  out_of_sample_profit_factor  PF 0.96 >= 1.3
-FAIL  sharpe                       sharpe -8.33 >= 1.0
-PASS  max_drawdown                 max DD -6.18% <= 15%
-FAIL  trade_count                  57 trades >= 200
-PASS  monte_carlo_drawdown         MC p95 DD -7.01% <= 20%
+FAIL  out_of_sample_profit_factor  PF 0.91 >= 1.3
+FAIL  sharpe                       sharpe -9.77 >= 1.0
+PASS  max_drawdown                 max DD -7.63% <= 15%
+FAIL  trade_count                  97 trades >= 200
+PASS  monte_carlo_drawdown         MC p95 DD -8.02% <= 20%
 verdict: NOT PROMOTABLE
 ```
 
@@ -156,6 +163,7 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | --- | --- |
 | `tradebot check` | validate all config; print effective settings and secret presence |
 | `tradebot dashboard` | run the demo bot + dashboard (`--no-bot` for read-only) |
+| `tradebot dashboard-png` | render the live dashboard to a PNG, no browser needed (`--out`, `--url`) |
 | `tradebot backtest --days N` | deterministic synthetic run through the real engine, writes reports |
 | `tradebot metrics` | metrics, Monte Carlo and acceptance gates for the paper database |
 | `tradebot run` | paper trading on the configured feed until Ctrl-C |

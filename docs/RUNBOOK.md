@@ -3,6 +3,21 @@
 Keep a copy on your phone. Rehearse it once a month in paper mode, and once before
 going live. A runbook never practised is not a runbook.
 
+## The bot is at L1 and I did nothing
+
+Check the trigger first (`tradebot status`, or the dashboard pill):
+
+```
+daily_loss          -> it lifts by itself at the next trading day; do nothing
+stale_feeds         -> it lifts after 10 min of healthy feeds; check the feed if not
+exchange_error_rate -> it lifts after 10 min of a clean order rate; check the venue status page
+reconciliation      -> it lifts after 10 min of clean reconciles; investigate the mismatch
+disk_full           -> free space; it lifts once disk is under the warn threshold
+weekly_loss         -> needs you: review the week, then `tradebot resume`
+account_limit (other), manual, kill file, L2, L3 -> needs you
+```
+
+Every automatic change is in `kill_events` with trigger `auto_resume` and the reason.
 ## If something looks wrong, in this order
 
 1. **Stop adding risk.** Do not open trades manually.

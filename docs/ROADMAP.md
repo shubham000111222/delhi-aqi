@@ -18,8 +18,8 @@ missing capability is marked missing.
 | 8 Backtesting (engine + metrics + gates) | same-engine replay, Sharpe/Sortino/Calmar/DD/PF/expectancy, Monte Carlo, acceptance gates, post-tax view |
 | 10 Reporting | daily report (11 sections) → markdown/HTML/JSON/Telegram/trades CSV/tax CSV |
 | 11 Dashboard | live equity, positions, risk usage, signals with reasons, trades, event log, controls |
-| 12 Reliability & security | crash recovery, reconciliation, structured logs with redaction, heartbeats, disk guards |
-| 13 Testing | 102 tests: unit (core, data, execution, risk) + integration (engine, dashboard, reports) |
+| 12 Reliability & security | crash recovery (positions adopted by the venue simulator), reconciliation, structured logs with redaction, heartbeats, disk guards, scoped auto-resume |
+| 13 Testing | 109 tests: unit (core, data, execution, risk) + integration (engine, dashboard, reports) |
 
 ## Not built (and what it would take)
 

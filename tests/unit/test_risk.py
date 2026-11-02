@@ -319,7 +319,8 @@ class TestErrorRateBreaker:
 
 
 class TestAutoResume:
-    """A time-boxed pause must lift by itself; a human decision must not."""
+    """Recovery must match the plan: daily limit resets with the day, infrastructure
+    faults lift after sustained health, and risk breaches need a human."""
 
     async def _engine(self, cfg, clock):
         from tradebot.data.feed import SyntheticFeed
@@ -332,35 +333,49 @@ class TestAutoResume:
         engine.store.kv_set("day_start_equity", str(day_start))
         engine.store.kv_set("week_start_equity", str(day_start))
 
-    async def test_daily_loss_pause_lifts_after_a_healthy_day(self, cfg):
+    async def test_daily_loss_pause_lifts_at_the_next_day(self, cfg):
         clock = SimClock(NOW)
         engine = await self._engine(cfg, clock)
-        # a -2.5% day pauses new entries
+        # a -2.5% day stops new entries, triggered by the engine's own limit check
         self._breach_day(engine, engine.ledger.cash * D("1.025"))
-        engine.killswitch.trigger(KillLevel.L1, trigger="account_limit", reason="daily loss -2.50%")
-        await engine.health_check()
+        engine._check_account_limits(engine.equity())
         assert engine.killswitch.level is KillLevel.L1
+        assert engine.killswitch.state["trigger"] == "daily_loss"
 
-        # the day rolls over: the baseline is re-based, so the limit is satisfied again
+        # still the same day: nothing lifts it
+        await engine.health_check()
+        engine._resume_daily_limit_at_day_boundary(clock.now())
+        assert engine.killswitch.level is KillLevel.L1, "a risk pause must not lift early"
+
+        # the day rolls over and the baseline is re-based, so the limit is satisfied
+        clock.advance(2 * 86_400)
         self._breach_day(engine, engine.ledger.cash)
-        await engine.health_check()
-        assert engine.killswitch.level is KillLevel.L1, "one instant of health is not enough"
-        clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds + 1)
-        await engine.health_check()
+        engine._resume_daily_limit_at_day_boundary(clock.now())
         assert engine.killswitch.level is KillLevel.L0
         assert engine.killswitch.state["trigger"] == "auto_resume"
         assert any(
             e["kind"] == "kill_switch_auto_resume" for e in engine.store.events(limit=20)
         ), "an automatic resume must be in the audit log"
 
-    async def test_pause_holds_while_the_loss_still_breaches(self, cfg):
+    async def test_daily_limit_holds_if_the_day_is_still_underwater(self, cfg):
         clock = SimClock(NOW)
         engine = await self._engine(cfg, clock)
         self._breach_day(engine, engine.ledger.cash * D("1.025"))
-        engine.killswitch.trigger(KillLevel.L1, trigger="account_limit", reason="daily loss -2.50%")
+        engine._check_account_limits(engine.equity())
+        for _ in range(3):
+            clock.advance(86_400)
+            engine._resume_daily_limit_at_day_boundary(clock.now())
+        assert engine.killswitch.level is KillLevel.L1, "re-basing is checked, not assumed"
+
+    async def test_weekly_loss_needs_a_human(self, cfg):
+        clock = SimClock(NOW)
+        engine = await self._engine(cfg, clock)
+        self._breach_day(engine, engine.ledger.cash * D("1.025"))
+        engine.killswitch.trigger(KillLevel.L1, trigger="weekly_loss", reason="weekly loss -5.20%")
         for _ in range(5):
             await engine.health_check()
-            clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds)
+            clock.advance(86_400)
+            engine._resume_daily_limit_at_day_boundary(clock.now())
         assert engine.killswitch.level is KillLevel.L1
 
     async def test_manual_pause_never_auto_resumes(self, cfg):
@@ -375,8 +390,21 @@ class TestAutoResume:
     async def test_flatten_levels_never_auto_resume(self, cfg):
         clock = SimClock(NOW)
         engine = await self._engine(cfg, clock)
-        engine.killswitch.trigger(KillLevel.L2, trigger="account_limit", reason="daily loss -3.50%")
+        engine.killswitch.trigger(KillLevel.L2, trigger="daily_loss", reason="daily loss -3.50%")
         for _ in range(5):
             await engine.health_check()
-            clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds)
+            clock.advance(86_400)
+            engine._resume_daily_limit_at_day_boundary(clock.now())
         assert engine.killswitch.level is KillLevel.L2
+
+    async def test_infrastructure_pause_lifts_after_sustained_health(self, cfg):
+        clock = SimClock(NOW)
+        engine = await self._engine(cfg, clock)
+        engine.killswitch.trigger(KillLevel.L1, trigger="exchange_error_rate", reason="storm")
+        engine._reconcile_state = "ok"
+        # one instant of health is not enough
+        await engine.health_check()
+        assert engine.killswitch.level is KillLevel.L1
+        clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds + 1)
+        await engine.health_check()
+        assert engine.killswitch.level is KillLevel.L0

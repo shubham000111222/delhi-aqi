@@ -781,7 +781,7 @@ class Engine:
         )
         for reason, level in self.risk.account_alerts(ctx):
             if self.killswitch.level.rank < level.rank:
-                self.killswitch.trigger(level, trigger="account_limit", reason=reason)
+                self.killswitch.trigger(level, trigger=_limit_trigger(reason), reason=reason)
                 if level.rank >= KillLevel.L2.rank:
                     asyncio.create_task(self.flatten_all(reason))
 
@@ -802,7 +802,7 @@ class Engine:
         errors = self.store.count_events("order_error", since=now - window)
         submitted = self.store.count_events("order_submitted", since=now - window)
         attempts = errors + submitted
-        error_rate = errors / attempts if attempts else 0.0
+        error_rate = self._order_error_rate(now)
         min_samples = self.cfg.risk.exchange_error_rate_min_samples
 
         if all_stale and self.stats.ticks > 0:
@@ -847,22 +847,28 @@ class Engine:
         }
         return health
 
-    #: L1 causes that are allowed to lift on their own once the condition is gone.
-    #: Anything else (a manual pause, a kill file, an operator lockdown) needs a human.
+    #: L1 causes that may lift on their own once the condition has been gone for
+    #: `auto_resume_min_healthy_seconds` (plan §: infrastructure only). A risk breach is
+    #: not in here: the daily limit is handled at the day boundary, and the weekly limit
+    #: and the drawdown lockdown need a human to review and reset.
     AUTO_RESUME_TRIGGERS = frozenset(
-        {"account_limit", "stale_feeds", "exchange_error_rate", "reconciliation", "disk_full"}
+        {"stale_feeds", "exchange_error_rate", "reconciliation", "disk_full"}
     )
 
     async def _maybe_auto_resume(
-        self, *, all_stale: bool, error_rate: float, disk_used: float, now: datetime | None = None
+        self,
+        *,
+        all_stale: bool | None = None,
+        error_rate: float | None = None,
+        disk_used: float | None = None,
+        now: datetime | None = None,
     ) -> None:
-        """Lift an L1 pause once its cause is gone and health has held for long enough.
+        """Lift an L1 pause caused by a transient infrastructure fault.
 
-        A daily-loss pause is time-boxed: at the day boundary `day_start_equity` is
-        re-based, so the limit is satisfied again. Without this the bot would sit
-        paused for ever after one bad day, which in the demo looks exactly like a dead
-        dashboard. L2/L3 are never touched, and a pause we do not recognise is left to
-        the operator.
+        The plan is specific about this: only L1, only for feed/API/network causes, and
+        only after at least ten minutes of sustained health. L2 and L3 never lift, and a
+        pause this engine does not recognise is left to the operator. The evidence can
+        be passed in (the health check already computed it) or measured here.
         """
         if self.killswitch.level is not KillLevel.L1:
             self._healthy_since = None
@@ -873,20 +879,20 @@ class Engine:
             return
 
         now = now or self.clock.now()
-        equity = self.equity()
-        day_start = D(str(self.store.kv_get("day_start_equity", to_str(equity))))
-        week_start = D(str(self.store.kv_get("week_start_equity", to_str(equity))))
-        daily_pct = (equity - day_start) / day_start if day_start > 0 else ZERO
-        weekly_pct = (equity - week_start) / week_start if week_start > 0 else ZERO
+        if all_stale is None:
+            all_stale = self.market.all_stale(now, self.cfg.settings.data_quality.stale_all_seconds)
+        if error_rate is None:
+            error_rate = self._order_error_rate(now)
+        if disk_used is None:
+            disk = shutil.disk_usage(str(self.cfg.settings.data_dir))
+            disk_used = disk.used / disk.total if disk.total else 0.0
 
         healthy = {
-            "account_limit": daily_pct > self.cfg.risk.daily_loss_stop_new_entries
-            and weekly_pct > self.cfg.risk.weekly_loss_pause,
             "stale_feeds": not all_stale,
             "exchange_error_rate": error_rate < float(self.cfg.risk.exchange_error_rate_limit),
             "reconciliation": self._reconcile_state == "ok",
             "disk_full": disk_used < self.cfg.risk.disk_warn_pct,
-        }.get(trigger, False)
+        }[trigger]
         if not healthy:
             self._healthy_since = None
             return
@@ -895,21 +901,52 @@ class Engine:
             self._healthy_since = now
             return
         required = float(self.cfg.settings.execution.auto_resume_min_healthy_seconds)
-        if (now - self._healthy_since).total_seconds() < required:
+        held = (now - self._healthy_since).total_seconds()
+        if held < required:
             return
-        reason = (
-            f"{trigger} cleared and health held for "
-            f"{(now - self._healthy_since).total_seconds() / 60:.0f} min"
-        )
+        self._resume(reason=f"{trigger} cleared; health held {held / 60:.0f} min", now=now)
+
+    def _resume_daily_limit_at_day_boundary(self, now: datetime) -> None:
+        """The daily loss limit is scoped to a day, so a new day lifts it.
+
+        `_check_day_boundary` re-bases `day_start_equity`, which makes the limit
+        satisfied again. Nothing else may clear it: a weekly loss or a drawdown needs a
+        human, which is why only the `daily_loss` trigger is handled here. This runs off
+        market time, so it behaves identically in a backtest and in a paced demo.
+        """
+        if self.killswitch.level is not KillLevel.L1:
+            return
+        trigger = str(self.killswitch.state.get("trigger", ""))
+        if trigger != "daily_loss":
+            return
+        equity = self.equity()
+        day_start = D(str(self.store.kv_get("day_start_equity", to_str(equity))))
+        if day_start > 0 and (equity - day_start) / day_start <= self.cfg.risk.daily_loss_stop_new_entries:
+            return
+        self._resume(reason="new trading day; daily loss limit reset", now=now)
+
+    def _resume(self, *, reason: str, now: datetime) -> None:
         if self.killswitch.auto_resume(reason=reason):
-            self._healthy_since = None
+            self._reconcile_state = self._reconcile_state or "ok"
             self.store.log_event(
                 "kill_switch_auto_resume",
-                {"trigger": trigger, "reason": reason, "equity": to_str(equity, 2)},
+                {
+                    "trigger": self.killswitch.state.get("trigger", ""),
+                    "reason": reason,
+                    "equity": to_str(self.equity(), 2),
+                    "market_time": iso(now),
+                },
                 level="WARN",
                 actor="engine",
                 ts=now,
             )
+
+    def _order_error_rate(self, now: datetime) -> float:
+        window = timedelta(seconds=self.cfg.risk.exchange_error_rate_window_seconds)
+        errors = self.store.count_events("order_error", since=now - window)
+        submitted = self.store.count_events("order_submitted", since=now - window)
+        attempts = errors + submitted
+        return errors / attempts if attempts else 0.0
 
     async def reconcile(self) -> str:
         """Compare the ledger with the venue. Any mismatch is an incident."""
@@ -990,6 +1027,7 @@ class Engine:
         self.store.kv_set("last_day", day)
         self.store.kv_set("day_start_equity", to_str(equity, 8))
         self.om.reset_windows()
+        self._resume_daily_limit_at_day_boundary(now)
         if utc(now).weekday() == 0:
             self.store.kv_set("week_start_equity", to_str(equity, 8))
 
@@ -1168,6 +1206,25 @@ class Engine:
 
     def close(self) -> None:
         self.store.close()
+
+
+#: Reason text -> the limit that produced it. The reason strings are written in
+#: RiskEngine.account_alerts; naming the limit lets recovery treat the daily limit (which
+#: resets at midnight) differently from the weekly limit and the drawdown lockdown (which
+#: need a human).
+_LIMIT_TRIGGERS = (
+    ("daily loss", "daily_loss"),
+    ("weekly loss", "weekly_loss"),
+    ("drawdown", "drawdown_limit"),
+)
+
+
+def _limit_trigger(reason: str) -> str:
+    lowered = reason.lower()
+    for prefix, trigger in _LIMIT_TRIGGERS:
+        if lowered.startswith(prefix):
+            return trigger
+    return "account_limit"
 
 
 def _parse(text: str) -> datetime:

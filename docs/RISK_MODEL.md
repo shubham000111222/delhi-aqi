@@ -41,7 +41,7 @@ stop out together — above the −2% "stop new entries" line, below the −3% f
 | Fill worse than 2× expected slippage | WARN + cost assumption update |
 | 4 consecutive losses in a strategy | size × 0.5 for that strategy |
 | 6 consecutive losses | strategy paused 24 h |
-| Day −2% | no new entries; existing positions keep their stops (L1) |
+| Day −2% | no new entries; existing positions keep their stops (L1). Lifts at the next trading day, when the day baseline is re-based |
 | Day −3% | flatten everything (L2) |
 | Week −5% | everything paused until reviewed (L1, manual reset) |
 | −10% from peak equity | lockdown (L3): flatten + 1 h cooldown + written reason |
@@ -63,9 +63,20 @@ stop out together — above the −2% "stop new entries" line, below the −3% f
 | Level | Meaning | How it is cleared |
 | --- | --- | --- |
 | L0 | normal | — |
-| L1 PAUSE | no new entries, positions keep their stops | `/resume`, CLI `resume`, dashboard |
+| L1 PAUSE | no new entries, positions keep their stops | `/resume`, CLI `resume`, dashboard — or automatically, when the cause is scoped and gone (below) |
 | L2 FLATTEN | cancel everything, close positions at market | manual reset after review |
 | L3 LOCKDOWN | L2 + no restart | written reason + 1 h cooldown + manual reset |
+
+**What may clear an L1 by itself.** Escalation is automatic; de-escalation is narrow and
+recorded. Only these two paths exist, both written to `kill_events` and the event log:
+
+| Cause | Clears when | Why it is safe |
+| --- | --- | --- |
+| `daily_loss` | the next trading day, after `day_start_equity` is re-based and the limit is verified satisfied | the limit is defined against day-start equity, so a new day makes it true again by construction |
+| `stale_feeds`, `exchange_error_rate`, `reconciliation`, `disk_full` | after `execution.auto_resume_min_healthy_seconds` (default 600 s) of *verified* health | a transient fault, not a risk breach; the condition is re-checked, never assumed |
+
+The weekly loss limit, a drawdown, a manual pause, a KILL file and everything at L2/L3 are
+never cleared automatically — those are decisions a human has to make.
 
 Automatic triggers, all persisted in SQLite so a restart cannot clear them:
 
