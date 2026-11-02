@@ -464,6 +464,20 @@ def build_parser() -> argparse.ArgumentParser:
     sens.add_argument("--seed", type=int, default=None)
     sens.add_argument("--json", action="store_true")
 
+    sig = sub.add_parser("signals", help="feature store, signal library, IC screen, complexity ladder")
+    sig.add_argument("--days", type=int, default=2)
+    sig.add_argument("--seed", type=int, default=1)
+    sig.add_argument("--horizon", type=int, default=4, help="forward horizon in bars")
+    sig.add_argument("--folds", type=int, default=3, help="purged walk-forward windows")
+    sig.add_argument("--min-ic", type=float, default=0.01)
+    sig.add_argument("--json", action="store_true")
+
+    rb = sub.add_parser("robustness", help="bootstrap, cost stress, benchmark and attribution")
+    rb.add_argument("--days", type=int, default=10)
+    rb.add_argument("--seed", type=int, default=5)
+    rb.add_argument("--cost-multiplier", type=float, default=2.0)
+    rb.add_argument("--json", action="store_true")
+
     arc = sub.add_parser("archive", help="Parquet candle/book archive (write a session, inspect, prune)")
     arc.add_argument("--root", default=None, help="archive directory (default: <data_dir>/archive)")
     arc.add_argument("--record-minutes", type=int, default=0, help="record a session of this length")
@@ -552,10 +566,32 @@ def cmd_sensitivity(args: argparse.Namespace) -> int:
             metric=args.metric,
         )
     )
+    # Every cell counts as an attempt. Log them, then deflate the best one.
+    from .backtest.robustness import log_trials, multiple_testing_report, trials_from_store
+    from .core.store import Store
+
+    store = Store(cfg.settings.db_path)
+    try:
+        log_trials(store, args.strategy, report["grid"], metric=args.metric, seed=args.seed)
+        trials = trials_from_store(store, args.strategy)
+        total_for_strategy = store.count_experiments(args.strategy)
+    finally:
+        store.close()
+    testing = multiple_testing_report(trials, observations=max(1, args.days * 180))
+    testing["logged_total_for_strategy"] = total_for_strategy
+    testing["units"] = (
+        "sharpe" if args.metric == "sharpe" else f"{args.metric} (deflation needs a Sharpe metric to be meaningful)"
+    )
+    report["multiple_testing"] = testing
+
     if args.json:
         _print(report)
     else:
         print(format_sensitivity(report))
+        print()
+        print(f"multiple testing: {testing['trials']} trials logged for {args.strategy} "
+              f"({total_for_strategy} rows in the experiment log)")
+        print(f"  {testing['verdict']}")
         print()
         header = " | ".join(axes)
         print(f"{header} | score | trades")
@@ -603,6 +639,254 @@ def _coerce(text: str) -> Any:
         return float(text)
     except ValueError:
         return text
+
+
+async def _run_robustness(cfg: Config, days: int, seed: int | None, multiplier: float) -> dict:
+    """One backtest at nominal costs, then the same backtest with costs multiplied."""
+    from .backtest.robustness import robustness_report, stress_config
+    from .backtest.runner import evaluate
+    from .core.clock import SimClock
+    from .core.store import Store
+    from .engine import Engine
+
+    async def _session(this_cfg: Config) -> tuple[Any, Any, Any]:
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        clock = SimClock(start)
+        store = Store(":memory:")
+        engine = await Engine.build(this_cfg, clock=clock, store=store)
+        if seed is not None:
+            engine.feed.rng.seed(seed)  # type: ignore[attr-defined]
+        await engine.run(stop_at=start + timedelta(days=days))
+        # not closed here: evaluate() reads the store, and closing it first is how this
+        # command failed the first time ("Cannot operate on a closed database")
+        return store, engine, start
+
+    store, engine, _start = await _session(cfg)
+    base = evaluate(store, cfg, engine.starting_capital)
+    curve, trades, _exposure = _collect(store)
+    closes = _closes_from(engine)
+    engine.close()
+    store.close()
+
+    stressed_store, stressed_engine, _ = await _session(stress_config(cfg, multiplier))
+    stressed_eval = evaluate(stressed_store, cfg, stressed_engine.starting_capital)
+    stressed_engine.close()
+    stressed_store.close()
+
+    report = robustness_report(
+        curve=curve,
+        trades=trades,
+        starting_equity=engine.starting_capital,
+        cost_stress_metrics=stressed_eval["metrics"],
+        cost_multiplier=multiplier,
+        closes=closes,
+        seed=seed or 7,
+    )
+    report["nominal"] = {
+        "return_pct": float(base["metrics"].total_return) * 100.0,
+        "profit_factor": float(base["metrics"].profit_factor),
+        "sharpe": float(base["metrics"].sharpe),
+        "trades": base["metrics"].trade_count,
+    }
+    report["stressed"] = {
+        "return_pct": float(stressed_eval["metrics"].total_return) * 100.0,
+        "profit_factor": float(stressed_eval["metrics"].profit_factor),
+        "sharpe": float(stressed_eval["metrics"].sharpe),
+        "trades": stressed_eval["metrics"].trade_count,
+    }
+    report["gates"] = [g.to_dict() for g in base["gates"]]
+    report["passed"] = base["passed"]
+    return report
+
+
+def _collect(store: Any) -> tuple[Any, Any, Any]:
+    from .backtest.runner import collect
+
+    return collect(store)
+
+
+def _closes_from(engine: Any) -> dict[str, list[float]]:
+    """Closing prices per symbol, for the buy-and-hold benchmark."""
+    # closes per symbol from the 1m bars the engine still holds, for the buy-and-hold
+    # benchmark. Read straight off the market hub: `MarketData.candles(symbol, timeframe)`.
+    closes: dict[str, list[float]] = {}
+    market = engine.market
+    for symbol in market.symbols:
+        series = market.candles(symbol, market.base_timeframe)
+        values = [float(candle.close) for candle in series.last(market.series_maxlen)]
+        if len(values) >= 2:
+            closes[symbol] = values
+    return closes
+
+
+async def _collect_frames(cfg: Config, days: int, seed: int | None) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+    """Run a session with recording on, then build a feature frame per symbol.
+
+    The bars come from the engine's own market hub and the books from the recorded tape,
+    so the features see exactly what a live process would have seen.
+    """
+    from .ai.features import FeatureStore
+    from .core.clock import SimClock
+    from .core.store import Store
+    from .data.feed import SyntheticFeed
+    from .data.tape import RecordingFeed
+    from .engine import Engine
+
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    clock = SimClock(start)
+    store = Store(":memory:")
+    synthetic = SyntheticFeed(cfg, clock)
+    if seed is not None:
+        synthetic.rng.seed(seed)
+    feed = RecordingFeed(cfg, synthetic, clock)
+    engine = await Engine.build(cfg, clock=clock, store=store, feed=feed)
+    await engine.run(stop_at=start + timedelta(days=days))
+
+    series: dict[str, list[Any]] = {}
+    for symbol in engine.market.symbols:
+        candles = engine.market.candles(symbol, engine.market.base_timeframe).last(
+            engine.market.series_maxlen
+        )
+        if len(candles) >= 100:
+            series[symbol] = candles
+    books: dict[str, dict[datetime, Any]] = {}
+    for kind, payload, _stamp in feed.tape.events:
+        if kind == "book":
+            books.setdefault(payload.symbol, {})[payload.ts] = payload
+    engine.close()
+    store.close()
+    store_choice = None
+    frames = FeatureStore().compute_many(series, books=books)
+    return store_choice, frames, {"symbols": len(frames), "books": sum(len(b) for b in books.values())}
+
+
+def cmd_signals(args: argparse.Namespace) -> int:
+    """Feature store -> signal library -> IC screen -> complexity ladder, end to end."""
+    from .ai.ladder import (
+        feature_importance,
+        run_ladder,
+        shuffled_label_test,
+        time_shift_test,
+    )
+    from .ai.signals import SIGNALS, latest_scores, screen
+
+    cfg = _config(args)
+    _unused, frames, meta = asyncio.run(_collect_frames(cfg, args.days, args.seed))
+    if not frames:
+        print("no symbols had enough bars to build features", file=sys.stderr)
+        return 2
+
+    per_symbol: dict[str, Any] = {}
+    for symbol, frame in frames.items():
+        result = screen(frame, primary_horizon=args.horizon, min_ic=args.min_ic)
+        ladder = run_ladder(frame, horizon=args.horizon, n_folds=args.folds)
+        per_symbol[symbol] = {
+            "bars": len(frame),
+            "features": len(frame.features),
+            "kept": [spec.name for spec in result.kept],
+            "dropped": result.dropped,
+            "shuffled_ic": round(result.shuffled_ic, 5),
+            "table": result.table_rows(),
+            "ladder": ladder.as_dict(),
+            "leakage": {
+                "shuffled_labels": shuffled_label_test(frame, horizon=args.horizon),
+                "time_shift": time_shift_test(frame, horizon=args.horizon),
+            },
+            "importance": feature_importance(frame, horizon=args.horizon)[:10],
+            "latest": latest_scores(frame, result.kept)[:5],
+        }
+
+    report = {
+        "library_size": len(SIGNALS),
+        "families": sorted({spec.family for spec in SIGNALS}),
+        "horizon_bars": args.horizon,
+        "days": args.days,
+        "seed": args.seed,
+        "meta": meta,
+        "symbols": per_symbol,
+    }
+    if args.json:
+        _print(report)
+        return 0
+
+    print(f"signal library: {len(SIGNALS)} signals across {len(report['families'])} families "
+          f"({', '.join(report['families'])})")
+    print(f"data: {meta['symbols']} symbols, {meta['books']} recorded books, "
+          f"{args.days} simulated days, horizon {args.horizon} bars")
+    for symbol, data in per_symbol.items():
+        print()
+        print(f"{symbol}: {data['bars']} bars, {data['features']} features, "
+              f"kept {len(data['kept'])} of {len(data['table'])} signals")
+        samples = data["table"][0]["non_overlapping_samples"] if data["table"] else 0
+        band = data["table"][0]["noise_band"] if data["table"] else 0.0
+        print(f"  IC noise band: +/-{band:.3f} at {samples} non-overlapping samples "
+              f"(horizon {args.horizon})")
+        for row in data["table"][:6]:
+            mark = "keep" if row["kept"] else "drop"
+            proof = "sig" if row["distinguishable"] else "thin"
+            print(f"  {mark} {proof:4s} {row['name']:28s} IC {row['ic']:+.4f} | "
+                  f"net/bar {row['net_pnl']:+.6f} | hit {row['hit_rate']:.2f} | turn {row['turnover']:.2f}")
+        if not data["kept"]:
+            print("  nothing survived the screen. That is the honest result for this data and")
+            print(f"  a {args.horizon}-bar horizon against 10 bps a side, not a bug.")
+        if data["dropped"]:
+            print("  first drop reasons:")
+            for drop in data["dropped"][:3]:
+                print(f"    {drop['name']}: {drop['reason']}")
+        ladder = data["ladder"]
+        print(f"  ladder ({ladder['windows']} purged windows): "
+              + ", ".join(
+                  f"{row['level']} {row['net_expectancy_bps']:+.2f}bps" for row in ladder["levels"]
+              ))
+        print(f"  promoted: {ladder['promoted']}")
+        leakage = data["leakage"]
+        print(f"  leakage: {leakage['shuffled_labels']['verdict']}")
+        if leakage["time_shift"].get("available"):
+            shift = leakage["time_shift"]
+            print(f"  time shift: IC {shift['ic_now']:+.3f} now, {shift['ic_near_shift']:+.3f} at +50 bars, "
+                  f"{shift['ic_far_shift']:+.3f} at +{shift['far_shift_bars']} bars "
+                  f"({'decays as expected' if shift['decays'] else 'DOES NOT DECAY - check for leakage'})")
+        if data["importance"]:
+            top = data["importance"][0]
+            print(f"  biggest weight: {top['feature']} ({top['share']:.0%} of total)"
+                  + (f" - {top['warning']}" if top.get("warning") else ""))
+    return 0
+
+
+def cmd_robustness(args: argparse.Namespace) -> int:
+    cfg = _config(args)
+    report = asyncio.run(_run_robustness(cfg, args.days, args.seed, args.cost_multiplier))
+    if args.json:
+        _print(report)
+        return 0
+
+    nominal, stressed = report["nominal"], report["stressed"]
+    print(f"nominal:  return {nominal['return_pct']:+.2f}% | PF {nominal['profit_factor']:.2f} "
+          f"| sharpe {nominal['sharpe']:.2f} | {nominal['trades']} trades")
+    print(f"{args.cost_multiplier:g}x costs: return {stressed['return_pct']:+.2f}% | PF {stressed['profit_factor']:.2f} "
+          f"| sharpe {stressed['sharpe']:.2f} | {stressed['trades']} trades")
+    print()
+    for name, check in report["checks"].items():
+        print(f"{'PASS' if check['ok'] else 'FAIL'}  {name:24s} {check['detail']}")
+    bench = report.get("benchmark")
+    if bench:
+        comparison = report["benchmark_comparison"]
+        print(f"\nbenchmark (buy and hold over the retained bars, fees included): "
+              f"{bench['return_pct']:+.2f}%")
+        print(f"  {comparison['verdict']}")
+    attribution = report["attribution"]
+    print(f"\nattribution: net {attribution['net_pnl']:+.2f} after {attribution['fees']:.2f} fees "
+          f"({attribution['fee_drag_pct_of_gross']:.0f}% of gross)")
+    for label, key in (("by strategy", "by_strategy"), ("by symbol", "by_symbol")):
+        for name, row in attribution[key].items():
+            print(f"  {label:12s} {name:12s} pnl {row['pnl']:+9.2f} | {row['trades']:3d} trades "
+                  f"| win {row['win_rate'] * 100:4.1f}%")
+    if attribution.get("depends_on_one_trade"):
+        print(f"  warning: profit disappears without the single best trade "
+              f"({attribution['pnl_without_best_trade']:+.2f})")
+    print(f"\nrobustness: {report['verdict']}")
+    print("promotion gates:", "PASS" if report["passed"] else "NOT PROMOTABLE (see `tradebot metrics`)")
+    return 0
 
 
 def cmd_archive(args: argparse.Namespace) -> int:
@@ -786,6 +1070,8 @@ def main(argv: list[str] | None = None) -> int:
         "parity": cmd_parity,
         "venues": cmd_venues,
         "archive": cmd_archive,
+        "robustness": cmd_robustness,
+        "signals": cmd_signals,
     }
     if args.command in ("pause", "resume", "kill", "lockdown"):
         args.action = args.command
