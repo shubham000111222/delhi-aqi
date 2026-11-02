@@ -218,6 +218,9 @@ class RiskLimits(_Strict):
     tds_pct_on_sales: Decimal = D("0.01")
     exchange_error_rate_limit: Decimal = D("0.20")
     exchange_error_rate_window_seconds: int = 300
+    # Below this many *attempts* in the window a ratio means nothing: one failure out
+    # of two is 50%, but it must not pause trading. Sample size first, then ratio.
+    exchange_error_rate_min_samples: int = 10
     rejects_limit: int = 5
     rejects_window_seconds: int = 300
     clock_drift_max_seconds: float = 1.0

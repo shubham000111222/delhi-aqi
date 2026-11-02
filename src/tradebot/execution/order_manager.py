@@ -211,8 +211,13 @@ class OrderManager:
                 return order
             except TransientExchangeError as exc:
                 self.stats.errors += 1
+                # A retry that later succeeds is not a venue failure. Log it as a retry,
+                # and only record an `order_error` when we actually give up: otherwise a
+                # single flaky order inflates the error-rate circuit breaker (one gave-up
+                # order can produce three "errors" and trip it on a handful of sends).
+                giving_up = attempt >= self.exec_cfg.retry_attempts
                 self.store.log_event(
-                    "order_error",
+                    "order_error" if giving_up else "order_retry",
                     {"client_order_id": request.client_order_id, "error": str(exc), "attempt": attempt},
                     level="WARN",
                     actor="execution",

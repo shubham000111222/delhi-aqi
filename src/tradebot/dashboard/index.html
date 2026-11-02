@@ -67,6 +67,13 @@
   button:disabled { opacity: .45; cursor: not-allowed; }
   svg.spark { width: 100%; height: 150px; display: block; }
   .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 8px; }
+  #conn {
+    position: sticky; top: 0; z-index: 6; padding: 6px 24px; font-size: 12px;
+    font-variant-numeric: tabular-nums; border-bottom: 1px solid var(--line);
+  }
+  #conn.conn-live { background: rgba(47,191,113,.10); color: var(--green); }
+  #conn.conn-wait { background: rgba(76,154,255,.10); color: var(--blue); }
+  #conn.conn-error { background: rgba(239,83,80,.14); color: var(--red); font-weight: 600; }
   .flash { position: fixed; right: 18px; bottom: 18px; background: var(--panel); border: 1px solid var(--line);
            border-radius: 10px; padding: 10px 16px; font-size: 13px; opacity: 0; transition: opacity .2s; }
   .flash.show { opacity: 1; }
@@ -138,6 +145,7 @@
   </section>
 </main>
 <div class="flash" id="flash"></div>
+<div id="conn" role="status" aria-live="polite"></div>
 
 <script>
 const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(Number(v)))
@@ -145,6 +153,18 @@ const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(Number(
 const pct = v => (Number(v) * 100).toFixed(2) + "%";
 const el = id => document.getElementById(id);
 let lastEquity = null;
+let failures = 0;
+
+/* One visible place that says whether the dashboard is actually refreshing. If the
+   server is restarting (or the preview was just re-created) the page says so and
+   retries, instead of sitting silently on stale numbers. */
+function setConn(state, message) {
+  const box = el("conn");
+  if (!box) return;
+  box.dataset.state = state;
+  box.textContent = message;
+  box.className = state === "live" ? "conn-live" : state === "error" ? "conn-error" : "conn-wait";
+}
 
 function flash(msg) {
   const f = el("flash");
@@ -263,7 +283,9 @@ function renderFeed(events) {
 async function tick() {
   try {
     const res = await fetch("/api/snapshot", { cache: "no-store" });
+    if (!res.ok) throw new Error(`snapshot ${res.status}`);
     const data = await res.json();
+    failures = 0;
     const status = data.status || {};
     const equity = Number(data.equity);
     const prev = lastEquity;
@@ -285,6 +307,7 @@ async function tick() {
     el("disk").textContent = ((data.health || {}).disk * 100).toFixed(1) + "%";
     el("db").textContent = JSON.stringify((data.health || {}).db || {}).slice(0, 60);
     el("heartbeat").textContent = "live · updated " + new Date().toLocaleTimeString();
+    setConn("live", `live · ${status.mode || "paper"} · market clock ${(status.now || "").slice(0, 16).replace("T", " ")} · refreshed ${new Date().toLocaleTimeString()}`);
     renderSpark(data.equity_curve);
     renderPositions(data.positions);
     renderTrades(data.trades);
@@ -294,7 +317,13 @@ async function tick() {
     const disabled = !data.controls_enabled;
     document.querySelectorAll("#controls button").forEach(b => { b.disabled = disabled; });
   } catch (err) {
+    failures += 1;
     el("heartbeat").textContent = "dashboard offline";
+    setConn(
+      "error",
+      `not refreshing (attempt ${failures}): ${err && err.message ? err.message : err}. ` +
+      "The bot may be restarting — this page retries automatically every 2s."
+    );
   }
 }
 
@@ -315,6 +344,7 @@ document.querySelectorAll("#controls button").forEach(btn => {
   });
 });
 
+setConn("wait", "connecting to the trading engine…");
 tick();
 setInterval(tick, 2000);
 </script>

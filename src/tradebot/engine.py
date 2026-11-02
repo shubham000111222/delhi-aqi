@@ -791,9 +791,12 @@ class Engine:
         all_stale = self.market.all_stale(now, dq.stale_all_seconds)
         disk = shutil.disk_usage(str(self.cfg.settings.data_dir))
         disk_used = disk.used / disk.total if disk.total else 0.0
-        errors = self.store.count_events("order_error", since=now - timedelta(seconds=300))
-        submitted = max(1, self.store.count_events("order_submitted", since=now - timedelta(seconds=300)))
-        error_rate = errors / submitted
+        window = timedelta(seconds=self.cfg.risk.exchange_error_rate_window_seconds)
+        errors = self.store.count_events("order_error", since=now - window)
+        submitted = self.store.count_events("order_submitted", since=now - window)
+        attempts = errors + submitted
+        error_rate = errors / attempts if attempts else 0.0
+        min_samples = self.cfg.risk.exchange_error_rate_min_samples
 
         if all_stale and self.stats.ticks > 0:
             self.killswitch.trigger(
@@ -803,11 +806,14 @@ class Engine:
             self.killswitch.trigger(KillLevel.L1, trigger="disk_full", reason=f"disk {disk_used:.0%} used")
         elif disk_used >= self.cfg.risk.disk_warn_pct:
             self.store.log_event("disk_warning", {"used_pct": round(disk_used, 3)}, level="WARN", actor="health")
-        if error_rate >= float(self.cfg.risk.exchange_error_rate_limit):
+        if attempts >= min_samples and error_rate >= float(self.cfg.risk.exchange_error_rate_limit):
             self.killswitch.trigger(
                 KillLevel.L1,
                 trigger="exchange_error_rate",
-                reason=f"{error_rate:.0%} order errors over 5 min",
+                reason=(
+                    f"{error_rate:.0%} order errors over {window.total_seconds() / 60:.0f} min "
+                    f"({errors}/{attempts} attempts)"
+                ),
             )
         self._reconcile_state = await self.reconcile()
         if self._reconcile_state != "ok":
@@ -824,6 +830,7 @@ class Engine:
             "all_stale": all_stale,
             "disk_used_pct": round(disk_used, 3),
             "error_rate": round(error_rate, 3),
+            "order_attempts": attempts,
             "reconciliation": self._reconcile_state,
             "kill_level": self.killswitch.level.value,
             "equity": to_str(self.equity(), 8),

@@ -19,7 +19,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from ..config import Config
@@ -93,8 +93,17 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
 
     # --- page ------------------------------------------------------------
     @app.get("/", response_class=HTMLResponse)
-    async def index() -> str:
-        return TEMPLATE.read_text(encoding="utf-8")
+    async def index() -> HTMLResponse:
+        # no-store: the preview proxies this page, and a cached copy after a restart
+        # looks exactly like a broken app. Always hand the browser the live build.
+        return HTMLResponse(
+            TEMPLATE.read_text(encoding="utf-8"),
+            headers={"cache-control": "no-store, max-age=0"},
+        )
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> Response:
+        return Response(status_code=204)
 
     @app.get("/healthz", response_class=PlainTextResponse)
     async def healthz() -> str:
@@ -156,7 +165,8 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
             "db": store.stats(),
         }
         return JSONResponse(
-            _json_safe(
+            headers={"cache-control": "no-store, max-age=0"},
+            content=_json_safe(
                 {
                     "status": payload,
                     "equity": to_str(equity),

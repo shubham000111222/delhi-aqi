@@ -51,6 +51,7 @@ tds_pct_on_sales: "0.01"
 # circuit breakers
 exchange_error_rate_limit: "0.20"     # over 5 min
 exchange_error_rate_window_seconds: 300
+exchange_error_rate_min_samples: 10   # do not judge a ratio on a handful of orders
 rejects_limit: 5
 rejects_window_seconds: 300
 clock_drift_max_seconds: 1.0

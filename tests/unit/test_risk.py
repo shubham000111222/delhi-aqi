@@ -280,3 +280,39 @@ class TestConfigEnvelope:
         assert cfg.settings.db_path.name == "tradebot_live.db"
         cfg.settings.mode = Mode.PAPER
         assert cfg.settings.db_path.name == "tradebot_paper.db"
+
+
+class TestErrorRateBreaker:
+    """One flaky order must never pause the bot; a failing venue still must."""
+
+    async def _engine(self, cfg, clock):
+        from tradebot.core.store import Store
+        from tradebot.data.feed import SyntheticFeed
+        from tradebot.engine import Engine
+
+        store = Store(":memory:")
+        return await Engine.build(cfg, clock=clock, store=store, feed=SyntheticFeed(cfg, clock))
+
+    async def _health(self, engine, errors: int, submitted: int):
+        now = engine.clock.now()
+        for _ in range(submitted):
+            engine.store.log_event("order_submitted", {"cid": "x"}, actor="test", ts=now)
+        for _ in range(errors):
+            engine.store.log_event("order_error", {"error": "x"}, level="WARN", actor="test", ts=now)
+        return await engine.health_check()
+
+    async def test_small_sample_does_not_pause(self, cfg):
+        clock = SimClock(datetime(2024, 1, 1, tzinfo=UTC))
+        engine = await self._engine(cfg, clock)
+        # Two failures out of five attempts is a 40% ratio, on almost no evidence.
+        health = await self._health(engine, errors=2, submitted=3)
+        assert health["order_attempts"] < cfg.risk.exchange_error_rate_min_samples
+        assert health["kill_level"] == "L0", "a ratio on a handful of orders must not pause trading"
+
+    async def test_real_outage_still_pauses(self, cfg):
+        clock = SimClock(datetime(2024, 1, 1, tzinfo=UTC))
+        engine = await self._engine(cfg, clock)
+        health = await self._health(engine, errors=25, submitted=40)
+        assert health["kill_level"] == "L1"
+        assert engine.killswitch.level is KillLevel.L1
+        assert "exchange_error_rate" in engine.killswitch.state.get("trigger", "")
