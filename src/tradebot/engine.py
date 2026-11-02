@@ -128,6 +128,8 @@ class Engine:
         self._last_day: str = ""
         self._last_health = 0.0
         self._last_health_check: datetime | None = None
+        # when the L1 pause condition was first observed as cleared (sustained health)
+        self._healthy_since: datetime | None = None
         # fills the venue has booked but this process has not applied yet
         self.unapplied_fills = 0
         self._last_snapshot: datetime | None = None
@@ -816,6 +818,7 @@ class Engine:
                 ),
             )
         self._reconcile_state = await self.reconcile()
+        await self._maybe_auto_resume(all_stale=all_stale, error_rate=error_rate, disk_used=disk_used)
         if self._reconcile_state != "ok":
             self.killswitch.trigger(
                 KillLevel.L1, trigger="reconciliation", reason=str(self._reconcile_state)
@@ -838,6 +841,70 @@ class Engine:
             "pending_orders": len(self.om.pending),
         }
         return health
+
+    #: L1 causes that are allowed to lift on their own once the condition is gone.
+    #: Anything else (a manual pause, a kill file, an operator lockdown) needs a human.
+    AUTO_RESUME_TRIGGERS = frozenset(
+        {"account_limit", "stale_feeds", "exchange_error_rate", "reconciliation", "disk_full"}
+    )
+
+    async def _maybe_auto_resume(
+        self, *, all_stale: bool, error_rate: float, disk_used: float, now: datetime | None = None
+    ) -> None:
+        """Lift an L1 pause once its cause is gone and health has held for long enough.
+
+        A daily-loss pause is time-boxed: at the day boundary `day_start_equity` is
+        re-based, so the limit is satisfied again. Without this the bot would sit
+        paused for ever after one bad day, which in the demo looks exactly like a dead
+        dashboard. L2/L3 are never touched, and a pause we do not recognise is left to
+        the operator.
+        """
+        if self.killswitch.level is not KillLevel.L1:
+            self._healthy_since = None
+            return
+        trigger = str(self.killswitch.state.get("trigger", ""))
+        if trigger not in self.AUTO_RESUME_TRIGGERS:
+            self._healthy_since = None
+            return
+
+        now = now or self.clock.now()
+        equity = self.equity()
+        day_start = D(str(self.store.kv_get("day_start_equity", to_str(equity))))
+        week_start = D(str(self.store.kv_get("week_start_equity", to_str(equity))))
+        daily_pct = (equity - day_start) / day_start if day_start > 0 else ZERO
+        weekly_pct = (equity - week_start) / week_start if week_start > 0 else ZERO
+
+        healthy = {
+            "account_limit": daily_pct > self.cfg.risk.daily_loss_stop_new_entries
+            and weekly_pct > self.cfg.risk.weekly_loss_pause,
+            "stale_feeds": not all_stale,
+            "exchange_error_rate": error_rate < float(self.cfg.risk.exchange_error_rate_limit),
+            "reconciliation": self._reconcile_state == "ok",
+            "disk_full": disk_used < self.cfg.risk.disk_warn_pct,
+        }.get(trigger, False)
+        if not healthy:
+            self._healthy_since = None
+            return
+
+        if self._healthy_since is None:
+            self._healthy_since = now
+            return
+        required = float(self.cfg.settings.execution.auto_resume_min_healthy_seconds)
+        if (now - self._healthy_since).total_seconds() < required:
+            return
+        reason = (
+            f"{trigger} cleared and health held for "
+            f"{(now - self._healthy_since).total_seconds() / 60:.0f} min"
+        )
+        if self.killswitch.auto_resume(reason=reason):
+            self._healthy_since = None
+            self.store.log_event(
+                "kill_switch_auto_resume",
+                {"trigger": trigger, "reason": reason, "equity": to_str(equity, 2)},
+                level="WARN",
+                actor="engine",
+                ts=now,
+            )
 
     async def reconcile(self) -> str:
         """Compare the ledger with the venue. Any mismatch is an incident."""

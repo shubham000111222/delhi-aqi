@@ -130,6 +130,9 @@ class ExecutionConfig(_Strict):
     health_check_seconds: float = 5.0
     equity_snapshot_bars: int = 1
     order_status_poll_seconds: float = 5.0
+    # An L1 pause caused by a transient condition lifts only after this much sustained
+    # health (plan section: "auto-resume after at least 10 minutes of sustained health").
+    auto_resume_min_healthy_seconds: float = 600.0
 
 
 class WatchdogConfig(_Strict):

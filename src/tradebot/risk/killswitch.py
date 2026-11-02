@@ -123,6 +123,28 @@ class KillSwitch:
         )
         return True
 
+    def auto_resume(self, *, reason: str, actor: str = "engine") -> bool:
+        """Return to L0 from L1 only.
+
+        L2 and L3 are never cleared automatically: a flatten or a lockdown is a
+        decision a human made (or must review), and healing infrastructure must never
+        quietly re-arm trading. This exists so that a *time-boxed* pause (a bad day, a
+        recovered feed, a transient API storm) can lift once its condition is gone,
+        with the transition recorded like any other.
+        """
+        if self.level is not KillLevel.L1:
+            return False
+        self.store.set_kill_state(
+            KillLevel.L0.value,
+            trigger="auto_resume",
+            reason=reason,
+            actor=actor,
+            ts=self.now(),
+        )
+        self._cached = None
+        log.warning('{"event":"kill_switch_auto_resume","reason":"%s","actor":"%s"}', reason, actor)
+        return True
+
     def reset(self, *, reason: str, actor: str = "operator", level: KillLevel = KillLevel.L0) -> None:
         """Manual reset. L3 requires a written reason and the cooldown to have expired."""
         if self.level is KillLevel.L3:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -90,6 +91,51 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
 
     app = FastAPI(title="tradebot dashboard", version="0.1.0", lifespan=lifespan)
     app.state.dashboard = state
+
+    # Request accounting: makes "is anything reaching the server?" answerable from the
+    # outside when a preview looks blank, instead of guessing from the client side.
+    started_at = time.monotonic()
+    seen: dict[str, Any] = {
+        "total": 0,
+        "last_path": "",
+        "last_at": None,
+        "last_ua": "",
+        "last_client": "",
+    }
+
+    @app.middleware("http")
+    async def _count(request: Request, call_next):
+        response = await call_next(request)
+        seen["total"] = int(seen["total"]) + 1
+        seen["last_path"] = request.url.path
+        seen["last_at"] = datetime.now(UTC).isoformat()
+        seen["last_ua"] = request.headers.get("user-agent", "")[:80]
+        seen["last_client"] = request.headers.get("x-forwarded-for", "") or (
+            request.client.host if request.client else ""
+        )
+        return response
+
+    @app.get("/api/self-test")
+    async def self_test() -> JSONResponse:
+        """What the server thinks is going on, for diagnosing a blank preview."""
+        engine = state.engine
+        now = engine.clock.now() if engine is not None else datetime.now(UTC)
+        return JSONResponse(
+            _json_safe(
+                {
+                    "ok": True,
+                    "uptime_seconds": round(time.monotonic() - started_at, 1),
+                    "requests_served": seen["total"],
+                    "last_request": {k: seen[k] for k in ("last_path", "last_at", "last_ua", "last_client")},
+                    "bot_running": bool(engine is not None and engine.running),
+                    "market_clock": iso(now),
+                    "engine_stats": engine.stats.to_dict() if engine is not None else {},
+                    "kill_level": state.store.kill_level(),
+                    "template_bytes": len(TEMPLATE.read_text(encoding="utf-8")),
+                }
+            ),
+            headers={"cache-control": "no-store, max-age=0"},
+        )
 
     # --- page ------------------------------------------------------------
     @app.get("/", response_class=HTMLResponse)

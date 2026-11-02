@@ -316,3 +316,67 @@ class TestErrorRateBreaker:
         assert health["kill_level"] == "L1"
         assert engine.killswitch.level is KillLevel.L1
         assert "exchange_error_rate" in engine.killswitch.state.get("trigger", "")
+
+
+class TestAutoResume:
+    """A time-boxed pause must lift by itself; a human decision must not."""
+
+    async def _engine(self, cfg, clock):
+        from tradebot.data.feed import SyntheticFeed
+        from tradebot.engine import Engine
+
+        store = Store(":memory:")
+        return await Engine.build(cfg, clock=clock, store=store, feed=SyntheticFeed(cfg, clock))
+
+    def _breach_day(self, engine, day_start):
+        engine.store.kv_set("day_start_equity", str(day_start))
+        engine.store.kv_set("week_start_equity", str(day_start))
+
+    async def test_daily_loss_pause_lifts_after_a_healthy_day(self, cfg):
+        clock = SimClock(NOW)
+        engine = await self._engine(cfg, clock)
+        # a -2.5% day pauses new entries
+        self._breach_day(engine, engine.ledger.cash * D("1.025"))
+        engine.killswitch.trigger(KillLevel.L1, trigger="account_limit", reason="daily loss -2.50%")
+        await engine.health_check()
+        assert engine.killswitch.level is KillLevel.L1
+
+        # the day rolls over: the baseline is re-based, so the limit is satisfied again
+        self._breach_day(engine, engine.ledger.cash)
+        await engine.health_check()
+        assert engine.killswitch.level is KillLevel.L1, "one instant of health is not enough"
+        clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds + 1)
+        await engine.health_check()
+        assert engine.killswitch.level is KillLevel.L0
+        assert engine.killswitch.state["trigger"] == "auto_resume"
+        assert any(
+            e["kind"] == "kill_switch_auto_resume" for e in engine.store.events(limit=20)
+        ), "an automatic resume must be in the audit log"
+
+    async def test_pause_holds_while_the_loss_still_breaches(self, cfg):
+        clock = SimClock(NOW)
+        engine = await self._engine(cfg, clock)
+        self._breach_day(engine, engine.ledger.cash * D("1.025"))
+        engine.killswitch.trigger(KillLevel.L1, trigger="account_limit", reason="daily loss -2.50%")
+        for _ in range(5):
+            await engine.health_check()
+            clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds)
+        assert engine.killswitch.level is KillLevel.L1
+
+    async def test_manual_pause_never_auto_resumes(self, cfg):
+        clock = SimClock(NOW)
+        engine = await self._engine(cfg, clock)
+        engine.killswitch.trigger(KillLevel.L1, trigger="manual", reason="operator pause")
+        for _ in range(5):
+            await engine.health_check()
+            clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds)
+        assert engine.killswitch.level is KillLevel.L1, "only a human may undo a human pause"
+
+    async def test_flatten_levels_never_auto_resume(self, cfg):
+        clock = SimClock(NOW)
+        engine = await self._engine(cfg, clock)
+        engine.killswitch.trigger(KillLevel.L2, trigger="account_limit", reason="daily loss -3.50%")
+        for _ in range(5):
+            await engine.health_check()
+            clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds)
+        assert engine.killswitch.level is KillLevel.L2
