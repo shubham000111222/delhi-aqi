@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -274,9 +274,12 @@ class Engine:
         if isinstance(self.clock, SimClock):
             # Replay/backtest time advances with the events we actually process, so
             # freshness checks, cooldowns and deadlines are measured on market time.
-            ts = getattr(payload, "ts", None)
-            if isinstance(ts, datetime):
-                self.clock.set(ts)
+            # A candle is *received* when it closes, not when it opened: using its open
+            # timestamp put a bars-only replay one bar behind a live feed and made the
+            # two paths disagree (caught by `tradebot parity`).
+            stamp = getattr(payload, "close_time", None) or getattr(payload, "ts", None)
+            if isinstance(stamp, datetime):
+                self.clock.set(stamp)
         if kind == "tick":
             await self._on_tick(payload)
         elif kind == "book":
@@ -286,7 +289,7 @@ class Engine:
         elif kind == "fill":
             await self._on_fill(payload)
         elif kind == "regime":
-            self.store.log_event("regime", payload, actor="market")
+            self._log("regime", payload, actor="market")
         else:  # pragma: no cover - defensive
             log.warning('{"event":"unknown_event","kind":"%s"}', kind)
 
@@ -326,7 +329,7 @@ class Engine:
                 self._advance_hold(bar)
                 await self._check_time_stops(bar)
             if self.stats.bars % 60 == 0:
-                self.store.log_event(
+                self._log(
                     "bar_closed",
                     {"symbol": bar.symbol, "timeframe": bar.timeframe, "ts": iso(bar.ts)},
                     actor="market",
@@ -370,7 +373,7 @@ class Engine:
             try:
                 signal = strategy.evaluate(ctx)
             except Exception as exc:  # noqa: BLE001 - a strategy bug must not stop the bot
-                self.store.log_event(
+                self._log(
                     "strategy_error",
                     {"strategy": name, "symbol": bar.symbol, "error": str(exc)},
                     level="CRIT",
@@ -381,11 +384,17 @@ class Engine:
             if signal is None:
                 continue
             self.stats.signals += 1
+            # A signal belongs to the bar that produced it, not to the wall clock. Both
+            # rows are stamped with market time so a backtest's audit trail is ordered
+            # like the session it describes and a replay reproduces it exactly.
+            if signal.ts is None or utc(signal.ts) > self.clock.now():
+                signal = replace(signal, ts=bar.close_time)
             self.store.save_signal(signal)
-            self.store.log_event(
+            self._log(
                 "signal",
                 {"signal_id": signal.id, "strategy": name, "symbol": signal.symbol, "side": signal.side.value},
                 actor="strategy",
+                ts=self.clock.now(),
             )
             await self._try_enter(signal, ctx)
 
@@ -403,7 +412,7 @@ class Engine:
         self.store.save_verdict(signal.id, decision.verdict, ts=self.clock.now())
         if not decision.approved:
             self.stats.vetoes += 1
-            self.store.log_event(
+            self._log(
                 "risk_veto",
                 {
                     "signal_id": signal.id,
@@ -488,14 +497,14 @@ class Engine:
             try:
                 self.ledger.on_fill(fill, plan)
             except ValueError as exc:
-                self.store.log_event(
+                self._log(
                     "ledger_error", {"error": str(exc), "fill": fill.to_dict()}, level="CRIT", actor="ledger"
                 )
                 return
             pos = self.ledger.get(fill.symbol, fill.strategy)
             if pos is not None:
                 self.store.save_position(pos)
-                self.store.log_event(
+                self._log(
                     "position_opened",
                     pos.to_dict(fill.price) | {"order_id": fill.order_id},
                     actor="portfolio",
@@ -505,7 +514,7 @@ class Engine:
             try:
                 closed = self.ledger.on_fill(fill)
             except ValueError as exc:
-                self.store.log_event(
+                self._log(
                     "ledger_error", {"error": str(exc), "fill": fill.to_dict()}, level="CRIT", actor="ledger"
                 )
                 self._exiting.pop(key, None)
@@ -517,7 +526,7 @@ class Engine:
                     if self.cfg.strategies.exit_management.breakeven_after_partial:
                         remaining.stop = max(remaining.stop, remaining.avg_entry)
                 self.store.save_position(remaining)
-                self.store.log_event(
+                self._log(
                     "position_reduced",
                     remaining.to_dict(fill.price) | {"sold": to_str(fill.qty, 8), "reason": fill.reason},
                     actor="portfolio",
@@ -530,12 +539,12 @@ class Engine:
 
     async def _on_trade_closed(self, trade: ClosedTrade) -> None:
         self.stats.trades_closed += 1
-        self.store.log_event("trade_closed", trade.to_dict(), actor="portfolio")
+        self._log("trade_closed", trade.to_dict(), actor="portfolio")
         if trade.pnl < 0 and trade.reason in ("stop", "stop_gap", "flatten"):
             self._cooldowns[trade.symbol] = self.clock.now() + timedelta(
                 minutes=self.cfg.risk.cooldown_minutes_after_stop
             )
-            self.store.log_event(
+            self._log(
                 "cooldown",
                 {
                     "symbol": trade.symbol,
@@ -557,7 +566,7 @@ class Engine:
                 )
             elif streak >= self.cfg.risk.consecutive_losses_halve:
                 self.store.kv_set(f"size_mult_{trade.strategy}", to_str(D("0.5")))
-                self.store.log_event(
+                self._log(
                     "size_reduction",
                     {"strategy": trade.strategy, "multiplier": "0.5", "streak": streak},
                     level="WARN",
@@ -572,7 +581,7 @@ class Engine:
         delta = self.ledger.accrue_tax_reserve(pct)
         if delta > 0:
             self.store.kv_set("tax_reserve", to_str(self.ledger.tax_reserve, 8))
-            self.store.log_event(
+            self._log(
                 "tax_reserve",
                 {"accrued": to_str(delta, 8), "total": to_str(self.ledger.tax_reserve, 8), "pct": str(pct)},
                 actor="reporting",
@@ -598,7 +607,7 @@ class Engine:
             self.store.upsert_order(order)
             self.store.save_position(pos)
         except Exception as exc:  # noqa: BLE001
-            self.store.log_event(
+            self._log(
                 "protection_failed",
                 {"symbol": pos.symbol, "strategy": pos.strategy, "error": str(exc)},
                 level="CRIT",
@@ -686,7 +695,7 @@ class Engine:
         if order is None:
             self._exiting.pop(key, None)
             return
-        self.store.log_event(
+        self._log(
             "exit_submitted",
             {
                 "symbol": pos.symbol,
@@ -730,7 +739,7 @@ class Engine:
         paused = self.store.kv_get("paused_strategies", {}) or {}
         paused[name] = {"until": iso(self.clock.now() + timedelta(hours=hours)), "reason": reason}
         self.store.kv_set("paused_strategies", paused)
-        self.store.log_event(
+        self._log(
             "strategy_paused", {"strategy": name, "hours": hours, "reason": reason}, level="WARN", actor="risk"
         )
 
@@ -785,6 +794,26 @@ class Engine:
                 if level.rank >= KillLevel.L2.rank:
                     asyncio.create_task(self.flatten_all(reason))
 
+    def _log(
+        self,
+        kind: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        level: str = "INFO",
+        actor: str = "engine",
+        ts: datetime | None = None,
+    ) -> int:
+        """Every engine event is stamped with *market* time, never the wall clock.
+
+        A backtest or a replay must produce an audit trail ordered like the session it
+        describes. Defaulting to `utcnow()` inside the store made a 2024 backtest write
+        events dated today, which broke replay comparison and would have quietly corrupted
+        any later analysis. Anything that genuinely needs wall time logs it in the payload.
+        """
+        return self.store.log_event(
+            kind, payload, level=level, actor=actor, ts=ts or self.clock.now()
+        )
+
     def _heartbeat(self) -> None:
         """The watchdog watches this. Silence means the bot is wedged or dead."""
         self.store.kv_set("heartbeat", iso(self.clock.now()))
@@ -812,7 +841,7 @@ class Engine:
         if disk_used >= self.cfg.risk.disk_pause_pct:
             self.killswitch.trigger(KillLevel.L1, trigger="disk_full", reason=f"disk {disk_used:.0%} used")
         elif disk_used >= self.cfg.risk.disk_warn_pct:
-            self.store.log_event("disk_warning", {"used_pct": round(disk_used, 3)}, level="WARN", actor="health")
+            self._log("disk_warning", {"used_pct": round(disk_used, 3)}, level="WARN", actor="health")
         if attempts >= min_samples and error_rate >= float(self.cfg.risk.exchange_error_rate_limit):
             self.killswitch.trigger(
                 KillLevel.L1,
@@ -928,7 +957,7 @@ class Engine:
     def _resume(self, *, reason: str, now: datetime) -> None:
         if self.killswitch.auto_resume(reason=reason):
             self._reconcile_state = self._reconcile_state or "ok"
-            self.store.log_event(
+            self._log(
                 "kill_switch_auto_resume",
                 {
                     "trigger": self.killswitch.state.get("trigger", ""),
@@ -988,13 +1017,13 @@ class Engine:
 
     async def flatten_all(self, reason: str) -> int:
         """L2/L3: cancel everything and close every position at market."""
-        self.store.log_event("flatten_start", {"reason": reason}, level="CRIT", actor="killswitch")
+        self._log("flatten_start", {"reason": reason}, level="CRIT", actor="killswitch")
         cancelled = await self.adapter.cancel_all()
         closed = 0
         for pos in list(self.ledger.open_positions):
             await self._exit_position(pos, "flatten", price=self.market.price(pos.symbol))
             closed += 1
-        self.store.log_event(
+        self._log(
             "flatten_done", {"reason": reason, "orders_cancelled": cancelled, "positions_exited": closed},
             level="CRIT", actor="killswitch",
         )
@@ -1016,7 +1045,7 @@ class Engine:
             await self.emit_daily_report(day_end=now)
         except Exception as exc:  # noqa: BLE001 - a report bug must never stop trading
             log.exception('{"event":"daily_report_failed"}')
-            self.store.log_event(
+            self._log(
                 "daily_report_failed",
                 {"error": str(exc)[:300], "date": day},
                 level="CRIT",
@@ -1063,7 +1092,7 @@ class Engine:
         paths = write_reports(
             report, self.cfg.settings.reports_dir, tax_ledger=tax_ledger_rows(report.closed_trades)
         )
-        self.store.log_event(
+        self._log(
             "daily_report",
             {"date": report.date, "net_pnl": to_str(report.net_pnl, 8), "paths": paths},
             actor="reporting",
@@ -1072,7 +1101,7 @@ class Engine:
             try:
                 await self.notifier.send(report.telegram(), level="INFO")
             except Exception as exc:  # noqa: BLE001
-                self.store.log_event("alert_failed", {"error": str(exc)}, level="WARN", actor="alerts")
+                self._log("alert_failed", {"error": str(exc)}, level="WARN", actor="alerts")
         return {"report": report.to_dict(), "paths": paths, "telegram": report.telegram()}
 
     def _attach_ai_notes(self, report) -> None:
@@ -1098,7 +1127,7 @@ class Engine:
         idle_timeout: float | None = None,
     ) -> EngineStats:
         self.running = True
-        self.store.log_event(
+        self._log(
             "engine_start",
             {"mode": self.cfg.mode.value, "symbols": self.cfg.symbol_names(), "feed": type(self.feed).__name__},
             actor="engine",
@@ -1141,7 +1170,7 @@ class Engine:
             close = getattr(self.feed, "stop", None)
             if callable(close):
                 close()
-        self.store.log_event("engine_stop", self.stats.to_dict(), actor="engine")
+        self._log("engine_stop", self.stats.to_dict(), actor="engine")
         return self.stats
 
     async def _health_loop(self) -> None:

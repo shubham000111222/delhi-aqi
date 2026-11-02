@@ -21,6 +21,7 @@ import signal
 import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 from .config import Config, Mode, load_config
 from .core.clock import Clock, SimClock, utcnow
@@ -446,6 +447,28 @@ def build_parser() -> argparse.ArgumentParser:
     dash.add_argument("--port", type=int, default=8000)
     dash.add_argument("--no-bot", action="store_true", help="serve read-only, do not run the demo bot")
 
+    wf = sub.add_parser("walk-forward", help="rolling out-of-sample windows (train then test)")
+    wf.add_argument("--train-days", type=float, default=3.0)
+    wf.add_argument("--test-days", type=float, default=1.0)
+    wf.add_argument("--windows", type=int, default=4, help="cap the number of windows")
+    wf.add_argument("--seed", type=int, default=None)
+    wf.add_argument("--capital", default=None)
+    wf.add_argument("--json", action="store_true")
+
+    sens = sub.add_parser("sensitivity", help="parameter grid and plateau check")
+    sens.add_argument("--strategy", default="S1_ema_trend")
+    sens.add_argument("--param", action="append", default=[],
+                      help="name=v1,v2,v3 (repeatable); defaults to the strategy's own range")
+    sens.add_argument("--days", type=float, default=3.0)
+    sens.add_argument("--metric", default="net_return", choices=["net_return", "profit_factor", "pnl"])
+    sens.add_argument("--seed", type=int, default=None)
+    sens.add_argument("--json", action="store_true")
+
+    par = sub.add_parser("parity", help="record a session, replay it, compare decisions")
+    par.add_argument("--minutes", type=int, default=90)
+    par.add_argument("--seed", type=int, default=7)
+    par.add_argument("--json", action="store_true")
+
     png = sub.add_parser(
         "dashboard-png", help="render the dashboard to a PNG (no browser needed)"
     )
@@ -455,6 +478,132 @@ def build_parser() -> argparse.ArgumentParser:
     for action in sub.choices.values():
         _add_shared(action)
     return parser
+
+
+def cmd_walk_forward(args: argparse.Namespace) -> int:
+    from .backtest.walkforward import format_walk_forward, rolling_windows, run_walk_forward
+
+    cfg = _config(args)
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    total = args.train_days + args.test_days * max(1, args.windows)
+    windows = rolling_windows(
+        start,
+        start + timedelta(days=total),
+        train_days=args.train_days,
+        test_days=args.test_days,
+    )[: max(1, args.windows)]
+    if not windows:
+        print("no windows fit in the requested range", file=sys.stderr)
+        return 2
+    capital = D(args.capital) if args.capital else None
+    result = asyncio.run(
+        run_walk_forward(cfg, windows, capital=capital, seed=args.seed)
+    )
+    if args.json:
+        _print(
+            {
+                "windows": result["windows"],
+                "summary": result["summary"],
+                "metrics": result["metrics_dict"],
+                "gates": [{"name": g.name, "passed": g.passed, "detail": g.detail} for g in result["gates"]],
+                "passed": result["passed"],
+            }
+        )
+    else:
+        print(format_walk_forward(result))
+        print()
+        from .backtest.metrics import format_gates
+
+        print(format_gates(result["gates"]))
+        print("verdict:", "PASS" if result["passed"] else "NOT PROMOTABLE")
+    return 0
+
+
+def cmd_sensitivity(args: argparse.Namespace) -> int:
+    from .backtest.sensitivity import format_sensitivity, run_grid
+
+    cfg = _config(args)
+    axes = _parse_axes(args.param, cfg, args.strategy)
+    if not axes:
+        print("no parameters to sweep", file=sys.stderr)
+        return 2
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    report = asyncio.run(
+        run_grid(
+            cfg,
+            strategy=args.strategy,
+            axes=axes,
+            start=start,
+            end=start + timedelta(days=args.days),
+            seed=args.seed,
+            metric=args.metric,
+        )
+    )
+    if args.json:
+        _print(report)
+    else:
+        print(format_sensitivity(report))
+        print()
+        header = " | ".join(axes)
+        print(f"{header} | score | trades")
+        for row in report["grid"]:
+            values = " | ".join(str(row.get(name)) for name in axes)
+            print(f"{values} | {row.get('score')} | {row.get('trades')}")
+    return 0
+
+
+def _parse_axes(specs: list[str], cfg: Any, strategy: str) -> dict[str, list[Any]]:
+    """``--param ema_fast=12,20,30`` -> ``{"ema_fast": [12, 20, 30]}``."""
+    axes: dict[str, list[Any]] = {}
+    for spec in specs:
+        name, _, values = spec.partition("=")
+        if not name or not values:
+            raise SystemExit(f"bad --param {spec!r}; expected name=v1,v2")
+        raw = [v.strip() for v in values.split(",") if v.strip()]
+        axes[name] = [_coerce(v) for v in raw]
+    if axes:
+        return axes
+    # A sensible default sweep around whichever strategy was asked for.
+    entry = cfg.strategies.strategies.get(strategy)
+    if entry is None:
+        raise SystemExit(f"unknown strategy {strategy!r}")
+    for name in ("ema_fast", "ema_slow", "adx_min", "bb_stdev"):
+        if name not in entry.params:
+            continue
+        center = entry.params[name]
+        try:
+            base = float(center)
+        except (TypeError, ValueError):
+            continue
+        step = max(1.0, round(base * 0.3))
+        sweep = sorted({base - step, base, base + step})
+        axes[name] = [int(v) if float(v).is_integer() else v for v in sweep]
+    return axes
+
+
+def _coerce(text: str) -> Any:
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return text
+
+
+def cmd_parity(args: argparse.Namespace) -> int:
+    from .backtest.parity import format_parity, run_parity
+
+    cfg = _config(args)
+    result = asyncio.run(
+        run_parity(cfg, start=datetime(2024, 1, 1, tzinfo=UTC), minutes=args.minutes, seed=args.seed)
+    )
+    if args.json:
+        _print(result)
+    else:
+        print(format_parity(result))
+    return 0 if result["passed"] else 1
 
 
 def _cmd_dashboard_png(args: argparse.Namespace) -> int:
@@ -501,6 +650,9 @@ def main(argv: list[str] | None = None) -> int:
         "drill": cmd_drill,
         "dashboard": cmd_dashboard,
         "dashboard-png": _cmd_dashboard_png,
+        "walk-forward": cmd_walk_forward,
+        "sensitivity": cmd_sensitivity,
+        "parity": cmd_parity,
     }
     if args.command in ("pause", "resume", "kill", "lockdown"):
         args.action = args.command
