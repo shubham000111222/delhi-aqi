@@ -92,6 +92,7 @@ no API key is needed.
 | Historical backfill: paginated REST candles, de-duplicated, gap-checked, archived | done (offline exchange; live endpoint unreachable here) | `data/backfill.py` |
 | WebSocket streaming feed: injected transport, Binance decoders, backoff, REST gap fill | done (`stream` replay verdict, live socket blocked here) | `data/stream.py` |
 | Meta-labelling: triple-barrier labels, logistic gate, promote/skip rule | done, and it **rejects every gate** on this data (|edge| ≈ 1–3 bps vs 20 bps costs) | `ai/meta.py` |
+| Meta gate wired into the engine as a veto-only filter (`run --meta-gate`) | done, and **no card passes the save rule**, so nothing is installed by default | `meta_gate.py`, `ai/meta.py` |
 | Reduce-only sentiment overlay (lexicon + optional FinBERT, RSS) | done, **no live news feed wired** | `ai/sentiment.py` |
 | Parquet/DuckDB archive for candles and order books | done | `data/archive.py` |
 | Telegram command bot with whitelist and confirm step | done | `alerts/commands.py` |

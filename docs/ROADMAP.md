@@ -30,7 +30,7 @@ a capability that exists but has not cleared its gates is marked as such.
 | 12 Reliability & security | crash recovery, reconciliation, structured logs with redaction, heartbeats, disk guards, scoped auto-resume |
 | 12 Inbound commands | Telegram router: chat-id whitelist, confirm step with TTL and single use, audit line per command, transport-agnostic |
 | 12 Telegram transport | `getUpdates` long polling with persisted offset, `sendMessage`, backoff on failure, injected HTTP client, started by `run` when a token and chat id exist, `tradebot telegram` readiness check |
-| 13 Testing | 415 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
+| 13 Testing | 431 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
 | 18.1 Book recording | recorded on every session (`RecordingFeed`), archived to Parquet, summarised as spread statistics |
 | 18.6 Experiment tracking | `experiments` table, deterministic run ids, trial log used by the multiple-testing report |
 | 18.6 MLflow export | `tradebot experiments --export DIR` writes MLflow's file-store layout (meta/metrics/params/tags), non-numeric metrics moved to tags, verified by reading the export back with real MLflow 3.17 |
@@ -39,6 +39,7 @@ a capability that exists but has not cleared its gates is marked as such.
 | 19.1 Signal library | 32 features in 7 families, 44 signals in 8 families, IC on non-overlapping samples, stability, cost-adjusted PnL, correlation pruning, shuffled-label check |
 | 19.2 Complexity ladder | baseline → ridge → gradient boosting on purged folds; promotion needs +10% net expectancy in every window, enforced in code |
 | 19.7 Explainability / leakage | ridge weight shares with a >40% warning, multi-permutation shuffled-label test, far-shift test, Platt calibration with Brier score |
+| 19.3 Meta-label runtime gate | `MetaEntryFilter` installed as the engine's veto-only entry filter (`run --meta-gate card.json`): a saved card is loaded, features are rebuilt from the live bar window and cached per bar close, and anything unexpected lets the trade through with a logged reason |
 | 19.8 Guardrails | risk package imports nothing from `ai`; the AI layer imports no execution/engine code (both enforced by tests); unapproved or stale models produce no trade |
 | 19.9 What stays private | no model card is committed and `models/*.json` is gitignored |
 

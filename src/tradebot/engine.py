@@ -142,6 +142,9 @@ class Engine:
         # Sentiment overlay (§19.4): a *reduce-only* size modifier. None means "no news
         # feed configured", which is the default and changes nothing.
         self.sentiment: Any = None
+        #: A veto-only entry filter (a meta-label gate, for example). It may refuse a
+        #: trade; it may never resize one - sizing belongs to the risk engine.
+        self.entry_filter: Any = None
         self._squareoff_done_for: str | None = None
         # fills the venue has booked but this process has not applied yet
         self.unapplied_fills = 0
@@ -449,6 +452,8 @@ class Engine:
                 actor="risk",
             )
             return
+        if self.entry_filter is not None and not self._entry_allowed(signal, ctx):
+            return
         qty = decision.qty
         if self.sentiment is not None:
             qty = self._apply_sentiment(signal, qty, rules)
@@ -463,6 +468,36 @@ class Engine:
         )
         await self.om.submit_entry(signal, qty, price=decision.entry_price, plan=plan)
         self.stats.orders += 1
+
+    def _entry_allowed(self, signal: Signal, ctx: StrategyContext) -> bool:
+        """Consult the veto-only filter. A failing filter lets the trade through.
+
+        An exception here means the meta-model or its features are broken; blocking every
+        entry because a model file is unreadable would look identical to a market with no
+        setups, and nobody would investigate.
+        """
+        if self.entry_filter is None:  # pragma: no cover - guarded by the caller
+            return True
+        try:
+            allowed, reason = self.entry_filter(signal, ctx)
+        except Exception as exc:  # noqa: BLE001 - a broken filter must not stop trading
+            self._log(
+                "entry_filter_error",
+                {"symbol": signal.symbol, "error": type(exc).__name__, "str(exc)": str(exc)[:200]},
+                level="WARN",
+                actor="filter",
+            )
+            return True
+        if allowed:
+            return True
+        self.stats.vetoes += 1
+        self.store.save_verdict(signal.id, self._veto("entry_filter", reason))
+        self._log(
+            "entry_filter_veto",
+            {"signal_id": signal.id, "strategy": signal.strategy, "symbol": signal.symbol, "reason": reason},
+            actor="filter",
+        )
+        return False
 
     def _apply_sentiment(self, signal: Signal, qty: Decimal, rules: Any) -> Decimal:
         """Sentiment may shrink an approved size. It may never grow it.

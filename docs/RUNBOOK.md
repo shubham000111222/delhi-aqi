@@ -107,6 +107,26 @@ A strategy is promotable only if **all** of the following hold:
 
 If any check fails, the honest action is to change the strategy, not the gate.
 
+## Meta-label gate (optional)
+
+A meta-model decides *whether to take* a setup the strategies already produced. It cannot
+resize one: the risk engine owns size. Install a card with:
+
+```bash
+python -m tradebot meta --days 3          # fit and evaluate; it prints a verdict
+python -m tradebot run --meta-gate models/meta_btc.json
+```
+
+`save_meta` refuses to write a card whose gated trades do not make money after costs, so
+in practice this flag has nothing to load on synthetic data - which is the honest state.
+A card that is missing, malformed or inconsistent with its feature list stops the process
+at startup instead of silently trading unfiltered.
+
+At runtime the gate sees features rebuilt from the live bar window (cached per bar close).
+If the feature store fails, the frame is missing or the model file breaks mid-session, the
+entry is allowed and the reason is logged: a filter that fails closed looks exactly like a
+market with no setups.
+
 ## Experiment tracking (MLflow)
 
 Every backtest, grid cell and signal screen is already logged in the `experiments` table.

@@ -32,7 +32,7 @@ arrives, the gate is ready and honest.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -472,6 +472,64 @@ class MetaGate:
         )
 
 
+@dataclass
+class MetaEntryFilter:
+    """A `MetaGate` adapted to the engine's veto-only entry hook.
+
+    The engine hook may remove a trade and may never resize one, which is exactly the
+    contract §19.3 asks for: the meta-model decides *whether*, the risk engine decides
+    *how much*. Anything unexpected - a missing frame, a NaN feature, an unfit model -
+    lets the trade through and says why, because a filter that silently blocks trading is
+    indistinguishable from a broken feed.
+    """
+
+    gate: MetaGate
+    frame_for: Callable[[str], FeatureFrame | None]
+    name: str = "meta_label"
+
+    def __call__(self, signal: Any, ctx: Any = None) -> tuple[bool, str]:
+        del ctx
+        if not self.gate.ready:
+            return True, "meta model not ready"
+        try:
+            frame = self.frame_for(signal.symbol)
+        except Exception as exc:  # noqa: BLE001 - a broken feature store must not stop trading
+            return True, f"meta features unavailable: {type(exc).__name__}"
+        if frame is None or len(frame) == 0:
+            return True, "no features for this symbol yet"
+        try:
+            decision = self.gate.decide(frame)
+        except Exception as exc:  # noqa: BLE001
+            return True, f"meta gate error: {type(exc).__name__}"
+        if decision.take:
+            return True, decision.reason
+        return False, decision.reason
+
+
+def load_meta(path: str) -> MetaGate:
+    """Read a gate written by `save_meta`. Refuses a card that is not a meta model."""
+    import json
+    from pathlib import Path
+
+    payload = json.loads(Path(path).read_text())
+    if payload.get("kind") != "meta_label":
+        raise ValueError(f"{path} is not a meta-label model card")
+    model = LogisticGate()
+    model.coef_ = np.asarray(payload.get("coefficients") or [], dtype=float)
+    model.mean_ = np.asarray(payload.get("mean") or [], dtype=float)
+    model.scale_ = np.asarray(payload.get("scale") or [], dtype=float)
+    features = [str(name) for name in payload.get("features") or []]
+    if model.coef_ is None or len(model.coef_) != len(features) + 1:
+        raise ValueError(f"{path} is missing coefficients consistent with its features")
+    return MetaGate(
+        model=model,
+        threshold=float(payload.get("threshold") or 0.5),
+        features=features,
+        name=str(payload.get("name") or "meta_label"),
+        version=str(payload.get("version") or "1"),
+    )
+
+
 def save_meta(
     path: str,
     *,
@@ -496,9 +554,10 @@ def save_meta(
         "name": name,
         "kind": "meta_label",
         "features": list(features),
-        "coefficients": [float(c) for c in (model.coef_ or [])],
-        "mean": [float(v) for v in (model.mean_ or [])],
-        "scale": [float(v) for v in (model.scale_ or [])],
+        # `arr or []` is a numpy trap: a multi-element array has no truth value.
+        "coefficients": [float(c) for c in (model.coef_ if model.coef_ is not None else [])],
+        "mean": [float(v) for v in (model.mean_ if model.mean_ is not None else [])],
+        "scale": [float(v) for v in (model.scale_ if model.scale_ is not None else [])],
         "threshold": float(threshold),
         "metrics": report.as_dict(),
     }

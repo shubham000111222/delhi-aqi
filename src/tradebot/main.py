@@ -235,6 +235,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"\nrefusing to start live: {exc}", file=sys.stderr)
             return 3
     engine = asyncio.run(_build_engine(cfg))
+    if getattr(args, "meta_gate", None):
+        from .meta_gate import attach
+
+        try:
+            entry_filter = attach(engine, args.meta_gate)
+        except (OSError, ValueError) as exc:
+            print(f"refusing to start with that meta model: {exc}", file=sys.stderr)
+            engine.close()
+            return 2
+        print(
+            f"meta gate: {entry_filter.gate.name} threshold {entry_filter.gate.threshold:.2f}, "
+            f"{len(entry_filter.gate.features)} features (veto-only)"
+        )
 
     async def _main() -> int:
         loop = asyncio.get_running_loop()
@@ -423,6 +436,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = sub.add_parser("run", help="start the trading loop (paper by default)")
     run_parser.add_argument("--confirm", default=None, help='live mode: type the capital amount and "LIVE"')
+    run_parser.add_argument(
+        "--meta-gate", default=None, metavar="PATH",
+        help="a saved meta-label model card; it may refuse entries, never resize them",
+    )
 
     live_check = sub.add_parser("live-check", help="run every live-mode gate (never trades)")
     live_check.add_argument("--confirm", default=None)
