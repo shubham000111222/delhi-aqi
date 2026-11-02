@@ -11,6 +11,7 @@ from __future__ import annotations
 import random
 from collections.abc import Callable
 from decimal import Decimal
+from typing import Any
 
 from ...config import Mode, PaperConfig
 from ...core.clock import Clock
@@ -192,7 +193,15 @@ class PaperAdapter(ExchangeAdapter):
             avg, filled = mark, order.qty
         if filled < order.qty:
             order.status = OrderStatus.PARTIALLY_FILLED
-        self._record_fill(order, avg, filled, liquidity="taker")
+        try:
+            self._record_fill(order, avg, filled, liquidity="taker")
+        except PermanentExchangeError as exc:
+            # The venue refused the fill (no stock, no cash). The order must not stay
+            # SUBMITTED: it would be returned by get_open_orders() for ever and the
+            # engine's reconciliation would (correctly) report it as an unknown order.
+            order.with_status(OrderStatus.REJECTED, error=str(exc), updated_at=self.clock.now())
+            self.rejects += 1
+            raise
         if order.remaining <= 0:
             order.status = OrderStatus.FILLED
         else:
@@ -296,6 +305,19 @@ class PaperAdapter(ExchangeAdapter):
         for order in pending:
             if order.status.is_open:
                 await self._execute_market(order)
+
+    def adopt_positions(self, positions: list[Any], cash: Decimal) -> None:
+        """Take over open positions that survived a restart.
+
+        A fresh adapter knows nothing about yesterday's fills: its ledger starts at the
+        configured capital with no stock. Continuing to trade those positions then makes
+        every exit fail ("sell more than held"). Crash recovery has to hand the venue
+        simulator the same reality the ledger has.
+        """
+        for pos in positions:
+            base = self._base(pos.symbol)
+            self.holdings[base] = self.holdings.get(base, ZERO) + pos.qty
+        self.cash = cash
 
     # --- reconciliation view ---------------------------------------------
     async def snapshot(self) -> dict[str, object]:

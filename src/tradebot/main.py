@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import os
 import signal
 import sys
 from datetime import UTC, datetime, timedelta
@@ -376,7 +377,15 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 
     cfg = _config(args)
     app = create_app(cfg, run_bot=not getattr(args, "no_bot", False))
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    # DASHBOARD_LOG_LEVEL=info turns on uvicorn's access log: the quickest way to tell
+    # "the browser never reached us" apart from "we failed to answer".
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level=os.environ.get("DASHBOARD_LOG_LEVEL", "warning"),
+        access_log=os.environ.get("DASHBOARD_LOG_LEVEL", "").lower() == "info",
+    )
     return 0
 
 

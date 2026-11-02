@@ -214,6 +214,11 @@ class Engine:
         if cash is not None and not positions:
             # continue from the stored cash balance rather than resetting to capital
             self.ledger.cash = cash
+        adopt = getattr(self.adapter, "adopt_positions", None)
+        if callable(adopt):
+            # the venue side must agree with the ledger we just adopted, otherwise every
+            # exit from a restored position is rejected as "sell more than held"
+            adopt(positions, self.ledger.cash)
 
     def _load_state(self) -> None:
         day_start = self.store.kv_get("day_start_equity")
@@ -970,7 +975,17 @@ class Engine:
             return
         if day == self._last_day:
             return
-        await self.emit_daily_report(day_end=now)
+        try:
+            await self.emit_daily_report(day_end=now)
+        except Exception as exc:  # noqa: BLE001 - a report bug must never stop trading
+            log.exception('{"event":"daily_report_failed"}')
+            self.store.log_event(
+                "daily_report_failed",
+                {"error": str(exc)[:300], "date": day},
+                level="CRIT",
+                actor="reporting",
+                ts=now,
+            )
         self._last_day = day
         self.store.kv_set("last_day", day)
         self.store.kv_set("day_start_equity", to_str(equity, 8))

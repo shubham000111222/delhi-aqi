@@ -65,6 +65,20 @@ class TradeStats:
         }
 
 
+def _signed(value: Any, places: int = 2) -> str:
+    """Signed money for a table cell, from a Decimal, a string (as stored) or a float.
+
+    Report tables are built from dictionaries that mix live values and rows read back
+    out of SQLite, where money arrives as text. ``f"{value:+.2f}"`` raises
+    ``Sign not allowed in string format specifier`` on a string, which used to take
+    the whole engine down at the first midnight.
+    """
+    try:
+        return f"{D(value):+,.{places}f}"
+    except (TypeError, ValueError, ArithmeticError):  # pragma: no cover - defensive
+        return str(value)
+
+
 @dataclass
 class DailyReport:
     date: str
@@ -142,7 +156,7 @@ class DailyReport:
         if self.by_strategy:
             lines.append(
                 "By strategy: "
-                + " | ".join(f"{k.split('_')[0]} {v['pnl']:+}" for k, v in self.by_strategy.items())
+                + " | ".join(f"{k.split('_')[0]} {_signed(v['pnl'])}" for k, v in self.by_strategy.items())
             )
         lines.append(
             f"Risk: max intraday DD {self.max_intraday_drawdown * 100:+.2f}% | "
@@ -206,10 +220,12 @@ class DailyReport:
             "| --- | --- | --- | --- | --- |",
         ]
         for name, row in self.by_strategy.items():
-            md.append(f"| {name} | {row['trades']} | {row['pnl']:+} | {row['wins']} | {row['win_rate']} |")
+            md.append(
+                f"| {name} | {row['trades']} | {_signed(row['pnl'])} | {row['wins']} | {row['win_rate']} |"
+            )
         md += ["", "| Symbol | Trades | PnL |", "| --- | --- | --- |"]
         for name, row in self.by_symbol.items():
-            md.append(f"| {name} | {row['trades']} | {row['pnl']:+} |")
+            md.append(f"| {name} | {row['trades']} | {_signed(row['pnl'])} |")
 
         md += [
             "",
