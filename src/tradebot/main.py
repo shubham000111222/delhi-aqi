@@ -25,7 +25,7 @@ from decimal import Decimal
 from typing import Any
 
 from .config import Config, Mode, load_config
-from .core.clock import Clock, SimClock, utcnow
+from .core.clock import Clock, SimClock, parse_iso, utcnow
 from .core.logging import get_logger, setup_logging
 from .core.models import KillLevel
 from .core.money import D, to_str
@@ -504,6 +504,20 @@ def build_parser() -> argparse.ArgumentParser:
     arc.add_argument("--seed", type=int, default=7)
     arc.add_argument("--keep-days", type=int, default=None, help="delete book partitions older than this")
     arc.add_argument("--json", action="store_true")
+
+    bfl = sub.add_parser("backfill", help="paginate historical candles into the archive")
+    bfl.add_argument("--symbols", default=None, help="comma-separated; default: config symbols")
+    bfl.add_argument("--timeframe", default="1m")
+    bfl.add_argument("--days", type=int, default=3)
+    bfl.add_argument("--from", dest="from_dt", default=None, help="ISO start (overrides --days)")
+    bfl.add_argument("--to", dest="to_dt", default=None, help="ISO end (default: now)")
+    bfl.add_argument("--source", choices=["ccxt", "demo"], default="ccxt")
+    bfl.add_argument("--page-limit", type=int, default=500)
+    bfl.add_argument("--max-pages", type=int, default=500)
+    bfl.add_argument("--root", default=None, help="archive directory")
+    bfl.add_argument("--write", action="store_true", help="write the candles to the archive")
+    bfl.add_argument("--seed", type=int, default=7)
+    bfl.add_argument("--json", action="store_true")
 
     tlg = sub.add_parser("telegram", help="inbound Telegram command listener (bounded run)")
     tlg.add_argument("--polls", type=int, default=1, help="how many long polls to perform")
@@ -1199,6 +1213,62 @@ def cmd_telegram(args: argparse.Namespace) -> int:
     return 0 if report.get("telegram_reachable") else 3
 
 
+def cmd_backfill(args: argparse.Namespace) -> int:
+    """Paginate historical candles into the Parquet archive and report the coverage.
+
+    `--source demo` runs against a deterministic offline exchange so the pagination,
+    de-duplication and gap detection can be seen working; `--source ccxt` is the real
+    thing and needs exchange access this sandbox does not have.
+    """
+    from .data.archive import Archive
+    from .data.backfill import Backfill, rest_fetcher, synthetic_fetcher
+
+    cfg = _config(args)
+    symbols = [s.strip() for s in (args.symbols or ",".join(cfg.symbol_names())).split(",") if s.strip()]
+    end = parse_iso(args.to_dt) if args.to_dt else utcnow()
+    start = parse_iso(args.from_dt) if args.from_dt else (end - timedelta(days=max(1, args.days)))
+    fetcher = synthetic_fetcher(seed=args.seed, page_size=args.page_limit) if args.source == "demo" else rest_fetcher(cfg)
+    backfill = Backfill(fetcher, page_limit=args.page_limit, max_pages=args.max_pages)
+    archive = Archive(args.root or (cfg.settings.data_dir / "archive")) if args.write else None
+
+    async def _main() -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for symbol in symbols:
+            candles, report = await backfill.run(symbol, args.timeframe, start, end)
+            entry = report.as_dict()
+            if archive is not None and candles:
+                paths = archive.write_candles(candles)
+                entry["archived_files"] = [str(path) for path in paths]
+            out.append(entry)
+        closer = getattr(fetcher, "aclose", None)
+        if closer is not None:
+            await closer()  # a live ccxt session left open leaks a socket and logs loudly
+        return out
+
+    reports = asyncio.run(_main())
+    ok = all(report["kept"] > 0 and report["error"] is None for report in reports)
+    if args.json:
+        print(json.dumps({"source": args.source, "reports": reports}, indent=2, default=str))
+    else:
+        print(f"backfill {start.isoformat(timespec='minutes')} -> {end.isoformat(timespec='minutes')} ({args.timeframe})")
+        for report in reports:
+            verdict = "complete" if report["complete"] else ("STUCK" if report["stuck"] else "incomplete")
+            print(
+                f"  {report['symbol']:10s} pages {report['pages']:3d}  kept {report['kept']:5d}"
+                f"  expected {report['expected_bars']:5d}  coverage {report['coverage'] * 100:5.1f}%"
+                f"  gaps {len(report['gaps']):2d}  duplicates {report['duplicates']:3d}  {verdict}"
+            )
+            if report["error"]:
+                print(f"             error: {report['error']}")
+            if report.get("archived_files"):
+                print(f"             archived {len(report['archived_files'])} partition(s)")
+        if args.source == "demo":
+            print("  (demo: a deterministic offline exchange - the pagination is real, the prices are not)")
+        elif not ok:
+            print("  the real exchange refused or was unreachable; nothing was invented to fill the gap")
+    return 0 if ok else 4
+
+
 def _frame_ts(frame: Any) -> datetime | None:
     """The instant an exchange frame refers to, if it says."""
     data = frame.get("data") if isinstance(frame, dict) else None
@@ -1640,6 +1710,7 @@ def main(argv: list[str] | None = None) -> int:
         "meta": cmd_meta,
         "stream": cmd_stream,
         "telegram": cmd_telegram,
+        "backfill": cmd_backfill,
     }
     if args.command in ("pause", "resume", "kill", "lockdown"):
         args.action = args.command

@@ -485,8 +485,8 @@ def rest_gap_filler(config: Config) -> GapFiller:
             exchange = getattr(ccxt, config.settings.ccxt.exchange_id)(
                 {"enableRateLimit": True, "options": {"defaultType": "spot"}}
             )
+            state["exchange"] = exchange  # kept even if load_markets fails, so it closes
             await exchange.load_markets()
-            state["exchange"] = exchange
         timeframe = config.settings.base_timeframe
         try:
             raw = await exchange.fetch_ohlcv(

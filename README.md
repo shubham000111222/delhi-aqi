@@ -88,6 +88,7 @@ no API key is needed.
 | Complexity ladder (baseline → ridge → gradient boosting) with a promotion rule | done, and it **promotes nothing** on this data | `ai/ladder.py` |
 | Model registry + model cards; S4 wired to an approved card | done, **no model is registered** | `ai/registry.py`, `strategies/ml_signal.py` |
 | Slippage recorder and calibrated slippage model | done (median 0.0, p95 +26 bps measured) | `execution/slippage.py` |
+| Historical backfill: paginated REST candles, de-duplicated, gap-checked, archived | done (offline exchange; live endpoint unreachable here) | `data/backfill.py` |
 | WebSocket streaming feed: injected transport, Binance decoders, backoff, REST gap fill | done (`stream` replay verdict, live socket blocked here) | `data/stream.py` |
 | Meta-labelling: triple-barrier labels, logistic gate, promote/skip rule | done, and it **rejects every gate** on this data (|edge| ≈ 1–3 bps vs 20 bps costs) | `ai/meta.py` |
 | Reduce-only sentiment overlay (lexicon + optional FinBERT, RSS) | done, **no live news feed wired** | `ai/sentiment.py` |
@@ -217,6 +218,7 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | `tradebot slippage --days N` | measured slippage distribution and a calibrated model |
 | `tradebot meta --days N` | triple-barrier meta-labels, gate threshold search, promote/skip verdict |
 | `tradebot stream --minutes N` | replay a recorded session through the streaming feed and print its verdict |
+| `tradebot backfill --days N --write` | paginate historical candles into the archive and report coverage and gaps |
 | `tradebot telegram` | check the inbound-command wiring: token, chat id, does Telegram answer |
 | `tradebot venues --venue nse --notional 100000` | session state, square-off deadline, round-trip cost comparison |
 | `tradebot archive --record-minutes N` | persist a session to Parquet and query it with DuckDB |

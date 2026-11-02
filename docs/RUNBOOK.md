@@ -107,6 +107,24 @@ A strategy is promotable only if **all** of the following hold:
 
 If any check fails, the honest action is to change the strategy, not the gate.
 
+## Historical backfill
+
+Before any strategy result means anything the archive needs real history:
+
+```bash
+python -m tradebot backfill --days 30 --timeframe 1m --write   # real exchange, needs network
+python -m tradebot backfill --source demo --days 1 --write     # offline: proves the pagination
+```
+
+Read three numbers per symbol: `coverage` (kept ÷ expected bars), `gaps` (holes with their
+sizes) and the verdict - `complete`, `incomplete`, or `STUCK`. `STUCK` means the endpoint
+returned the same page twice and the fetch stopped instead of looping forever; `incomplete`
+means some pages failed. Neither is silently hidden, and neither is filled with invented
+bars: a backfill with holes is a backfill with holes.
+
+The current bar is always dropped. A bar that has not closed yet is a future leak, and the
+archive is the one place that must never contain one.
+
 ## Streaming feed
 
 `--feed stream` runs the bot off a WebSocket instead of REST polling. Two commands matter:
