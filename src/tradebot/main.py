@@ -464,6 +464,12 @@ def build_parser() -> argparse.ArgumentParser:
     sens.add_argument("--seed", type=int, default=None)
     sens.add_argument("--json", action="store_true")
 
+    ven = sub.add_parser("venues", help="market calendar, square-off and cost comparison")
+    ven.add_argument("--venue", default="crypto", choices=["crypto", "nse"])
+    ven.add_argument("--notional", default="100000", help="notional for the cost comparison")
+    ven.add_argument("--at", default=None, help="ISO timestamp to evaluate (default: now)")
+    ven.add_argument("--json", action="store_true")
+
     par = sub.add_parser("parity", help="record a session, replay it, compare decisions")
     par.add_argument("--minutes", type=int, default=90)
     par.add_argument("--seed", type=int, default=7)
@@ -592,6 +598,60 @@ def _coerce(text: str) -> Any:
         return text
 
 
+def cmd_venues(args: argparse.Namespace) -> int:
+    """Show the venue seams: is it open, when must we flatten, what does a round trip cost."""
+    from .venues import (
+        AlwaysOpenCalendar,
+        CryptoCostModel,
+        Instrument,
+        NSECalendar,
+        NSECostModel,
+        SquareOffScheduler,
+        compare_models,
+        round_trip,
+    )
+
+    cfg = _config(args)
+    calendar = NSECalendar() if args.venue == "nse" else AlwaysOpenCalendar()
+    at = datetime.fromisoformat(args.at.replace("Z", "+00:00")) if args.at else datetime.now(UTC)
+    scheduler = SquareOffScheduler(calendar)
+    plan = scheduler.plan(at)
+    fees = cfg.settings.paper
+    crypto = CryptoCostModel(maker_fee=fees.maker_fee, taker_fee=fees.taker_fee)
+    models = [crypto, NSECostModel()]
+    notional = D(args.notional)
+
+    report: dict[str, Any] = {
+        "venue": calendar.name,
+        "at": at.isoformat(),
+        "open": calendar.is_open(at),
+        "next_open": (None if calendar.is_open(at) else calendar.next_open(at).isoformat()),
+        "square_off": plan.as_dict() if plan else None,
+        "costs": compare_models(notional, models),
+        "instrument_example": Instrument("EXAMPLE").band(D("1000")),
+    }
+    if args.json:
+        _print(report)
+        return 0
+    print(f"venue {report['venue']} at {report['at']}")
+    print(f"  open: {report['open']}" + (f" | next open {report['next_open']}" if report["next_open"] else ""))
+    if plan:
+        print(
+            f"  square-off: {plan.reason} | close {plan.session_close.isoformat()} "
+            f"| {plan.seconds_left / 60:.0f} min left"
+        )
+    else:
+        print("  square-off: none (continuous market)")
+    print(f"  round trip on {notional}:")
+    for row in report["costs"]:
+        print(f"    {row['model']:8s} total {row['total']:>10s}  ({float(row['rate']) * 100:.3f}% of notional)")
+    crypto_rt = round_trip(crypto, entry_notional=notional, exit_notional=notional)
+    nse_rt = round_trip(NSECostModel(), entry_notional=notional, exit_notional=notional)
+    print(f"  cheapest: {'NSE' if nse_rt.total < crypto_rt.total else 'crypto'} by "
+          f"{abs(nse_rt.total - crypto_rt.total):.2f}")
+    return 0
+
+
 def cmd_parity(args: argparse.Namespace) -> int:
     from .backtest.parity import format_parity, run_parity
 
@@ -653,6 +713,7 @@ def main(argv: list[str] | None = None) -> int:
         "walk-forward": cmd_walk_forward,
         "sensitivity": cmd_sensitivity,
         "parity": cmd_parity,
+        "venues": cmd_venues,
     }
     if args.command in ("pause", "resume", "kill", "lockdown"):
         args.action = args.command

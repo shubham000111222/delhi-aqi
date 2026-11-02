@@ -130,6 +130,13 @@ class Engine:
         self._last_health_check: datetime | None = None
         # when the L1 pause condition was first observed as cleared (sustained health)
         self._healthy_since: datetime | None = None
+        # Venue seams (§18.8). Defaults describe a crypto venue: always open, no square-off.
+        from .venues.calendar import AlwaysOpenCalendar
+        from .venues.squareoff import SquareOffScheduler
+
+        self.calendar: Any = AlwaysOpenCalendar()
+        self.squareoff: Any = SquareOffScheduler(self.calendar)
+        self._squareoff_done_for: str | None = None
         # fills the venue has booked but this process has not applied yet
         self.unapplied_fills = 0
         self._last_snapshot: datetime | None = None
@@ -335,6 +342,7 @@ class Engine:
                     actor="market",
                 )
         await self._snapshot_equity()
+        await self._check_square_off()
         if isinstance(self.clock, SimClock) and self.clock.pace > 0:
             # A *paced* simulated clock drives the dashboard demo: it has no wall time
             # to wait on either, so the periodic health work (staleness, expiry,
@@ -402,6 +410,18 @@ class Engine:
     # entry path
     # ------------------------------------------------------------------
     async def _try_enter(self, signal: Signal, ctx: StrategyContext) -> None:
+        # market-hours gate (§18.8): an entry outside the venue's session is not a trade,
+        # it is a rejection waiting to happen. Crypto is always open, so this is free.
+        session_note = self.market_session_note()
+        if session_note is not None:
+            self.stats.vetoes += 1
+            self.store.save_verdict(signal.id, self._veto("market_closed", session_note))
+            self._log(
+                "market_closed_veto",
+                {"symbol": signal.symbol, "reason": session_note},
+                actor="risk",
+            )
+            return
         if not self.killswitch.can_open_entries():
             self.stats.vetoes += 1
             self.store.save_verdict(signal.id, self._veto("kill_switch", f"kill level {self.killswitch.level.value}"))
@@ -793,6 +813,32 @@ class Engine:
                 self.killswitch.trigger(level, trigger=_limit_trigger(reason), reason=reason)
                 if level.rank >= KillLevel.L2.rank:
                     asyncio.create_task(self.flatten_all(reason))
+
+    def market_session_note(self) -> str | None:
+        """Why entries are not allowed right now, or None when the session is open."""
+        now = self.clock.now()
+        if self.calendar.is_open(now):
+            return None
+        return f"venue {self.calendar.name} is closed at {iso(now)}"
+
+    async def _check_square_off(self) -> None:
+        """Flatten intraday exposure before the bell, once per session, on market time."""
+        if self.squareoff is None:
+            return
+        now = self.clock.now()
+        if not self.squareoff.should_flatten(now):
+            return
+        session_key = now.date().isoformat()
+        if self._squareoff_done_for == session_key or not self.ledger.open_positions:
+            return
+        self._squareoff_done_for = session_key
+        self._log(
+            "square_off",
+            {"reason": "mandatory square-off before the close", "positions": len(self.ledger.open_positions)},
+            level="WARN",
+            actor="risk",
+        )
+        await self.flatten_all("square-off")
 
     def _log(
         self,
