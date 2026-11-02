@@ -464,6 +464,13 @@ def build_parser() -> argparse.ArgumentParser:
     sens.add_argument("--seed", type=int, default=None)
     sens.add_argument("--json", action="store_true")
 
+    arc = sub.add_parser("archive", help="Parquet candle/book archive (write a session, inspect, prune)")
+    arc.add_argument("--root", default=None, help="archive directory (default: <data_dir>/archive)")
+    arc.add_argument("--record-minutes", type=int, default=0, help="record a session of this length")
+    arc.add_argument("--seed", type=int, default=7)
+    arc.add_argument("--keep-days", type=int, default=None, help="delete book partitions older than this")
+    arc.add_argument("--json", action="store_true")
+
     ven = sub.add_parser("venues", help="market calendar, square-off and cost comparison")
     ven.add_argument("--venue", default="crypto", choices=["crypto", "nse"])
     ven.add_argument("--notional", default="100000", help="notional for the cost comparison")
@@ -598,6 +605,70 @@ def _coerce(text: str) -> Any:
         return text
 
 
+def cmd_archive(args: argparse.Namespace) -> int:
+    """Record a session into the Parquet archive, then report what is there."""
+    from .backtest.parity import _event_rows  # noqa: F401 - keep imports honest
+    from .data.archive import Archive, write_tape_to_archive
+    from .data.tape import RecordingFeed
+
+    cfg = _config(args)
+    root = args.root or (cfg.settings.data_dir / "archive")
+    archive = Archive(root)
+    written: dict[str, Any] = {}
+
+    if args.record_minutes > 0:
+        from .core.clock import SimClock
+        from .core.store import Store
+        from .data.feed import SyntheticFeed
+        from .engine import Engine
+
+        async def _record() -> object:
+            start = datetime(2024, 1, 1, tzinfo=UTC)
+            clock = SimClock(start)
+            store = Store(":memory:")
+            synthetic = SyntheticFeed(cfg, clock)
+            synthetic.rng.seed(args.seed)
+            feed = RecordingFeed(cfg, synthetic, clock)
+            engine = await Engine.build(cfg, clock=clock, store=store, feed=feed)
+            await engine.run(stop_at=start + timedelta(minutes=args.record_minutes))
+            try:
+                return write_tape_to_archive(archive, feed.tape.events)
+            finally:
+                engine.close()
+
+        from .data.archive import ArchiveStats
+
+        stats = asyncio.run(_record())
+        written = stats.as_dict() if isinstance(stats, ArchiveStats) else {}
+
+    removed = 0
+    if args.keep_days is not None:
+        removed = len(archive.apply_retention(keep_days=args.keep_days))
+
+    report: dict[str, Any] = {
+        "root": str(root),
+        "written": written,
+        "removed": removed,
+        "coverage": archive.coverage(),
+    }
+    if args.json:
+        _print(report)
+        return 0
+    if written:
+        print(f"recorded: {written['candles']} candles, {written['books']} books, "
+              f"{written['bytes'] / 1024:.0f} KiB")
+    coverage: dict[str, Any] = dict(report["coverage"])
+    for kind, info in coverage.items():
+        print(
+            f"{kind}: {info['files']} files | {len(info['symbols'])} symbols | "
+            f"{info['days']} days ({info['first_day']} .. {info['last_day']}) | "
+            f"{info['bytes'] / 1024:.0f} KiB"
+        )
+    if removed:
+        print(f"retention removed {removed} book partitions")
+    return 0
+
+
 def cmd_venues(args: argparse.Namespace) -> int:
     """Show the venue seams: is it open, when must we flatten, what does a round trip cost."""
     from .venues import (
@@ -714,6 +785,7 @@ def main(argv: list[str] | None = None) -> int:
         "sensitivity": cmd_sensitivity,
         "parity": cmd_parity,
         "venues": cmd_venues,
+        "archive": cmd_archive,
     }
     if args.command in ("pause", "resume", "kill", "lockdown"):
         args.action = args.command
