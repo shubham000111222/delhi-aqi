@@ -92,7 +92,8 @@ no API key is needed.
 | Meta-labelling: triple-barrier labels, logistic gate, promote/skip rule | done, and it **rejects every gate** on this data (|edge| ≈ 1–3 bps vs 20 bps costs) | `ai/meta.py` |
 | Reduce-only sentiment overlay (lexicon + optional FinBERT, RSS) | done, **no live news feed wired** | `ai/sentiment.py` |
 | Parquet/DuckDB archive for candles and order books | done | `data/archive.py` |
-| Telegram command bot with whitelist and confirm step | done (transport not exercised here) | `alerts/commands.py` |
+| Telegram command bot with whitelist and confirm step | done | `alerts/commands.py` |
+| Telegram transport: long polling with offset, sends, backoff, started by `run` | done (mock-tested; the real API is unreachable here) | `alerts/telegram.py` |
 | NSE-ready seams: calendar, instruments, cost model, sessions, square-off | done | `venues/` |
 | Live exchange connectivity, a real WebSocket session, LLM journal in production | **not built** — see `docs/ROADMAP.md` | — |
 
@@ -186,7 +187,7 @@ src/tradebot/
   backtest/            metrics, runner, walkforward, sensitivity, parity, robustness
   reporting/           daily report, tax ledger rows
   ai/                  journal, features (32), signals (44), ladder, registry, meta, sentiment
-  alerts/              notifier (Telegram + dedupe), commands (inbound bot)
+  alerts/              notifier (outbound + dedupe), commands (router), telegram (transport)
   watchdog/            watchdog process
   dashboard/           FastAPI app + single-page UI
   engine.py main.py
@@ -216,6 +217,7 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | `tradebot slippage --days N` | measured slippage distribution and a calibrated model |
 | `tradebot meta --days N` | triple-barrier meta-labels, gate threshold search, promote/skip verdict |
 | `tradebot stream --minutes N` | replay a recorded session through the streaming feed and print its verdict |
+| `tradebot telegram` | check the inbound-command wiring: token, chat id, does Telegram answer |
 | `tradebot venues --venue nse --notional 100000` | session state, square-off deadline, round-trip cost comparison |
 | `tradebot archive --record-minutes N` | persist a session to Parquet and query it with DuckDB |
 

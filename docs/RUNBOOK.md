@@ -133,6 +133,32 @@ In this sandbox `--live` reaches the socket and is refused (`ConnectionResetErro
 retries with backoff. That is the honest result: nothing here has ever decoded a frame
 from a real exchange.
 
+## Telegram commands
+
+The listener starts with the bot (`tradebot run`) when `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_CHAT_ID` are set; there is no separate process. Check the wiring before trusting
+it:
+
+```bash
+python -m tradebot telegram            # token present? chat id? does Telegram answer?
+```
+
+Expected when configured correctly:
+
+```
+token: ok   chat id: 123456789   telegram reachable: True
+  pending updates: 0 (offset starts at 0, so a backlog is normal on the first check)
+```
+
+Exit codes: `0` reachable, `2` not configured (no token, or no allowed chat id), `3`
+Telegram did not answer. A missing chat id is worth an exit code of its own: with a token
+but no whitelist, every command is refused and the bot looks broken rather than locked.
+
+Commands: `/status /pnl /positions /report /pause /resume /flatten /kill /help`.
+`/flatten`, `/kill` and `/lockdown` require `/confirm` within 120 seconds, and the
+confirmation is single-use. Anything from a chat id that is not whitelisted is ignored,
+never answered, and written to the event log.
+
 ## Fire drill (paper, monthly)
 
 ```bash

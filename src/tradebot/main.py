@@ -239,6 +239,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     async def _main() -> int:
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
+        listener = _start_command_listener(cfg, engine)
 
         def _stop(*_: object) -> None:
             stop.set()
@@ -253,6 +254,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             engine.running = False
             run_task.cancel()
         await asyncio.gather(run_task, return_exceptions=True)
+        if listener is not None:
+            listener.cancel()
+            await asyncio.gather(listener, return_exceptions=True)
         print(json.dumps(engine.status(), indent=2, default=str))
         engine.close()
         return 0
@@ -500,6 +504,11 @@ def build_parser() -> argparse.ArgumentParser:
     arc.add_argument("--seed", type=int, default=7)
     arc.add_argument("--keep-days", type=int, default=None, help="delete book partitions older than this")
     arc.add_argument("--json", action="store_true")
+
+    tlg = sub.add_parser("telegram", help="inbound Telegram command listener (bounded run)")
+    tlg.add_argument("--polls", type=int, default=1, help="how many long polls to perform")
+    tlg.add_argument("--poll-timeout", type=int, default=1, help="long-poll timeout in seconds")
+    tlg.add_argument("--json", action="store_true")
 
     stm = sub.add_parser("stream", help="streaming feed: replay a recording, or try the live socket")
     stm.add_argument("--minutes", type=int, default=120, help="minutes of synthetic market to record")
@@ -1108,6 +1117,88 @@ def cmd_robustness(args: argparse.Namespace) -> int:
     return 0
 
 
+def _start_command_listener(cfg: Config, engine: Any) -> asyncio.Task[Any] | None:
+    """Start the inbound command listener when a token and a chat id are configured."""
+    from .alerts.commands import CommandRouter, build_ops
+    from .alerts.telegram import serve, transport_from_config
+
+    transport = transport_from_config(cfg)
+    chat = str(cfg.secrets.telegram_chat_id or "").strip()
+    if transport is None or not chat:
+        return None
+    allowed: frozenset[int] | frozenset[str]
+    if chat.lstrip("-").isdigit():
+        allowed = frozenset({int(chat)})
+    elif chat:
+        allowed = frozenset({chat})
+    else:  # pragma: no cover - guarded by the caller
+        return None
+    router = CommandRouter(
+        ops=build_ops(engine=engine, store=engine.store, clock=engine.clock),
+        whitelist=allowed,
+    )
+    return asyncio.create_task(serve(router, transport))
+
+
+def cmd_telegram(args: argparse.Namespace) -> int:
+    """Check the inbound Telegram wiring without pretending to run a bot.
+
+    The listener needs a running engine to answer ``/status`` or ``/flatten``, so it is
+    started by ``run``. On its own this command verifies the token, the whitelist and that
+    Telegram answers at all - the three things that are wrong when commands go silent.
+    """
+    from .alerts.commands import HELP
+    from .alerts.telegram import transport_from_config
+
+    cfg = _config(args)
+    transport = transport_from_config(cfg)
+    chat = str(cfg.secrets.telegram_chat_id or "").strip()
+    report: dict[str, Any] = {
+        "token_configured": transport is not None,
+        "whitelist": [chat] if chat else [],
+        "listener_starts_with": "tradebot run",
+    }
+    if transport is None:
+        report["verdict"] = "no bot token: the listener will not start"
+        if args.json:
+            print(json.dumps(report, indent=2, default=str))
+        else:
+            print(report["verdict"])
+            print("  set TELEGRAM_BOT_TOKEN (and TELEGRAM_CHAT_ID) to enable it")
+            print(f"  the listener would answer these commands:\n\n{HELP}")
+        return 2
+    if not chat:
+        report["verdict"] = "token present but no allowed chat id: every command would be refused"
+        if args.json:
+            print(json.dumps(report, indent=2, default=str))
+        else:
+            print(report["verdict"])
+        return 2
+
+    async def _probe() -> dict[str, Any]:
+        updates = await transport.get_updates(timeout=args.poll_timeout)
+        return {
+            "telegram_reachable": transport.errors == 0,
+            "pending_updates": len(updates),
+            "http_calls": transport.calls,
+        }
+
+    report.update(asyncio.run(_probe()))
+    report["verdict"] = (
+        "token and chat id look right; `tradebot run` will answer commands"
+        if report.get("telegram_reachable")
+        else "telegram refused or did not answer - check the token"
+    )
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+    else:
+        print(f"token: ok   chat id: {chat}   telegram reachable: {report.get('telegram_reachable')}")
+        print(f"  pending updates: {report.get('pending_updates')} (offset starts at 0, so a "
+              "backlog is normal on the first check)")
+        print(f"  verdict: {report['verdict']}")
+    return 0 if report.get("telegram_reachable") else 3
+
+
 def _frame_ts(frame: Any) -> datetime | None:
     """The instant an exchange frame refers to, if it says."""
     data = frame.get("data") if isinstance(frame, dict) else None
@@ -1548,6 +1639,7 @@ def main(argv: list[str] | None = None) -> int:
         "slippage": cmd_slippage,
         "meta": cmd_meta,
         "stream": cmd_stream,
+        "telegram": cmd_telegram,
     }
     if args.command in ("pause", "resume", "kill", "lockdown"):
         args.action = args.command

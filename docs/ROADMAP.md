@@ -28,7 +28,8 @@ a capability that exists but has not cleared its gates is marked as such.
 | 11 Dashboard | live equity, positions, risk usage, signals with reasons, trades, event log, controls, PNG export |
 | 12 Reliability & security | crash recovery, reconciliation, structured logs with redaction, heartbeats, disk guards, scoped auto-resume |
 | 12 Inbound commands | Telegram router: chat-id whitelist, confirm step with TTL and single use, audit line per command, transport-agnostic |
-| 13 Testing | 356 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
+| 12 Telegram transport | `getUpdates` long polling with persisted offset, `sendMessage`, backoff on failure, injected HTTP client, started by `run` when a token and chat id exist, `tradebot telegram` readiness check |
+| 13 Testing | 370 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
 | 18.1 Book recording | recorded on every session (`RecordingFeed`), archived to Parquet, summarised as spread statistics |
 | 18.6 Experiment tracking | `experiments` table, deterministic run ids, trial log used by the multiple-testing report |
 | 18.8 NSE-ready seams | `MarketCalendar` + `NSECalendar`, `Instrument` (tick/lot/band), `NSECostModel` (STT, GST, stamp, DP), daily-expiring sessions, square-off scheduler, engine hooks |
@@ -48,7 +49,7 @@ a capability that exists but has not cleared its gates is marked as such.
 | **Live exchange connectivity** | This sandbox has no exchange access; untestable code on money paths is a liability | run `ccxt_live` against testnet with keys, then a 2-week paper soak |
 | **A WebSocket session against a real exchange** | The feed, its decoders and its reconnect/gap-fill logic are written and tested, but this sandbox blocks the socket (it was tried: `ConnectionResetError`, three reconnects, no frames) | run `python -m tradebot stream --live` from a networked host and watch `describe()` |
 | **Historical backfill via REST** | Reconnect gap fill exists (`fetch_ohlcv` per missed window), but a full multi-month paginator is untested here | paginate `fetch_ohlcv`, resumable, validated against the live candle builder |
-| **Live Telegram transport** | The router and confirm flow are tested against a fake transport; the long-poll client needs a token and network | implement `get_updates`/`send_message` over `httpx`, point it at the router |
+| **A Telegram session against the real API** | The transport is implemented and tested through an `httpx` mock, but this sandbox cannot open TLS to `api.telegram.org` (`ConnectError`, reported as `telegram reachable: False`) | run `python -m tradebot telegram` with a real token |
 | **NSE execution adapter** | The seams exist (calendar, costs, instruments, sessions, square-off), but no Indian broker API is implemented | Kite/Zerodha adapter behind the same `ExchangeAdapter` interface; verify tariff constants against current circulars |
 | **MLflow experiment backend** | Schema and holdout lock exist in SQLite; no MLflow dependency | wire `save_experiment` to MLflow's file backend |
 | **Autonomous research loop (19.5)** | An automatic search over strategies multiplies the multiple-testing problem this repo already takes seriously | only after the trial log and promotion rule have been used by hand for a while |
