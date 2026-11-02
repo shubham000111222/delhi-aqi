@@ -821,7 +821,7 @@ class Engine:
             open_orders = await self.adapter.get_open_orders()
         except Exception as exc:  # noqa: BLE001
             return f"open order query failed: {exc}"
-        known = {o.client_order_id for o in self.om.pending.values()}
+        known = {entry.order.client_order_id for entry in self.om.pending.values()}
         unknown = [
             o
             for o in open_orders

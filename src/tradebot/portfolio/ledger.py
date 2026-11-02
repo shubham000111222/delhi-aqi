@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 from ..core.clock import utcnow
 from ..core.models import Fill, Position, Side
@@ -139,6 +139,7 @@ class Ledger:
         self.cash -= notional + fill.fee
         self.fees_paid += fill.fee
         if pos is None:
+            plan = cast(EntryPlan, plan)  # the guard above proved it exists
             pos = Position(
                 symbol=fill.symbol,
                 strategy=fill.strategy,

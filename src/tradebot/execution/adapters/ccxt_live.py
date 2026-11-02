@@ -127,8 +127,8 @@ class CcxtLiveAdapter(ExchangeAdapter):
                 lot_step=_precision_to_step(precision.get("amount"), D("0.0001")),
                 min_qty=D(repr(amount_min)) if amount_min else D("0.0001"),
                 min_notional=D(repr(cost_min)) if cost_min else D("5"),
-                maker_fee=D(repr(market.get("maker") or self.cfg.live_fees.maker)),
-                taker_fee=D(repr(market.get("taker") or self.cfg.live_fees.taker)),
+                maker_fee=D(repr(market.get("maker") or self.cfg.settings.live_fees.maker)),
+                taker_fee=D(repr(market.get("taker") or self.cfg.settings.live_fees.taker)),
             )
 
     async def verify_permissions(self, require_ip_whitelist: bool = True) -> dict[str, Any]:
@@ -182,6 +182,8 @@ class CcxtLiveAdapter(ExchangeAdapter):
             params["triggerPrice"] = float(request.stop_price)
         try:
             if request.type is OrderType.LIMIT:
+                if price is None:
+                    raise PermanentExchangeError("limit order requires a price")
                 raw = await self.exchange.create_order(
                     request.symbol, "limit", request.side.value, float(qty), float(price), params
                 )
@@ -255,17 +257,15 @@ class CcxtLiveAdapter(ExchangeAdapter):
 
     async def get_order(self, client_order_id: str) -> Order | None:
         order = self.orders.get(client_order_id)
-        symbol = order.symbol if order else None
-        if symbol is None:
+        if order is None:
             return None
+        symbol = order.symbol
         try:
             raw = await self.exchange.fetch_order(
                 order.exchange_order_id or client_order_id, symbol, {"clientOrderId": client_order_id}
             )
         except Exception as exc:  # noqa: BLE001
             raise self._translate(exc) from exc
-        if order is None:  # pragma: no cover
-            return None
         order.status = _status_of(raw.get("status"))
         order.filled_qty = D(repr(raw.get("filled") or 0))
         order.avg_fill_price = D(repr(raw.get("average") or 0))

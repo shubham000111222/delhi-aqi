@@ -106,7 +106,7 @@ class OrderManager:
         self._exit_seq = 0
         self.plans: dict[str, Any] = {}
         if hasattr(adapter, "on_fill"):
-            adapter.on_fill = self._handle_adapter_fill  # type: ignore[attr-defined]
+            adapter.on_fill = self._handle_adapter_fill
 
     # --- counters for the risk engine ------------------------------------
     @property

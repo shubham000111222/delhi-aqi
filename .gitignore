@@ -3,10 +3,11 @@
 *.pem
 *.key
 
-# runtime state / data / output
-data/
-reports/
-logs/
+# runtime state / data / output (repo-root only: `data/` would also ignore
+# src/tradebot/data/ and silently drop the market data package from every commit)
+/data/
+/reports/
+/logs/
 *.db
 *.db-wal
 *.db-shm

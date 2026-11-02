@@ -246,7 +246,12 @@ class RiskEngine:
              cooldown_ok, rate_ok)
         )
         first_fail = next((c for c in checks if not c.passed), None)
-        reason = "approved" if approved else f"{first_fail.name}: {first_fail.detail}"
+        if approved:
+            reason = "approved"
+        elif first_fail is not None:
+            reason = f"{first_fail.name}: {first_fail.detail}"
+        else:  # pragma: no cover - defensive
+            reason = "vetoed"
         verdict = RiskVerdict(
             approved=approved,
             reason=reason,
