@@ -30,9 +30,10 @@ a capability that exists but has not cleared its gates is marked as such.
 | 12 Reliability & security | crash recovery, reconciliation, structured logs with redaction, heartbeats, disk guards, scoped auto-resume |
 | 12 Inbound commands | Telegram router: chat-id whitelist, confirm step with TTL and single use, audit line per command, transport-agnostic |
 | 12 Telegram transport | `getUpdates` long polling with persisted offset, `sendMessage`, backoff on failure, injected HTTP client, started by `run` when a token and chat id exist, `tradebot telegram` readiness check |
-| 13 Testing | 382 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
+| 13 Testing | 402 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
 | 18.1 Book recording | recorded on every session (`RecordingFeed`), archived to Parquet, summarised as spread statistics |
 | 18.6 Experiment tracking | `experiments` table, deterministic run ids, trial log used by the multiple-testing report |
+| 18.8 NSE execution | `KiteAdapter`: order shaping (LIMIT/MARKET/SL/SL-M, MIS/CNC/NRML), local tick/lot/band checks before any HTTP call, tag-based idempotency with a lookup after a timeout, status mapping, balances, positions, LTP cache, closed-session refusal, `venues --venue nse` reports readiness |
 | 18.8 NSE-ready seams | `MarketCalendar` + `NSECalendar`, `Instrument` (tick/lot/band), `NSECostModel` (STT, GST, stamp, DP), daily-expiring sessions, square-off scheduler, engine hooks |
 | 19.1 Signal library | 32 features in 7 families, 44 signals in 8 families, IC on non-overlapping samples, stability, cost-adjusted PnL, correlation pruning, shuffled-label check |
 | 19.2 Complexity ladder | baseline → ridge → gradient boosting on purged folds; promotion needs +10% net expectancy in every window, enforced in code |
@@ -51,7 +52,7 @@ a capability that exists but has not cleared its gates is marked as such.
 | **A WebSocket session against a real exchange** | The feed, its decoders and its reconnect/gap-fill logic are written and tested, but this sandbox blocks the socket (it was tried: `ConnectionResetError`, three reconnects, no frames) | run `python -m tradebot stream --live` from a networked host and watch `describe()` |
 | **A backfill against a real exchange** | The paginator, its de-duplication and its gap report are tested against a fake endpoint and a deterministic offline exchange; `--source ccxt` cannot reach Binance from this sandbox | `python -m tradebot backfill --days 30 --write` from a networked host, then check `coverage` and `gaps` |
 | **A Telegram session against the real API** | The transport is implemented and tested through an `httpx` mock, but this sandbox cannot open TLS to `api.telegram.org` (`ConnectError`, reported as `telegram reachable: False`) | run `python -m tradebot telegram` with a real token |
-| **NSE execution adapter** | The seams exist (calendar, costs, instruments, sessions, square-off), but no Indian broker API is implemented | Kite/Zerodha adapter behind the same `ExchangeAdapter` interface; verify tariff constants against current circulars |
+| **An NSE order at a real broker** | `KiteAdapter` is written and tested through an `httpx` mock, but nothing here has a Kite session (the sandbox cannot reach `api.kite.trade`, and a pointing-at-prod test would be reckless) | run `venues --venue nse` with real keys (it probes margins), then one 1-share order in a test account; verify tariff constants against current circulars |
 | **MLflow experiment backend** | Schema and holdout lock exist in SQLite; no MLflow dependency | wire `save_experiment` to MLflow's file backend |
 | **Autonomous research loop (19.5)** | An automatic search over strategies multiplies the multiple-testing problem this repo already takes seriously | only after the trial log and promotion rule have been used by hand for a while |
 

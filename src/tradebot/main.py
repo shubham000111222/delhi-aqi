@@ -1618,6 +1618,7 @@ def cmd_venues(args: argparse.Namespace) -> int:
         "square_off": plan.as_dict() if plan else None,
         "costs": compare_models(notional, models),
         "instrument_example": Instrument("EXAMPLE").band(D("1000")),
+        "broker": _nse_broker_status(cfg),
     }
     if args.json:
         _print(report)
@@ -1638,7 +1639,45 @@ def cmd_venues(args: argparse.Namespace) -> int:
     nse_rt = round_trip(NSECostModel(), entry_notional=notional, exit_notional=notional)
     print(f"  cheapest: {'NSE' if nse_rt.total < crypto_rt.total else 'crypto'} by "
           f"{abs(nse_rt.total - crypto_rt.total):.2f}")
+    broker = report["broker"]
+    print(f"  NSE broker: {broker['adapter']} - {broker['status']}")
     return 0
+
+
+def _nse_broker_status(cfg: Config) -> dict[str, Any]:
+    """Is there an NSE execution adapter behind the venue seams, and is it configured?
+
+    Saying "Kite Connect adapter implemented, keys missing" is the honest answer; saying
+    "NSE ready" while nothing can place an order is not.
+    """
+    from .execution.adapters.base import ExchangeError
+    from .execution.adapters.nse import KiteAdapter
+
+    if not (cfg.secrets.kite_api_key and cfg.secrets.kite_access_token):
+        return {
+            "adapter": "kite",
+            "implemented": True,
+            "configured": False,
+            "status": "implemented, no keys: set KITE_API_KEY and KITE_ACCESS_TOKEN",
+        }
+    try:
+        adapter = KiteAdapter.from_config(cfg)
+    except (ValueError, ExchangeError) as exc:
+        return {"adapter": "kite", "implemented": True, "configured": False, "status": str(exc)}
+
+    async def _probe() -> dict[str, Any]:
+        try:
+            balances = await adapter.get_balances()
+            return {"configured": True, "reachable": True, "balances": {k: str(v) for k, v in balances.items()}}
+        except ExchangeError as exc:  # a broker that refuses is a fact, not a crash
+            return {"configured": True, "reachable": False, "status": f"{type(exc).__name__}: {exc}"}
+        finally:
+            await adapter.close()
+
+    probe = asyncio.run(_probe())
+    probe["adapter"] = "kite"
+    probe.setdefault("status", "reachable" if probe.get("reachable") else "unreachable")
+    return probe
 
 
 def cmd_parity(args: argparse.Namespace) -> int:

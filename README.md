@@ -96,7 +96,8 @@ no API key is needed.
 | Telegram command bot with whitelist and confirm step | done | `alerts/commands.py` |
 | Telegram transport: long polling with offset, sends, backoff, started by `run` | done (mock-tested; the real API is unreachable here) | `alerts/telegram.py` |
 | NSE-ready seams: calendar, instruments, cost model, sessions, square-off | done | `venues/` |
-| Live exchange connectivity, a real WebSocket session, LLM journal in production | **not built** — see `docs/ROADMAP.md` | — |
+| NSE execution: Kite Connect adapter, local rule checks, tag idempotency | done (mock-tested; no broker session here) | `execution/adapters/nse.py` |
+| Live crypto exchange connectivity, a real broker session, LLM journal in production | **not built** — see `docs/ROADMAP.md` | — |
 
 ## One code path
 
@@ -183,7 +184,7 @@ src/tradebot/
   strategies/          base, ema_trend, meanrev, breakout, regime, indicators
   portfolio/           ledger, sizing
   risk/                engine (16 checks), killswitch, live_guards
-  execution/           order_manager, rate_limit, slippage, adapters/{base,paper,ccxt_live}
+  execution/           order_manager, rate_limit, slippage, adapters/{base,paper,ccxt_live,nse}
   venues/              calendar, instruments, costs, session, square-off (NSE seams)
   backtest/            metrics, runner, walkforward, sensitivity, parity, robustness
   reporting/           daily report, tax ledger rows

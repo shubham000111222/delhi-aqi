@@ -107,6 +107,27 @@ A strategy is promotable only if **all** of the following hold:
 
 If any check fails, the honest action is to change the strategy, not the gate.
 
+## The NSE broker (Kite Connect)
+
+`venues --venue nse` prints the seams and, at the end, whether there is a broker behind
+them:
+
+```bash
+python -m tradebot venues --venue nse
+#   NSE broker: kite - implemented, no keys: set KITE_API_KEY and KITE_ACCESS_TOKEN
+KITE_API_KEY=... KITE_ACCESS_TOKEN=... python -m tradebot venues --venue nse
+#   NSE broker: kite - reachable          (or the exact error, usually a token expiry)
+```
+
+With keys set, that probe calls `/user/margins`. A Kite access token expires daily, so
+`unreachable: TokenException` at 09:00 is the normal Monday morning problem, not a code
+fault.
+
+The adapter refuses, locally and before any HTTP call: a quantity that is not a lot
+multiple, a price off the tick, an order outside the session and a symbol without
+instrument rules. It also looks for its own `tag` before placing anything, so a retry
+after a timeout cannot double a position. That is tested; a live broker is not.
+
 ## Historical backfill
 
 Before any strategy result means anything the archive needs real history:

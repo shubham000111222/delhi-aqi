@@ -314,6 +314,10 @@ class Secrets:
     testnet_api_secret: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    #: Zerodha Kite Connect, for the NSE adapter. Absent by default; the adapter refuses
+    #: to construct without both, rather than failing on the first order.
+    kite_api_key: str = ""
+    kite_access_token: str = ""
     llm_provider: str = ""
     llm_api_key: str = ""
     llm_monthly_budget_usd: Decimal = D("2")
@@ -327,6 +331,7 @@ class Secrets:
             "api_key": "set" if self.api_key else "missing",
             "telegram": "set" if self.telegram_bot_token else "missing",
             "llm": "set" if self.llm_api_key else "missing",
+            "kite": "set" if (self.kite_api_key and self.kite_access_token) else "missing",
         }
 
 
@@ -366,6 +371,8 @@ def load_secrets(env: dict[str, str]) -> Secrets:
         testnet_api_secret=env.get("TESTNET_API_SECRET", ""),
         telegram_bot_token=env.get("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=env.get("TELEGRAM_CHAT_ID", ""),
+        kite_api_key=env.get("KITE_API_KEY", ""),
+        kite_access_token=env.get("KITE_ACCESS_TOKEN", ""),
         llm_provider=env.get("LLM_PROVIDER", ""),
         llm_api_key=env.get("LLM_API_KEY", ""),
         llm_monthly_budget_usd=D(env.get("LLM_MONTHLY_BUDGET_USD", "2") or "2"),
