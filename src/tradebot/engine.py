@@ -45,6 +45,7 @@ from .data.feed import BaseFeed, make_feed
 from .data.hub import MarketData
 from .execution.adapters.base import ExchangeAdapter
 from .execution.order_manager import OrderManager
+from .execution.slippage import SlippageRecorder
 from .portfolio.ledger import ClosedTrade, EntryPlan, Ledger
 from .reporting.daily import build_daily_report, tax_ledger_rows, write_reports
 from .risk.engine import RiskContext, RiskEngine
@@ -117,6 +118,8 @@ class Engine:
         self.strategies = strategies
         self.notifier = notifier
         self.stats = EngineStats()
+        # measured, not assumed: every fill with an expected price is recorded here
+        self.slippage = SlippageRecorder()
         self.queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=1_000)
         self._deferred: deque[tuple[str, Any]] = deque()
         self.running = False
@@ -504,6 +507,10 @@ class Engine:
     # ------------------------------------------------------------------
     async def _on_fill(self, fill: Fill) -> None:
         self.stats.fills += 1
+        try:
+            self.slippage.observe(fill, book=self.market.book(fill.symbol))
+        except Exception as exc:  # noqa: BLE001 - measurement must never stop trading
+            self._log("slippage_record_failed", {"error": str(exc)}, level="WARN", actor="execution")
         self.unapplied_fills = max(self.unapplied_fills - 1, 0)
         key = (fill.symbol, fill.strategy)
         pos_before = self.ledger.get(fill.symbol, fill.strategy)

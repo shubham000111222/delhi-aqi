@@ -464,12 +464,20 @@ def build_parser() -> argparse.ArgumentParser:
     sens.add_argument("--seed", type=int, default=None)
     sens.add_argument("--json", action="store_true")
 
+    slp = sub.add_parser("slippage", help="measure realised slippage and calibrate a model")
+    slp.add_argument("--days", type=int, default=2)
+    slp.add_argument("--seed", type=int, default=5)
+    slp.add_argument("--json", action="store_true")
+
     sig = sub.add_parser("signals", help="feature store, signal library, IC screen, complexity ladder")
     sig.add_argument("--days", type=int, default=2)
     sig.add_argument("--seed", type=int, default=1)
     sig.add_argument("--horizon", type=int, default=4, help="forward horizon in bars")
     sig.add_argument("--folds", type=int, default=3, help="purged walk-forward windows")
     sig.add_argument("--min-ic", type=float, default=0.01)
+    sig.add_argument("--save-model", default=None,
+                     help="register a promoted ridge model as a card at this path (refused "
+                          "unless the ladder promoted it)")
     sig.add_argument("--json", action="store_true")
 
     rb = sub.add_parser("robustness", help="bootstrap, cost stress, benchmark and attribution")
@@ -796,7 +804,7 @@ def cmd_signals(args: argparse.Namespace) -> int:
             "latest": latest_scores(frame, result.kept)[:5],
         }
 
-    report = {
+    report: dict[str, Any] = {
         "library_size": len(SIGNALS),
         "families": sorted({spec.family for spec in SIGNALS}),
         "horizon_bars": args.horizon,
@@ -805,10 +813,22 @@ def cmd_signals(args: argparse.Namespace) -> int:
         "meta": meta,
         "symbols": per_symbol,
     }
+    if args.save_model:
+        report["saved_model"] = _save_promoted_model(
+            frames, horizon=args.horizon, path=args.save_model
+        )
+
     if args.json:
         _print(report)
         return 0
 
+    saved = report.get("saved_model")
+    if saved:
+        if saved.get("saved"):
+            print(f"model card written to {saved['path']}")
+        else:
+            print(f"no model registered: {saved['reason']}")
+        print()
     print(f"signal library: {len(SIGNALS)} signals across {len(report['families'])} families "
           f"({', '.join(report['families'])})")
     print(f"data: {meta['symbols']} symbols, {meta['books']} recorded books, "
@@ -851,6 +871,130 @@ def cmd_signals(args: argparse.Namespace) -> int:
             print(f"  biggest weight: {top['feature']} ({top['share']:.0%} of total)"
                   + (f" - {top['warning']}" if top.get("warning") else ""))
     return 0
+
+
+async def _run_slippage(cfg: Config, days: int, seed: int | None) -> dict[str, Any]:
+    """Run a session, then report what fills actually cost against what they expected."""
+    from .core.clock import SimClock
+    from .core.store import Store
+    from .engine import Engine
+
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    clock = SimClock(start)
+    store = Store(":memory:")
+    engine = await Engine.build(cfg, clock=clock, store=store)
+    if seed is not None:
+        engine.feed.rng.seed(seed)  # type: ignore[attr-defined]
+    await engine.run(stop_at=start + timedelta(days=days))
+    recorder = engine.slippage
+    summary = recorder.summary()
+    model = recorder.model()
+    calibration = recorder.calibration(model)
+    rows = recorder.as_rows()
+    engine.close()
+    store.close()
+    return {
+        "days": days,
+        "seed": seed,
+        "summary": summary,
+        "calibration": calibration,
+        "model": model.table(),
+        "samples": rows[:20],
+        "assumed_bps": float(cfg.settings.paper.taker_fee) * 10_000,
+    }
+
+
+def cmd_slippage(args: argparse.Namespace) -> int:
+    """Measure slippage instead of assuming it."""
+    cfg = _config(args)
+    report = asyncio.run(_run_slippage(cfg, args.days, args.seed))
+    if args.json:
+        _print(report)
+        return 0
+
+    summary = report["summary"]
+    if not summary.get("fills"):
+        print("no fills with an expected price were recorded - nothing to calibrate")
+        return 0
+    print(f"{summary['fills']} fills with an expected price "
+          f"({summary['skipped']} without one could not be measured)")
+    print(f"  median {summary['median_bps']:+.2f} bps | mean {summary['mean_bps']:+.2f} bps "
+          f"| p95 {summary['p95_bps']:+.2f} bps | worst {summary['worst_bps']:+.2f} bps")
+    print(f"  adverse on {summary['adverse_share'] * 100:.0f}% of fills "
+          f"(positive = worse than the expected price)")
+    print()
+    print("by symbol:")
+    for symbol, row in summary["by_symbol"].items():
+        print(f"  {symbol:10s} {row['fills']:4d} fills | median {row['median_bps']:+.2f} bps "
+              f"| p95 {row['p95_bps']:+.2f} bps")
+    print()
+    print("calibrated model (size vs visible depth -> slippage):")
+    for row in report["model"][:12]:
+        print(f"  {row['symbol']:10s} up to {row['size_vs_depth_up_to']:>4.2f}x depth | "
+              f"n={row['samples']:3d} | median {row['median_bps']:+.2f} | p95 {row['p95_bps']:+.2f} | "
+              f"worst {row['worst_bps']:+.2f} bps")
+    calibration = report["calibration"]
+    print()
+    print(f"calibration: mean error {calibration['mean_error_bps']:+.2f} bps "
+          f"(positive = model too pessimistic)")
+    print(f"  {calibration['verdict']}")
+    print(f"  assumed taker cost: {report['assumed_bps']:.1f} bps")
+    return 0
+
+
+def _save_promoted_model(
+    frames: dict[str, Any], *, horizon: int, path: str
+) -> dict[str, Any]:
+    """Fit a ridge model and register it - only if the ladder actually promoted one.
+
+    Registering a model is how it becomes able to trade, so this refuses unless the
+    promotion rule was met on the same data and the net expectancy is positive.
+    """
+    from .ai.ladder import RidgeModel, run_ladder
+    from .ai.registry import ModelRefusal, save_card
+
+    symbol, frame = next(iter(frames.items()))
+    ladder = run_ladder(frame, horizon=horizon, n_folds=3)
+    best = next(level for level in ladder.levels if level.level == ladder.promoted)
+    if ladder.promoted == "baseline" or best.net_expectancy <= 0:
+        return {
+            "saved": False,
+            "reason": (
+                f"nothing was promoted: {ladder.verdict}. A model card is not written for a "
+                "model that has not beaten the simpler rung net of costs."
+            ),
+        }
+
+    from .ai.features import forward_returns
+    from .ai.ladder import purged_folds
+
+    target = forward_returns(frame.close, horizon)
+    folds = purged_folds(len(frame), n_folds=3, horizon=horizon)
+    model = RidgeModel(alpha=10.0, names=frame.names).fit(frame, folds[0].train, target)
+    try:
+        card = save_card(
+            path,
+            name=f"ridge_{symbol.replace('/', '-')}",
+            level=ladder.promoted,
+            features=list(model.names or []),
+            weights=[float(w) for w in (model.coef_[1:] if model.coef_ is not None else [])],
+            intercept=float(model.coef_[0]) if model.coef_ is not None else 0.0,
+            metrics={
+                "net_expectancy": best.net_expectancy,
+                "ic": best.ic,
+                "hit_rate": best.hit_rate,
+            },
+            training_window={
+                "symbol": symbol,
+                "bars": len(frame),
+                "horizon": horizon,
+                "folds": ladder.windows,
+            },
+            notes=ladder.verdict,
+        )
+    except ModelRefusal as exc:
+        return {"saved": False, "reason": str(exc)}
+    return {"saved": True, "path": str(path), "card": card.as_dict()}
 
 
 def cmd_robustness(args: argparse.Namespace) -> int:
@@ -1072,6 +1216,7 @@ def main(argv: list[str] | None = None) -> int:
         "archive": cmd_archive,
         "robustness": cmd_robustness,
         "signals": cmd_signals,
+        "slippage": cmd_slippage,
     }
     if args.command in ("pause", "resume", "kill", "lockdown"):
         args.action = args.command

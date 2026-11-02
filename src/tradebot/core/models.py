@@ -357,6 +357,10 @@ class Order:
     created_at: datetime | None = None
     updated_at: datetime | None = None
     error: str | None = None
+    #: price when the order was *decided*, before latency and the walk down the book.
+    #: Fills are measured against this, otherwise a market order's slippage is always
+    #: zero by construction and the calibration measures nothing.
+    reference_price: Decimal | None = None
 
     @property
     def remaining(self) -> Decimal:
@@ -389,6 +393,7 @@ class Order:
             "signal_id": self.signal_id,
             "filled_qty": to_str(self.filled_qty),
             "avg_fill_price": money_json(self.avg_fill_price),
+            "reference_price": money_json(self.reference_price),
             "fee": money_json(self.fee),
             "created_at": iso(self.created_at) if self.created_at else None,
             "updated_at": iso(self.updated_at) if self.updated_at else None,

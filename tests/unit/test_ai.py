@@ -404,3 +404,167 @@ class TestGuardrails:
         for path in ai_dir.glob("*.py"):
             text = path.read_text()
             assert not forbidden.search(text), f"{path.name} imports something it must not"
+
+
+# ---------------------------------------------------------------------------
+# model registry and the S4 strategy
+# ---------------------------------------------------------------------------
+
+
+class TestRegistry:
+    def _card_kwargs(self, net: float = 0.0004) -> dict:
+        return {
+            "name": "demo_ridge",
+            "level": "ridge",
+            "features": ["close_z_20", "ema_slope_20"],
+            "weights": [0.1, -0.2],
+            "intercept": 0.01,
+            "metrics": {"net_expectancy": net, "ic": 0.05},
+            "training_window": {"start": "2024-01-01", "end": "2024-01-10"},
+            "seed": 7,
+        }
+
+    def test_a_losing_model_cannot_be_registered(self, tmp_path):
+        from tradebot.ai.registry import ModelRefusal, save_card
+
+        with pytest.raises(ModelRefusal, match="nothing to promote"):
+            save_card(tmp_path / "registry.json", **self._card_kwargs(net=-0.001))
+
+    def test_a_profitable_model_is_saved_with_its_card(self, tmp_path):
+        from tradebot.ai.registry import save_card
+
+        path = tmp_path / "registry.json"
+        card = save_card(path, **self._card_kwargs())
+        assert path.exists() and card.approved
+        loaded = type(card).load(path)
+        assert loaded.features == card.features
+        assert loaded.metrics["net_expectancy"] == pytest.approx(0.0004)
+
+    def test_loading_a_missing_registry_is_not_an_error(self, tmp_path):
+        from tradebot.ai.registry import load_model
+
+        assert load_model(tmp_path / "absent.json") is None
+
+    def test_a_corrupt_registry_is_treated_as_absent(self, tmp_path):
+        from tradebot.ai.registry import load_model
+
+        path = tmp_path / "registry.json"
+        path.write_text("{not json")
+        assert load_model(path) is None
+
+    def test_scoring_uses_the_cards_weights(self, tmp_path, frame):
+        from tradebot.ai.registry import PromotedModel, save_card
+
+        path = tmp_path / "registry.json"
+        card = save_card(path, **self._card_kwargs())
+        model = PromotedModel(card=card, path=path)
+        assert model.ready
+        scores = model.score(frame)
+        expected = (
+            np.nan_to_num(frame.features["close_z_20"]) * 0.1
+            + np.nan_to_num(frame.features["ema_slope_20"]) * -0.2
+            + 0.01
+        )
+        np.testing.assert_allclose(scores, expected)
+
+    def test_a_card_for_unknown_features_refuses_to_score(self, tmp_path, frame):
+        from tradebot.ai.registry import PromotedModel, save_card
+
+        path = tmp_path / "registry.json"
+        kwargs = self._card_kwargs()
+        kwargs["features"] = ["a_feature_that_no_longer_exists"]
+        kwargs["weights"] = [1.0]
+        card = save_card(path, **kwargs)
+        model = PromotedModel(card=card, path=path)
+        assert model.check(frame)["ready"] is False
+        assert np.isnan(model.score(frame)).all()
+
+    def test_a_mostly_nan_feature_blocks_the_model(self, tmp_path, frame):
+        from tradebot.ai.features import FeatureFrame
+        from tradebot.ai.registry import PromotedModel, save_card
+
+        path = tmp_path / "registry.json"
+        card = save_card(path, **self._card_kwargs())
+        broken = FeatureFrame(
+            symbol=frame.symbol,
+            ts=frame.ts,
+            close=frame.close,
+            features={"close_z_20": np.full(len(frame), np.nan), "ema_slope_20": frame.features["ema_slope_20"]},
+        )
+        model = PromotedModel(card=card, path=path)
+        check = model.check(broken)
+        assert check["ready"] is False
+        assert "close_z_20" in check["mostly_nan_features"]
+
+
+class TestMlSignalStrategy:
+    def _params(self, **overrides) -> object:
+        from tradebot.strategies.base import StrategyParams
+
+        raw = {"registry": "does-not-exist.json"} | overrides
+        return StrategyParams(
+            name="S4_ml_signal", timeframes=("1h",), regimes=(), priority=30, raw=raw
+        )
+
+    def test_without_a_card_it_is_inert_and_says_so(self):
+        from tradebot.strategies.ml_signal import MlSignal
+
+        strategy = MlSignal(self._params())
+        assert strategy.status.startswith("not_promoted")
+        assert strategy.describe()["refusals"] == 0
+
+    def test_it_emits_nothing_without_a_model(self, candles):
+        from tradebot.strategies.ml_signal import MlSignal
+
+        strategy = MlSignal(self._params())
+        assert strategy.evaluate(_context(candles)) is None
+
+    def test_a_promoted_model_can_produce_a_long_signal(self, tmp_path, candles):
+        from tradebot.ai.registry import save_card
+        from tradebot.strategies.ml_signal import MlSignal
+
+        registry = tmp_path / "registry.json"
+        # a card with one feature and a large intercept, so the score clears the threshold
+        card = save_card(
+            registry,
+            name="test_card",
+            level="ridge",
+            features=["close_z_20"],
+            weights=[1.0],
+            intercept=50.0,  # keeps the score above the entry threshold
+            metrics={"net_expectancy": 0.01},
+            threshold=0.0,
+        )
+        assert card.approved
+        strategy = MlSignal(self._params(registry=str(registry)))
+        strategy.entry_threshold = 0.3
+        signal = strategy.evaluate(_context(candles))
+        assert signal is not None, strategy.describe()
+        assert signal.side.value == "buy"  # Signal.side is the order side
+        assert signal.strategy == "S4_ml_signal"
+        assert signal.limit_price is not None
+
+
+def _context(candles):
+    from tradebot.core.models import Regime
+    from tradebot.core.money import D
+    from tradebot.data.series import CandleSeries
+    from tradebot.strategies.base import StrategyContext
+
+    symbol = candles[0].symbol
+    series = CandleSeries(symbol, "1m", 1000)
+    for candle in candles[:400]:
+        series.append(candle)
+    last = candles[399]
+    return StrategyContext(
+        symbol=symbol,
+        timeframe="1m",
+        series=series,
+        ts=last.close_time,
+        mark=last.close,
+        atr=float(last.close) * 0.002,
+        regime=Regime.TREND,
+        equity=D("1000"),
+        book=None,
+        position=None,
+    )

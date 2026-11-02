@@ -126,6 +126,10 @@ class PaperAdapter(ExchangeAdapter):
             )
 
         now = self.clock.now()
+        # The decision price: what the market looked like when the order was created. Used
+        # as the slippage benchmark for market orders, whose "expected price" would
+        # otherwise be the fill price itself.
+        reference_price = self.market_price(request.symbol)
         order = Order(
             client_order_id=request.client_order_id,
             symbol=request.symbol,
@@ -133,6 +137,7 @@ class PaperAdapter(ExchangeAdapter):
             type=request.type,
             qty=qty,
             price=price,
+            reference_price=reference_price,
             stop_price=request.stop_price,
             status=OrderStatus.SUBMITTED,
             strategy=request.strategy,
@@ -257,7 +262,11 @@ class PaperAdapter(ExchangeAdapter):
         order.avg_fill_price = (prev_notional + notional) / new_qty if new_qty else price
         order.filled_qty = new_qty
         order.fee += fee
-        expected = order.price if order.price is not None else price
+        expected = (
+            order.price
+            if order.price is not None
+            else (order.reference_price if order.reference_price else price)
+        )
         slippage_bps = ((price - expected) / expected * D("10000")) if expected else ZERO
         if order.side is Side.SELL:
             slippage_bps = -slippage_bps

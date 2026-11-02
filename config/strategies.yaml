@@ -43,8 +43,10 @@ strategies:
       vol_factor: 1.2
       atr_period: 14
 
-  # S4 (ML) and S5 (sentiment) are intentionally NOT wired in yet: section 8 says a
-  # strategy ships only after it beats the acceptance gates. See docs/ROADMAP.md.
+  # S4 reads an *approved* model card and does nothing without one. Wiring it in is
+  # deliberately off: section 8 says a strategy ships only after it beats the acceptance
+  # gates, and there is no trained model here. `tradebot signals` shows why the ladder has
+  # not promoted anything yet. See docs/ROADMAP.md.
   S4_ml_signal:
     class: tradebot.strategies.ml_signal:MlSignal
     enabled: false
@@ -52,8 +54,9 @@ strategies:
     regimes: ["trend", "range", "high_vol"]
     priority: 30
     params:
-      model_path: data/models/latest.json
-      threshold: 0.60
+      registry: models/registry.json
+      entry_threshold: 0.35
+      stop_atr_mult: 1.75
 
 regime:
   adx_period: 14
