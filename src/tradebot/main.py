@@ -446,9 +446,42 @@ def build_parser() -> argparse.ArgumentParser:
     dash.add_argument("--port", type=int, default=8000)
     dash.add_argument("--no-bot", action="store_true", help="serve read-only, do not run the demo bot")
 
+    png = sub.add_parser(
+        "dashboard-png", help="render the dashboard to a PNG (no browser needed)"
+    )
+    png.add_argument("--url", default="http://127.0.0.1:8000/api/snapshot")
+    png.add_argument("--out", default="reports/dashboard.png")
+
     for action in sub.choices.values():
         _add_shared(action)
     return parser
+
+
+def _cmd_dashboard_png(args: argparse.Namespace) -> int:
+    """Draw the live dashboard to a PNG.
+
+    Useful where a web page cannot be looked at: an embedded preview that will not
+    render, a chat that wants an image, or a report for someone without access.
+    """
+    import json
+    import urllib.request
+
+    from .dashboard.render import render_png
+
+    try:
+        with urllib.request.urlopen(args.url, timeout=15) as response:
+            snapshot = json.load(response)
+    except Exception as exc:  # noqa: BLE001 - the message is the point, not the type
+        print(f"could not read {args.url}: {exc}", file=sys.stderr)
+        print("is the dashboard running? try: python -m tradebot dashboard", file=sys.stderr)
+        return 2
+    try:
+        path = render_png(snapshot, args.out)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"wrote {path} (equity {snapshot.get('equity')}, kill {snapshot.get('kill', {}).get('level')})")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -467,6 +500,7 @@ def main(argv: list[str] | None = None) -> int:
         "lockdown": cmd_control,
         "drill": cmd_drill,
         "dashboard": cmd_dashboard,
+        "dashboard-png": _cmd_dashboard_png,
     }
     if args.command in ("pause", "resume", "kill", "lockdown"):
         args.action = args.command
