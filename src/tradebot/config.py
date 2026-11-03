@@ -201,6 +201,9 @@ class RiskLimits(_Strict):
     min_notional: Decimal = D("10")
     max_notional: Decimal = D("150")
     max_order_book_pct: Decimal = D("0.10")
+    #: A trade whose target is nearer than this multiple of the round-trip cost cannot
+    #: win, however good the signal is. 0 disables the check.
+    min_target_cost_ratio: Decimal = D("4")
     orders_per_minute: int = 10
     orders_per_day: int = 300
     consecutive_losses_halve: int = 4

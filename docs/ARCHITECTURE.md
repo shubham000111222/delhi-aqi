@@ -62,7 +62,7 @@ A strategy returns a `Signal` — symbol, side, stop, target, confidence, reason
 and the indicators behind it. It never sees balances or the exchange.
 
 ```
-signal → RiskContext snapshot → RiskEngine.approve_entry (16 checks, returns qty)
+signal → RiskContext snapshot → RiskEngine.approve_entry (17 checks, returns qty)
        → OrderManager.submit_entry (idempotent client id) → adapter.place_order
        → fill event → Ledger.on_fill → store
 ```

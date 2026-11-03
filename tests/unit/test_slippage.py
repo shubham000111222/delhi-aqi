@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -276,5 +277,73 @@ class TestEngineSizingCap:
             engine.market.books["BTC/USDT"] = book(ask_depth="10")
             rules = engine.adapter.get_market_rules("BTC/USDT")
             assert engine._apply_slippage_budget(signal, D("2"), rules) == D("2")
+        finally:
+            engine.close()
+
+
+_NOW = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+
+
+class TestEngineCostEstimate:
+    """The risk engine's cost estimate: fees always, slippage only on evidence."""
+
+    def test_fees_for_both_legs_are_always_counted(self):
+        from decimal import Decimal
+
+        from tradebot.config import load_config
+        from tradebot.core.clock import SimClock
+        from tradebot.core.store import Store
+        from tradebot.engine import Engine
+
+        cfg = load_config()
+
+        async def build():
+            return await Engine.build(cfg, clock=SimClock(_NOW), store=Store(":memory:"))
+
+        engine = asyncio.run(build())
+        try:
+            rules = engine.adapter.get_market_rules("BTC/USDT")
+            expected = Decimal(2) * rules.taker_fee * Decimal("10000")
+            assert engine._round_trip_cost_bps("BTC/USDT") == expected
+            assert expected > 0, "a zero-fee estimate would silently disable the cost check"
+        finally:
+            engine.close()
+
+    def test_the_calibrated_model_adds_its_slippage(self):
+        from decimal import Decimal
+
+        from tradebot.config import load_config
+        from tradebot.core.clock import SimClock
+        from tradebot.core.store import Store
+        from tradebot.engine import Engine
+
+        cfg = load_config()
+
+        async def build():
+            return await Engine.build(cfg, clock=SimClock(_NOW), store=Store(":memory:"))
+
+        engine = asyncio.run(build())
+        try:
+            without = engine._round_trip_cost_bps("BTC/USDT")
+            engine.slippage_model = type("Model", (), {"fallback_bps": 12.5})()
+            with_model = engine._round_trip_cost_bps("BTC/USDT")
+            assert with_model == without + Decimal("12.5")
+        finally:
+            engine.close()
+
+    def test_an_unknown_symbol_returns_zero_rather_than_raising(self):
+        from tradebot.config import load_config
+        from tradebot.core.clock import SimClock
+        from tradebot.core.store import Store
+        from tradebot.engine import Engine
+
+        cfg = load_config()
+
+        async def build():
+            return await Engine.build(cfg, clock=SimClock(_NOW), store=Store(":memory:"))
+
+        engine = asyncio.run(build())
+        try:
+            assert engine._round_trip_cost_bps("NOPE/USDT") == 0
         finally:
             engine.close()

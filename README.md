@@ -1,7 +1,7 @@
 # tradebot
 
 A paper-first, live-ready crypto trading system: real-time multi-coin market data,
-rule-based strategies, a 16-check risk engine with a four-level kill switch, a
+rule-based strategies, a 17-check risk engine with a four-level kill switch, a
 paper exchange that is deliberately pessimistic, an audit-grade ledger, daily
 reports with tax records, and a local dashboard.
 
@@ -19,7 +19,7 @@ are reported as failures (see [Results](#results-so-far)).
                        └──────────────┬───────────────┘
                                       │ signal (stop, target, reason)
                        ┌──────────────▼───────────────┐
-                       │  Risk engine (16 checks)      │  veto + size
+                       │  Risk engine (17 checks)      │  veto + size
                        └──────────────┬───────────────┘
                        ┌──────────────▼───────────────┐
                        │  Order manager                │  idempotent ids, safe retries
@@ -172,6 +172,7 @@ reported here because a failing strategy that is *proved* to fail is the deliver
 | Slippage (2 days) | median 0.0 bps, p95 **+26 bps**, worst +36 bps — the number the backtester had been silently assuming was zero |
 | Research loop (2 days, 6 run → 3 kept) | best cell +1.87%, deflated Sharpe 1.41, probability 0.92 against a 0.95 bar → **NO** ("weak: does not survive its own attempts") |
 | Sentiment overlay (local RSS, 4 negative headlines) | 8 polls, 4 headlines kept, 28 duplicates dropped, 7 entries halved to ×0.50 at score −0.38 |
+| Cost budget (target ≥ N× round-trip cost, 10 days) | N=4 neutral (97 trades, PF 0.91); N=8 prunes to 69 trades, PF 1.03, still a loss; N=16 leaves 12 trades where PF 5.54 and Sharpe 6.37 pass but trade count fails — a small sample, not an edge |
 
 That is what "the AI layer" looks like when it is not allowed to lie: forty-four
 candidate signals, a screen that throws most of them away, a gradient-boosted model that
@@ -187,7 +188,7 @@ src/tradebot/
   data/                feed (synthetic / ccxt / replay / websocket), hub, series, tape, archive
   strategies/          base, ema_trend, meanrev, breakout, regime, indicators
   portfolio/           ledger, sizing
-  risk/                engine (16 checks), killswitch, live_guards
+  risk/                engine (17 checks, incl. the cost budget), killswitch, live_guards
   execution/           order_manager, rate_limit, slippage, adapters/{base,paper,ccxt_live,nse}
   venues/              calendar, instruments, costs, session, square-off (NSE seams)
   backtest/            metrics, runner, walkforward, sensitivity, parity, robustness

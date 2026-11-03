@@ -652,7 +652,26 @@ class Engine:
             mode_allows_entries=self.killswitch.level is KillLevel.L0,
             ramp_multiplier=self.ramp.multiplier(),
             available_cash=self.adapter_cash(),
+            round_trip_cost_bps=self._round_trip_cost_bps(symbol),
         )
+
+    def _round_trip_cost_bps(self, symbol: str) -> Decimal:
+        """Fees for both legs plus expected slippage, in basis points.
+
+        Slippage comes from the calibrated model once there is one; before that it is
+        reported as unknown (0) rather than guessed. Fees are never unknown: they are in
+        the venue's market rules, and a check that pretends fees do not exist would be
+        worse than no check at all.
+        """
+        try:
+            rules = self.adapter.get_market_rules(symbol)
+            fees = Decimal(2) * D(str(rules.taker_fee)) * Decimal("10000")
+        except Exception:  # noqa: BLE001 - unknown rules mean unknown cost, not a crash
+            return ZERO
+        slippage = ZERO
+        if self.slippage_model is not None:
+            slippage = D(str(getattr(self.slippage_model, "fallback_bps", 0.0)))
+        return fees + slippage
 
     def adapter_cash(self) -> Decimal:
         cash = getattr(self.adapter, "cash", None)

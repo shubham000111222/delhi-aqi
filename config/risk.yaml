@@ -15,6 +15,11 @@ fat_finger_pct: "0.01"           # price within 1% of mid
 min_notional: "10"
 max_notional: "150"
 max_order_book_pct: "0.10"       # order size <= 10% of top-10 book depth
+# a trade whose target is nearer than N x the round-trip cost (2 taker fees +
+# expected slippage) cannot win, so it is refused before sizing. 0 disables.
+# Measured on 10 synthetic days: 4 is neutral here (every target already clears it),
+# 8 prunes 29% of trades and moves PF 0.91 -> 1.03 - still a loss. See docs/RUNBOOK.md.
+min_target_cost_ratio: "4"
 orders_per_minute: 10
 orders_per_day: 300
 

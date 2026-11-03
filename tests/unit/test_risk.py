@@ -63,13 +63,60 @@ def engine(cfg) -> RiskEngine:
     return RiskEngine(cfg, KillSwitch(store, clock=SimClock(NOW)))
 
 
+class TestCostBudget:
+    """A trade whose target cannot clear the round-trip cost is dead on arrival."""
+
+    def test_a_near_target_against_high_costs_is_refused(self, engine):
+        # 60,000 -> 60,300 is 50 bps; 4 x a 30 bps round trip needs 120 bps
+        decision = engine.approve_entry(
+            _signal(target=D("60300")), _ctx(round_trip_cost_bps=D("30")), _rules()
+        )
+        assert not decision.approved
+        failed = {c.name for c in decision.verdict.failed}
+        assert "cost_budget" in failed
+        detail = next(c.detail for c in decision.verdict.checks if c.name == "cost_budget")
+        assert "50.0 bps" in detail and "120.0 bps" in detail
+
+    def test_a_target_that_clears_the_cost_is_allowed(self, engine):
+        decision = engine.approve_entry(
+            _signal(target=D("62000")), _ctx(round_trip_cost_bps=D("30")), _rules()
+        )
+        assert decision.approved, decision.verdict.reason
+
+    def test_the_check_is_off_at_ratio_zero(self, engine):
+        engine.limits.min_target_cost_ratio = D("0")
+        decision = engine.approve_entry(
+            _signal(target=D("60100")), _ctx(round_trip_cost_bps=D("100")), _rules()
+        )
+        assert decision.approved, decision.verdict.reason
+
+    def test_an_unknown_cost_is_not_treated_as_free_but_is_also_not_a_block(self, engine):
+        decision = engine.approve_entry(_signal(target=D("60010")), _ctx(), _rules())
+        assert decision.approved
+        detail = next(c.detail for c in decision.verdict.checks if c.name == "cost_budget")
+        assert "unavailable" in detail
+
+    def test_a_signal_without_a_target_is_not_blocked(self, engine):
+        decision = engine.approve_entry(
+            _signal(target=None), _ctx(round_trip_cost_bps=D("500")), _rules()
+        )
+        assert decision.approved, decision.verdict.reason
+
+    def test_a_short_target_is_measured_by_distance_not_direction(self, engine):
+        # selling: 60,000 -> 59,700 is still 50 bps away, and still too near
+        signal = _signal(side=Side.SELL, target=D("59700"))
+        decision = engine.approve_entry(signal, _ctx(round_trip_cost_bps=D("30")), _rules())
+        assert not decision.approved
+        assert "cost_budget" in decision.verdict.reason
+
+
 class TestRiskChecks:
     def test_happy_path_approves(self, engine):
         decision = engine.approve_entry(_signal(), _ctx(), _rules())
         assert decision.approved, decision.verdict.reason
         assert decision.qty > 0
         assert all(c.passed for c in decision.verdict.checks)
-        assert len(decision.verdict.checks) == 16
+        assert len(decision.verdict.checks) == 17
 
     def test_kill_switch_blocks(self, engine):
         engine.killswitch.trigger(KillLevel.L1, trigger="unit", reason="paused")

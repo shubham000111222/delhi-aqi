@@ -107,6 +107,22 @@ A strategy is promotable only if **all** of the following hold:
 
 If any check fails, the honest action is to change the strategy, not the gate.
 
+## When every trade is too small to matter: the cost budget
+
+`risk.min_target_cost_ratio` (default 4) refuses an entry whose target is nearer than N
+times the round-trip cost. Watch the `risk_veto` events for `cost_budget`: a steady stream
+of them means the strategies are proposing trades that cannot pay for themselves.
+
+```
+python -m tradebot backtest --days 10 --min-target-cost-ratio 0   # off
+python -m tradebot backtest --days 10 --min-target-cost-ratio 8   # prunes ~30% of trades
+python -m tradebot backtest --days 10 --min-target-cost-ratio 16  # 12 trades, great ratios
+```
+
+The last one is the trap this repository exists to avoid: it lifts PF to 5.5 and Sharpe to
+6.4 on twelve trades, and the gates still say NOT PROMOTABLE. Tuning the ratio upwards
+until a backtest looks good is fitting, not research.
+
 ## Execution cost and the size cap
 
 The dashboard's execution panel and `tradebot slippage` read the same recorder: every fill

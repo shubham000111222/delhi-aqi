@@ -18,7 +18,7 @@ a capability that exists but has not cleared its gates is marked as such.
 | 5 Strategies | S1 EMA trend (ADX), S2 mean reversion (BB+RSI), S3 Donchian breakout, regime detector |
 | 6 Execution & paper exchange | idempotent ids, safe retries, rate limiter, book-walk fills, latency, rejects, injected failures |
 | 6 Slippage | per-fill measurement against the *decision* price, size-vs-depth buckets, calibrated model, budget-constrained sizing, and a live entry cap at `execution.max_slippage_bps` once 30 fills have calibrated the model |
-| 7 Risk, kill switch, loss/profit handling | 16 checks, L0–L3, cooldowns, streaks, partials, trailing, locks, tax reserve |
+| 7 Risk, kill switch, loss/profit handling | 17 checks (including the cost budget: target vs round-trip cost), L0–L3, cooldowns, streaks, partials, trailing, locks, tax reserve |
 | 8 Backtesting (engine + metrics + gates) | same-engine replay, Sharpe/Sortino/Calmar/DD/PF/expectancy, Monte Carlo, acceptance gates, post-tax view |
 | 8 Walk-forward | rolling train/test windows with purged, embargoed folds; per-window and pooled OOS results |
 | 8 Sensitivity | parameter grids, plateau share, neighbour isolation, and a sign check so a wide plateau of losses is not "approved" |
@@ -30,7 +30,7 @@ a capability that exists but has not cleared its gates is marked as such.
 | 12 Reliability & security | crash recovery, reconciliation, structured logs with redaction, heartbeats, disk guards, scoped auto-resume |
 | 12 Inbound commands | Telegram router: chat-id whitelist, confirm step with TTL and single use, audit line per command, transport-agnostic |
 | 12 Telegram transport | `getUpdates` long polling with persisted offset, `sendMessage`, backoff on failure, injected HTTP client, started by `run` when a token and chat id exist, `tradebot telegram` readiness check |
-| 13 Testing | 516 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
+| 13 Testing | 525 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
 | 18.1 Book recording | recorded on every session (`RecordingFeed`), archived to Parquet, summarised as spread statistics |
 | 18.6 Experiment tracking | `experiments` table, deterministic run ids, trial log used by the multiple-testing report |
 | 18.6 MLflow export | `experiments --export DIR` writes MLflow's file-store layout, `run --mlflow DIR` writes each session as it ends, and `experiments --read DIR` reads a store back into the bot; non-numeric metrics move to tags; verified by reading all three back with real MLflow 3.17 |

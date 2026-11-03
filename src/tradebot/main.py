@@ -56,6 +56,8 @@ def _config(args: argparse.Namespace) -> Config:
                 "orders_per_minute": max(base.orders_per_minute, int(base.orders_per_minute * speed)),
                 "orders_per_day": max(base.orders_per_day, int(base.orders_per_day * speed)),
             }
+    if getattr(args, "min_target_cost_ratio", None) is not None:
+        risk_overrides["min_target_cost_ratio"] = args.min_target_cost_ratio
     cfg = load_config(
         args.config_dir, overrides=overrides or None, risk_overrides=risk_overrides or None
     )
@@ -448,6 +450,10 @@ def _add_shared(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--speed", type=float, default=argparse.SUPPRESS,
         help="synthetic feed speed (simulated seconds per real second)",
+    )
+    parser.add_argument(
+        "--min-target-cost-ratio", type=float, default=argparse.SUPPRESS, metavar="N",
+        help="refuse entries whose target is nearer than N x the round-trip cost (0 disables)",
     )
     parser.add_argument("-v", "--verbose", action="store_true", default=argparse.SUPPRESS)
 

@@ -1,4 +1,4 @@
-"""Pre-trade risk engine: 16 checks, in order, every single order.
+"""Pre-trade risk engine: 17 checks, in order, every single order.
 
 The order of the checks matters (cheap and safety-critical first) and this module
 mirrors section 7.1 of the plan one-to-one. Every rejection is logged with its
@@ -22,7 +22,7 @@ from ..core.models import (
     Side,
     Signal,
 )
-from ..core.money import ZERO, to_str
+from ..core.money import ZERO, D, to_str
 from ..portfolio.sizing import size_entry
 from .killswitch import KillSwitch
 
@@ -56,6 +56,9 @@ class RiskContext:
     ramp_multiplier: Decimal = Decimal("1")
     size_multiplier: Decimal = Decimal("1")
     available_cash: Decimal = ZERO
+    #: fees for both legs plus the expected slippage, in basis points. Zero means
+    #: "unknown", and the cost check is skipped rather than guessing.
+    round_trip_cost_bps: Decimal = ZERO
     notes: list[str] = field(default_factory=list)
 
     # --- derived ----------------------------------------------------------
@@ -239,11 +242,14 @@ class RiskEngine:
             and ctx.orders_today < self.limits.orders_per_day,
             f"{ctx.orders_last_minute}/min, {ctx.orders_today}/day",
         )
+        # 17. cost budget: the target has to be reachable after fees and slippage
+        cost_ok, cost_detail = self._cost_budget(signal, price, ctx)
+        add("cost_budget", cost_ok, cost_detail)
 
         approved = all(
             (kill_ok, mode_ok, data_ok, symbol_ok, spread_ok, fat_finger_ok, notional_ok,
              risk_ok, symbol_exp_ok, total_ok, bucket_ok, positions_ok, depth_ok, losses_ok,
-             cooldown_ok, rate_ok)
+             cooldown_ok, rate_ok, cost_ok)
         )
         first_fail = next((c for c in checks if not c.passed), None)
         if approved:
@@ -274,6 +280,35 @@ class RiskEngine:
         )
 
     # --- exits are never blocked by entry gates ---------------------------
+    def _cost_budget(
+        self, signal: Signal, price: Decimal, ctx: RiskContext
+    ) -> tuple[bool, str]:
+        """Would the target survive the round-trip cost, or is this trade dead on arrival?
+
+        Costs are not a detail at 15-minute horizons: two taker fees plus slippage can be
+        most of the distance to the target, and a trade that needs the whole move to break
+        even is a donation with extra steps. The requirement is a multiple, not a margin,
+        because a target barely above cost has no room for the stop to be hit first.
+
+        Disabled (and skipped, with no opinion claimed) when the ratio is 0, when the
+        signal has no target, or when the cost estimate is unknown.
+        """
+        ratio = D(str(self.limits.min_target_cost_ratio))
+        if ratio <= 0:
+            return True, "no cost budget configured"
+        if signal.target is None or price <= 0:
+            return True, "no target to measure"
+        cost_bps = ctx.round_trip_cost_bps
+        if cost_bps <= 0:
+            return True, "cost estimate unavailable"
+        target_bps = abs(signal.target - price) / price * Decimal("10000")
+        needed = cost_bps * ratio
+        ok = target_bps >= needed
+        return ok, (
+            f"target {to_str(target_bps, 1)} bps vs {to_str(needed, 1)} bps "
+            f"({to_str(ratio, 1)}x round-trip cost {to_str(cost_bps, 1)} bps)"
+        )
+
     def approve_exit(self, symbol: str) -> RiskVerdict:
         """Closing risk is always allowed, at any kill level, even mid-flatten."""
         return RiskVerdict(

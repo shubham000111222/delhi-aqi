@@ -5,7 +5,7 @@ Changing a limit is a code review event, not a config edit at 2 a.m.: the risk e
 also enforces a **hard envelope** (`RiskLimits.ABSOLUTE_MAX_*`) that no YAML file can
 exceed.
 
-## 1. Pre-trade checks (all sixteen, in this order)
+## 1. Pre-trade checks (all seventeen, in this order)
 
 | # | Check | Default | Why |
 | --- | --- | --- | --- |
@@ -25,6 +25,7 @@ exceed.
 | 14 | Daily / weekly loss limits | −2% / −5% | stops the day before it becomes a week |
 | 15 | Cooldown after a stop-out | 15 min | no revenge re-entry |
 | 16 | Order rate | 10/min, 300/day | protects the API key and the operator |
+| 17 | Cost budget: target distance vs round-trip cost | target ≥ 4× (2 taker fees + calibrated slippage) | a target barely above cost has no room to be right before the stop is hit |
 
 Rejections are logged with the first failing check and stored in `risk_verdicts`.
 Sizing starts from risk and then applies caps 9–13; the **smallest wins** and the
@@ -32,6 +33,31 @@ binding constraint is recorded, so "why was this trade so small" always has an a
 
 The plan's sanity check holds: five positions at 0.5% risk each is ≈ 2.5% if they all
 stop out together — above the −2% "stop new entries" line, below the −3% flatten line.
+
+### The cost budget, and what it is not
+
+Check 17 refuses an entry whose *target* is nearer than `min_target_cost_ratio` times the
+round-trip cost, where the round-trip cost is two taker fees (always known, from the
+venue's market rules) plus expected slippage (only once the slippage model has been fitted
+on at least 30 fills; before that the fee half is still counted and the detail line says
+the estimate is partial; if the rules themselves are unknown the check reports "cost
+estimate unavailable" and passes, because a made-up number is worse than an admitted gap).
+
+It is not a profitability test, and it is not a substitute for the gates. Measured on ten
+synthetic days (`docs/RUNBOOK.md` has the command):
+
+| ratio | trades | fees | equity | PF | what it means |
+| --- | --- | --- | --- | --- | --- |
+| 0 (off) | 97 | 27.69 | 971.23 | 0.91 | the unfiltered baseline |
+| 4 (default) | 97 | 27.69 | 971.23 | 0.91 | every target here already clears 4× cost, so it is neutral |
+| 8 | 69 | 19.47 | 993.70 | 1.03 | prunes 29% of trades, still a loss |
+| 16 | 12 | 3.28 | 1028.95 | 5.54 | PF and Sharpe pass, trade count fails: a small sample, not an edge |
+
+The 16 row is the one to remember. Raising the ratio until the numbers look good produces
+twelve trades and a Sharpe of 6.37 that the acceptance gates refuse for the only honest
+reason: twelve trades is not evidence. The default is 4 because it is neutral on this data
+and would still refuse a genuinely unreachable target on a wider cost venue - not because
+it made a backtest look better.
 
 ## 2. Loss handling
 
