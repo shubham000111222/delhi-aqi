@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from ..core.clock import utc, utcnow
 
@@ -344,3 +346,218 @@ __all__ = [
     "session_run",
     "write_experiment",
 ]
+
+
+# --------------------------------------------------------------------------------------
+# live tracking: stream a running session to an MLflow tracking server
+# --------------------------------------------------------------------------------------
+
+
+class LiveTracker:
+    """Stream a *running* session's metrics to an MLflow tracking server (plan §18.6).
+
+    The file-store exporter above answers "what did last night's run do?" after the fact.
+    An operator watching a soak wants the curve while it is happening, so this class talks
+    to MLflow through its client API instead of writing files: create a run, log a point
+    every reporting interval, terminate it at the end.
+
+    Three rules, because a trading process must not die for its telemetry:
+
+    * **MLflow is optional.** It is imported lazily and only when a tracker is started; a
+      bot without MLflow installed keeps trading, and `describe()` says why it is off.
+    * **A failure disables the tracker, not the session.** The first exception from the
+      client is recorded and the tracker stops trying (`disabled`, `last_error`), so a
+      dead tracking server costs one bad call rather than one per interval.
+    * **Metrics must be numeric.** Anything that cannot be a float is skipped and counted
+      - a verdict string belongs in a tag, and MLflow would reject it as a metric anyway.
+
+    `client` is injectable so the behaviour can be tested without a server; passing one
+    also skips the import.
+    """
+
+    def __init__(
+        self,
+        tracking_uri: str,
+        *,
+        experiment: str = "tradebot-live",
+        run_name: str | None = None,
+        client: Any = None,
+    ) -> None:
+        self.tracking_uri = tracking_uri
+        self.experiment = experiment
+        self.run_name = run_name or f"session-{utcnow().strftime('%Y%m%dT%H%M%S')}"
+        self._client = client
+        self.run_id: str | None = None
+        self.experiment_id: str | None = None
+        self.logged = 0
+        self.skipped = 0
+        self.failures = 0
+        self.disabled = False
+        self.reason = ""
+        self.last_error = ""
+
+    # -- plumbing ---------------------------------------------------------
+    def _reachable(self, timeout: float = 3.0) -> tuple[bool, str]:
+        """A quick TCP check before handing the URI to MLflow.
+
+        MLflow's HTTP client retries with backoff for *minutes* when a server is down, and
+        `start()` runs before the trading loop - so a tracker pointed at a dead host would
+        delay the session it is meant to observe. Three seconds and a clear reason is the
+        whole point of this method. Non-HTTP stores (sqlite, file) cannot be probed this
+        way, and are left to the client.
+        """
+        parsed = urlparse(self.tracking_uri)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return True, ""
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        try:
+            with socket.create_connection((parsed.hostname, port), timeout=timeout):
+                return True, ""
+        except OSError as exc:
+            return False, f"cannot reach {parsed.hostname}:{port} ({exc.__class__.__name__})"
+
+    def _ensure_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+        try:
+            from mlflow.tracking import MlflowClient  # noqa: PLC0415 - optional dependency
+        except Exception as exc:  # pragma: no cover - depends on the environment
+            self.disabled = True
+            self.reason = f"mlflow is not installed ({exc.__class__.__name__})"
+            raise RuntimeError(self.reason) from exc
+        self._client = MlflowClient(tracking_uri=self.tracking_uri)
+        return self._client
+
+    def _fail(self, action: str, exc: BaseException) -> None:
+        self.failures += 1
+        self.disabled = True
+        self.last_error = f"{action}: {exc.__class__.__name__}: {exc}"
+
+    # -- lifecycle --------------------------------------------------------
+    def start(self, *, params: dict[str, Any] | None = None, tags: dict[str, Any] | None = None) -> str | None:
+        """Create the experiment if needed and open a run. Returns the run id, or None."""
+        if self.disabled:
+            return None
+        ok, why = self._reachable()
+        if not ok:
+            self.disabled = True
+            self.reason = why
+            self.last_error = why
+            return None
+        try:
+            client = self._ensure_client()
+            found = client.get_experiment_by_name(self.experiment)
+            self.experiment_id = (
+                found.experiment_id if found is not None
+                else client.create_experiment(self.experiment)
+            )
+            self.run_id = client.create_run(
+                self.experiment_id,
+                run_name=self.run_name,
+                tags={**{str(k): str(v) for k, v in (tags or {}).items() if v is not None},
+                      "kind": "live_session"},
+            ).info.run_id
+            for key, value in (params or {}).items():
+                if value is None:
+                    continue
+                client.log_param(self.run_id, str(key), str(value))
+            return self.run_id
+        except Exception as exc:  # noqa: BLE001 - telemetry must never stop trading
+            self._fail("start", exc)
+            return None
+
+    def log(
+        self,
+        metrics: dict[str, Any],
+        *,
+        step: int | None = None,
+        timestamp: datetime | None = None,
+    ) -> int:
+        """Log one point per numeric metric. Returns how many were accepted."""
+        if self.disabled or not self.run_id:
+            return 0
+        when = _millis(timestamp or utcnow(), utcnow())
+        accepted = 0
+        try:
+            client = self._ensure_client()
+            for key, value in metrics.items():
+                number = _numeric(value)
+                if number is None:
+                    self.skipped += 1
+                    continue
+                client.log_metric(self.run_id, _safe(key), number, timestamp=when, step=step or 0)
+                accepted += 1
+                self.logged += 1
+        except Exception as exc:  # noqa: BLE001
+            self._fail("log", exc)
+            return accepted
+        return accepted
+
+    def finish(self, *, status: str = "FINISHED") -> None:
+        if self.disabled or not self.run_id:
+            return
+        try:
+            self._ensure_client().set_terminated(self.run_id, status=status)
+        except Exception as exc:  # noqa: BLE001
+            self._fail("finish", exc)
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "tracking_uri": self.tracking_uri,
+            "experiment": self.experiment,
+            "run_id": self.run_id,
+            "enabled": not self.disabled,
+            "points": self.logged,
+            "skipped": self.skipped,
+            "failures": self.failures,
+            "reason": self.reason,
+            "last_error": self.last_error,
+        }
+
+
+def _metric_row(run: Any) -> dict[str, Any]:
+    data = getattr(run, "data", None)
+    metrics = {key: float(value) for key, value in (getattr(data, "metrics", None) or {}).items()}
+    return {
+        "run_id": run.info.run_id,
+        "experiment": run.info.experiment_id,
+        "status": run.info.status,
+        "start_time": run.info.start_time,
+        "metrics": metrics,
+        "params": {str(k): str(v) for k, v in (run.data.params or {}).items()},
+        "tags": {str(k): str(v) for k, v in (run.data.tags or {}).items()},
+    }
+
+
+def read_server_runs(
+    tracking_uri: str,
+    *,
+    limit: int = 50,
+    experiment: str | None = None,
+    client: Any = None,
+) -> list[dict[str, Any]]:
+    """Read runs back from an MLflow tracking server (the counterpart of `LiveTracker`).
+
+    Returns the same shape `read_runs` gives for a file store, so `tradebot experiments
+    --read-server` can print either one. Newest first.
+    """
+    if client is None:
+        from mlflow.tracking import MlflowClient  # noqa: PLC0415 - optional dependency
+
+        client = MlflowClient(tracking_uri=tracking_uri)
+    if experiment:
+        found = client.get_experiment_by_name(experiment)
+        if found is None:
+            return []
+        experiment_ids = [found.experiment_id]
+    else:
+        # mlflow's search_runs needs explicit ids; "None" is a TypeError, not "everywhere"
+        experiment_ids = [str(item.experiment_id) for item in client.search_experiments()]
+        if not experiment_ids:
+            return []
+    runs = client.search_runs(
+        experiment_ids=experiment_ids,
+        order_by=["attributes.start_time DESC"],
+        max_results=limit,
+    )
+    return [_metric_row(run) for run in runs]

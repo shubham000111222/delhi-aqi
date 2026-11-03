@@ -1,7 +1,7 @@
 # Roadmap: what is built, what is not, and why
 
 The build plan is a ten-week programme. This repository implements the spine of it
-(sections 2–8, 10–12, most of 18 and 19). Anything still missing is listed at the bottom
+(sections 2–8, 10–12, 18 and 19). Anything still missing is listed at the bottom
 with the reason. Nothing is silently stubbed: a missing capability is marked missing, and
 a capability that exists but has not cleared its gates is marked as such.
 
@@ -30,10 +30,11 @@ a capability that exists but has not cleared its gates is marked as such.
 | 12 Reliability & security | crash recovery, reconciliation, structured logs with redaction, heartbeats, disk guards, scoped auto-resume |
 | 12 Inbound commands | Telegram router: chat-id whitelist, confirm step with TTL and single use, audit line per command, transport-agnostic |
 | 12 Telegram transport | `getUpdates` long polling with persisted offset, `sendMessage`, backoff on failure, injected HTTP client, started by `run` when a token and chat id exist, `tradebot telegram` readiness check |
-| 13 Testing | 535 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
+| 13 Testing | 549 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
 | 18.1 Book recording | recorded on every session (`RecordingFeed`), archived to Parquet, summarised as spread statistics |
 | 18.6 Experiment tracking | `experiments` table, deterministic run ids, trial log used by the multiple-testing report |
 | 18.6 MLflow export | `experiments --export DIR` writes MLflow's file-store layout, `run --mlflow DIR` writes each session as it ends, and `experiments --read DIR` reads a store back into the bot; non-numeric metrics move to tags; verified by reading all three back with real MLflow 3.17 |
+| 18.6 MLflow live tracking | `run --mlflow-server URI` streams points to a running tracking server while the session runs (http, sqlite or file store), terminates the run at the end, and `experiments --read-server URI` reads it back; MLflow is an optional dependency, a dead server is caught by a 3-second TCP pre-check and disables tracking instead of delaying the session; verified end to end against a real `mlflow server` |
 | 18.8 NSE execution | `KiteAdapter`: order shaping (LIMIT/MARKET/SL/SL-M, MIS/CNC/NRML), local tick/lot/band checks before any HTTP call, tag-based idempotency with a lookup after a timeout, status mapping, balances, positions, LTP cache, closed-session refusal, `venues --venue nse` reports readiness |
 | 18.8 NSE-ready seams | `MarketCalendar` + `NSECalendar`, `Instrument` (tick/lot/band), `NSECostModel` (STT, GST, stamp, DP), daily-expiring sessions, square-off scheduler, engine hooks |
 | 19.1 Signal library | 32 features in 7 families, 44 signals in 8 families, IC on non-overlapping samples, stability, cost-adjusted PnL, correlation pruning, shuffled-label check |
@@ -55,7 +56,6 @@ a capability that exists but has not cleared its gates is marked as such.
 | **A backfill against a real exchange** | The paginator, its de-duplication and its gap report are tested against a fake endpoint and a deterministic offline exchange; `--source ccxt` cannot reach Binance from this sandbox | `python -m tradebot backfill --days 30 --write` from a networked host, then check `coverage` and `gaps` |
 | **A Telegram session against the real API** | The transport is implemented and tested through an `httpx` mock, but this sandbox cannot open TLS to `api.telegram.org` (`ConnectError`, reported as `telegram reachable: False`) | run `python -m tradebot telegram` with a real token |
 | **An NSE order at a real broker** | `KiteAdapter` is written and tested through an `httpx` mock, but nothing here has a Kite session (the sandbox cannot reach `api.kite.trade`, and a pointing-at-prod test would be reckless) | run `venues --venue nse` with real keys (it probes margins), then one 1-share order in a test account; verify tariff constants against current circulars |
-| **An MLflow tracking *server*** | Sessions and experiment cells are written to a file store on exit (and read back), but nothing streams metrics to a running `mlflow server` or a database backend, and nothing logs mid-session | point a `tracking_uri` at a server and add an `mlflow.log_metric` call at the report step if a team needs live curves; the bot's SQLite log stays the source of truth |
 
 The full evidence sheet — every command, every number, dated — is in `docs/RESULTS.md`.
 

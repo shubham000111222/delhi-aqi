@@ -168,6 +168,20 @@ thing that judges it.
 Read a store back with `python -m tradebot experiments --read ./mlruns`, or point MLflow
 at it: `mlflow ui --backend-store-uri file://$PWD/mlruns`.
 
+To watch a session **while it runs** instead of after it ends, point the bot at a tracking
+server and read the run back from it:
+
+```bash
+mlflow server --backend-store-uri sqlite:///$(pwd)/mlflow.db --host 127.0.0.1 --port 5055 &
+python -m tradebot run --mlflow-server http://127.0.0.1:5055 --mlflow-interval 30
+python -m tradebot experiments --read-server http://127.0.0.1:5055
+```
+
+One point every `--mlflow-interval` seconds (equity, P&L, fees, trades, signals, vetoes,
+fills, kill level), the final session snapshot at the door, and the run terminated as
+`FINISHED`. A tracking server that is down or unreachable disables tracking within three
+seconds and the session keeps trading - it is telemetry, not a dependency.
+
 Do not read a session run's `win_rate` as a strategy result: it is a few dozen trades of
 a reference strategy on synthetic data, and the gates in `tradebot metrics` are the only
 thing allowed to call a strategy good.

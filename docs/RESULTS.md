@@ -75,9 +75,38 @@ against a local feed of four negative headlines:
 - 7 entries halved to ×0.50 at an aggregate score of −0.38 (`sentiment_sizing` events)
 - the multiplier floor is 0.5 and the ceiling is 1.0: good news never enlarges an order
 
+## MLflow live tracking, end to end
+
+A real tracking server was started in the sandbox and a real paper session streamed into
+it - no mocks on either side:
+
+```
+mlflow server --backend-store-uri sqlite:////tmp/mlflowdb/mlflow.db \
+              --default-artifact-root /tmp/mlflowart --host 127.0.0.1 --port 5055
+python -m tradebot run --minutes 1 --mlflow-server http://127.0.0.1:5055 --mlflow-interval 15
+python -m tradebot experiments --read-server http://127.0.0.1:5055
+```
+
+- **41 points** in one minute at a 15-second interval: equity, cash, realised and
+  unrealised P&L, fees, trades closed, signals, vetoes, fills, kill level
+- the run is `FINISHED` at the end (the tracker terminates it), with the final session
+  snapshot logged after the loop stops: equity 1,002.53, 5 trades, 1,032 signals,
+  1,027 vetoes, 12 fills, win rate 0.40, kill level 0
+- `experiments --read-server` reads the same run back with its params (`mode=paper`,
+  `feed=synthetic`) and tags (`kind=live_session`)
+- **a dead server costs three seconds, not a session.** MLflow's HTTP client retries for
+  minutes; before adding the TCP pre-check, `start()` against `http://127.0.0.1:1` blocked
+  for **246 s** in the test suite. With the pre-check it fails in about a second, sets
+  `disabled`, reports `cannot reach 127.0.0.1:1`, and the bot trades on
+- 14 new tests (12 unit against a recording fake client, 2 integration against a real
+  SQLite-backed store), including the optional-dependency path: a host without MLflow
+  imports, keeps running, and says why tracking is off
+
 ## What is not measured here, and why
 
 Live order placement, a WebSocket session, a real backfill, Telegram's API and FinBERT
-weights all need network egress or credentials this sandbox does not have. Each is listed
+weights all need network egress or credentials this sandbox does not have. MLflow live
+tracking is *not* on this list any more: a tracking server runs locally, so it was verified
+rather than deferred. Each is listed
 with its next step in `ROADMAP.md` → "Not built". The live ccxt adapter's logic is covered
 by 27 tests through a fake exchange, but no test here can prove what Binance will answer.

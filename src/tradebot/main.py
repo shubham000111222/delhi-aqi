@@ -66,6 +66,15 @@ def _config(args: argparse.Namespace) -> Config:
     return cfg
 
 
+def _kill_number(status: dict[str, Any]) -> float:
+    """Kill level as a number: MLflow metrics cannot be "L2", and the level is the point."""
+    level = str((status.get("kill_state") or {}).get("level", "L0"))
+    try:
+        return float(level.lstrip("Ll") or 0)
+    except ValueError:
+        return 0.0
+
+
 def _print(obj: object) -> None:
     print(json.dumps(obj, indent=2, default=str))
 
@@ -260,12 +269,63 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"sentiment: {len(urls)} feed(s), polled every {args.news_interval:.0f}s (reduce-only)")
 
     started_at = engine.clock.now()
+    tracker = None
+    if getattr(args, "mlflow_server", None):
+        from .ai.tracking import LiveTracker
+
+        tracker = LiveTracker(
+            str(args.mlflow_server),
+            experiment="tradebot-live",
+            run_name=f"session-{started_at.strftime('%Y%m%dT%H%M%S')}",
+        )
+        tracker.start(
+            params={"mode": cfg.mode.value, "feed": cfg.settings.feed.value,
+                    "symbols": ",".join(cfg.symbol_names()),
+                    "capital": cfg.settings.max_capital_usdt},
+            tags={"kind": "live_session", "mode": cfg.mode.value},
+        )
+        if tracker.disabled:
+            print(f"mlflow: live tracking off - {tracker.last_error or tracker.reason}")
+        else:
+            print(f"mlflow: streaming to {args.mlflow_server} as run {tracker.run_id}")
+
+    async def _stream_metrics() -> None:
+        """Push one point per interval so the curve exists while the session runs."""
+        assert tracker is not None
+        step = 0
+        while True:
+            await asyncio.sleep(max(5.0, float(getattr(args, "mlflow_interval", 60.0))))
+            if tracker.disabled:
+                return
+            status = engine.status()
+            stats = status.get("stats") or {}
+            tracker.log(
+                {
+                    "equity": status.get("equity"),
+                    "cash": status.get("cash"),
+                    "realized_pnl": status.get("realized_pnl"),
+                    "unrealized_pnl": status.get("unrealized_pnl"),
+                    "fees": status.get("fees"),
+                    "trades_closed": stats.get("trades_closed"),
+                    "signals": stats.get("signals"),
+                    "vetoes": stats.get("vetoes"),
+                    "fills": stats.get("fills"),
+                    "kill_level": _kill_number(status),
+                },
+                step=step,
+            )
+            step += 1
 
     async def _main() -> int:
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
         listener = _start_command_listener(cfg, engine)
         news_task = asyncio.create_task(news_poller.run(stop)) if news_poller is not None else None
+        stream_task = (
+            asyncio.create_task(_stream_metrics())
+            if tracker is not None and not tracker.disabled
+            else None
+        )
 
         def _stop(*_: object) -> None:
             stop.set()
@@ -273,14 +333,19 @@ def cmd_run(args: argparse.Namespace) -> int:
         for sig in (signal.SIGINT, signal.SIGTERM):
             with contextlib.suppress(NotImplementedError):  # pragma: no cover - windows
                 loop.add_signal_handler(sig, _stop)
-        run_task = asyncio.create_task(engine.run())
+        stop_at = (
+            engine.clock.now() + timedelta(minutes=float(args.minutes))
+            if getattr(args, "minutes", None)
+            else None
+        )
+        run_task = asyncio.create_task(engine.run(stop_at=stop_at))
         stop_task = asyncio.create_task(stop.wait())
         await asyncio.wait({run_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
         if not run_task.done():
             engine.running = False
             run_task.cancel()
         await asyncio.gather(run_task, return_exceptions=True)
-        for task in (listener, news_task):
+        for task in (listener, news_task, stream_task):
             if task is None:
                 continue
             task.cancel()
@@ -305,6 +370,23 @@ def cmd_run(args: argparse.Namespace) -> int:
             report = export_runs([run], args.mlflow, name="tradebot-sessions")
             print(f"mlflow: wrote {report.runs} run to {args.mlflow} "
                   f"({report.metrics} metrics, {report.params} params, {report.tags} tags)")
+        if tracker is not None:
+            if not tracker.disabled:
+                from .ai.tracking import session_run
+
+                final = session_run(
+                    run_id=tracker.run_id or tracker.run_name, store=engine.store, status=status,
+                    started=started_at, mode=cfg.mode.value,
+                    capital=cfg.settings.max_capital_usdt,
+                )
+                tracker.log(final["metrics"])
+                tracker.finish()
+                print(
+                    f"mlflow: run {tracker.run_id} finished - {tracker.logged} points to "
+                    f"{tracker.tracking_uri}"
+                )
+            if tracker.disabled:
+                print(f"mlflow: live tracking stopped - {tracker.last_error or tracker.reason}")
         engine.close()
         return 0
 
@@ -488,6 +570,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="write the session to an MLflow file store on exit (read it back with "
              "`tradebot experiments --read DIR`)",
     )
+    run_parser.add_argument(
+        "--mlflow-server", default=None, metavar="URI",
+        help="stream metrics to a running MLflow tracking server while the session runs "
+             "(http://host:5000, sqlite:///path.db, or file:///abs/path); read them back "
+             "with `tradebot experiments --read-server URI`",
+    )
+    run_parser.add_argument(
+        "--mlflow-interval", type=float, default=60.0,
+        help="seconds between live MLflow points (default 60)",
+    )
+    run_parser.add_argument(
+        "--minutes", type=float, default=None, metavar="N",
+        help="stop after N minutes of wall clock instead of running until interrupted "
+             "(the engine clock in a live session is real time, so minutes are real minutes)",
+    )
 
     live_check = sub.add_parser("live-check", help="run every live-mode gate (never trades)")
     live_check.add_argument("--confirm", default=None)
@@ -604,6 +701,8 @@ def build_parser() -> argparse.ArgumentParser:
     exp.add_argument("--json", action="store_true")
     exp.add_argument("--read", default=None, metavar="DIR",
                      help="read an MLflow file store back: what a teammate's runs contain")
+    exp.add_argument("--read-server", default=None, metavar="URI",
+                     help="read runs back from a tracking server (http://, sqlite://, file://)")
 
     bfl = sub.add_parser("backfill", help="paginate historical candles into the archive")
     bfl.add_argument("--symbols", default=None, help="comma-separated; default: config symbols")
@@ -1374,6 +1473,30 @@ def cmd_backfill(args: argparse.Namespace) -> int:
 def cmd_experiments(args: argparse.Namespace) -> int:
     """Show the experiment log, export it, or read a file store back."""
     from .ai.tracking import export_from_store, read_runs
+
+    if getattr(args, "read_server", None):
+        from .ai.tracking import read_server_runs
+
+        try:
+            runs = read_server_runs(args.read_server, limit=args.limit)
+        except Exception as exc:  # noqa: BLE001 - a wrong URI is a message, not a traceback
+            print(f"cannot read {args.read_server}: {exc.__class__.__name__}: {exc}")
+            return 1
+        if args.json:
+            _print({"server": args.read_server, "runs": runs})
+            return 0
+        if not runs:
+            print(f"no runs at {args.read_server}: is anything logging there?")
+            return 0
+        print(f"{len(runs)} run(s) from {args.read_server}")
+        for run in runs:
+            head = run["metrics"].get("equity") or run["metrics"].get("end_equity")
+            points = ", ".join(f"{k}={v:.4g}" for k, v in list(run["metrics"].items())[:4])
+            print(
+                f"  {run['status']:10s} {run['run_id'][:28]:28s} "
+                f"equity={head if head is not None else '-':>12}  {points}"
+            )
+        return 0
 
     if args.read:
         runs = read_runs(args.read, limit=args.limit)
