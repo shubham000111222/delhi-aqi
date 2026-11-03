@@ -180,7 +180,11 @@ def render_png(snapshot: dict[str, Any], out_path: str | Path) -> Path:
     if len(points) >= 2:
         lo = min(min(points), 1000.0)
         hi = max(max(points), 1000.0)
-        span = (hi - lo) or 1.0
+        # pad a nearly flat curve so it sits inside the card instead of on its floor
+        raw_lo, raw_hi = lo, hi  # labels show the real extremes, the scale is padded
+        pad = max((hi - lo) * 0.15, hi * 0.0015)
+        lo, hi = lo - pad, hi + pad
+        span = hi - lo
         px0, px1 = 44, width - 60
         py0, py1 = curve_top + 60, curve_top + 270
         coords = [
@@ -198,8 +202,8 @@ def render_png(snapshot: dict[str, Any], out_path: str | Path) -> Path:
             draw.line([(px0, yk), (px1, yk)], fill=(23, 31, 42), width=1)
         draw.polygon([*coords, (px1, py1), (px0, py1)], fill=(17, 46, 36))
         draw.line(coords, fill=GREEN, width=2)
-        draw.text((44, curve_top + 40), f"high {_money(hi)}", font=f_small, fill=MUTED)
-        draw.text((44, py1 - 14), f"low  {_money(lo)}", font=f_small, fill=MUTED)
+        draw.text((44, curve_top + 40), f"high {_money(raw_hi)}", font=f_small, fill=MUTED)
+        draw.text((44, py1 - 14), f"low  {_money(raw_lo)}", font=f_small, fill=MUTED)
     else:
         draw.text((44, curve_top + 70), "warming up", font=f_body, fill=MUTED)
 
@@ -254,7 +258,9 @@ def render_png(snapshot: dict[str, Any], out_path: str | Path) -> Path:
             fill=GREEN if float(veto.get("approval_rate") or 0) > 0.05 else AMBER,
         )
         if veto.get("note"):
-            draw.text((44, veto_top + 32), str(veto["note"])[:120], font=f_small, fill=MUTED)
+            note = str(veto["note"])
+            short = note if len(note) <= 62 else note[:59].rstrip() + "..."
+            draw.text((44, veto_top + 31), short, font=f_small, fill=MUTED)
         x0 = 860
         for row in (veto.get("by_check") or [])[:4]:
             colour = AMBER if row.get("check") == "cost_budget" else TEXT
