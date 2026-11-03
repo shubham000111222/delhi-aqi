@@ -222,6 +222,7 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | `tradebot meta --days N` | triple-barrier meta-labels, gate threshold search, promote/skip verdict |
 | `tradebot stream --minutes N` | replay a recorded session through the streaming feed and print its verdict |
 | `tradebot backfill --days N --write` | paginate historical candles into the archive and report coverage and gaps |
+| `tradebot research` | bounded successive-halving search; every attempt is logged and the winner is deflated, so it can answer "no" |
 | `tradebot news --url FEED` | score an RSS feed and print the size multiplier it implies (`--file` for an offline copy) |
 | `tradebot experiments --export DIR` | list the experiment log and write it as an MLflow file store |
 | `tradebot experiments --read DIR` | read an MLflow file store back and print what is in it |

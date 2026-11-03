@@ -121,6 +121,22 @@ changed.
 Read the p95, not the mean: a median of 0 bps with a long tail is a strategy that looks
 fine until it is not.
 
+## The research loop
+
+```
+python -m tradebot research --strategy S1_ema_trend --days 4 --budget 16
+python -m tradebot research --space ema_fast=12,15,20 --space ema_slow=40,50,60
+```
+
+It searches a declared space in stages (a quarter of the window, then a half, then all of
+it), keeps the better half each time, and reports the survivor **deflated by the number of
+candidates it ran**. Exit code 4 means "no recommendation", which is a normal answer and
+the expected one on synthetic data.
+
+Before believing a positive verdict: run `walk-forward`, then `robustness`, then
+`metrics`. The loop cannot promote anything - only the acceptance gates can - and it
+writes every attempt to the experiment log so the deflation is auditable later.
+
 ## Logging a session to MLflow
 
 `python -m tradebot run --mlflow ./mlruns` writes one run when the session ends: equity,

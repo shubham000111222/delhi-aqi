@@ -30,13 +30,14 @@ a capability that exists but has not cleared its gates is marked as such.
 | 12 Reliability & security | crash recovery, reconciliation, structured logs with redaction, heartbeats, disk guards, scoped auto-resume |
 | 12 Inbound commands | Telegram router: chat-id whitelist, confirm step with TTL and single use, audit line per command, transport-agnostic |
 | 12 Telegram transport | `getUpdates` long polling with persisted offset, `sendMessage`, backoff on failure, injected HTTP client, started by `run` when a token and chat id exist, `tradebot telegram` readiness check |
-| 13 Testing | 465 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
+| 13 Testing | 489 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
 | 18.1 Book recording | recorded on every session (`RecordingFeed`), archived to Parquet, summarised as spread statistics |
 | 18.6 Experiment tracking | `experiments` table, deterministic run ids, trial log used by the multiple-testing report |
 | 18.6 MLflow export | `experiments --export DIR` writes MLflow's file-store layout, `run --mlflow DIR` writes each session as it ends, and `experiments --read DIR` reads a store back into the bot; non-numeric metrics move to tags; verified by reading all three back with real MLflow 3.17 |
 | 18.8 NSE execution | `KiteAdapter`: order shaping (LIMIT/MARKET/SL/SL-M, MIS/CNC/NRML), local tick/lot/band checks before any HTTP call, tag-based idempotency with a lookup after a timeout, status mapping, balances, positions, LTP cache, closed-session refusal, `venues --venue nse` reports readiness |
 | 18.8 NSE-ready seams | `MarketCalendar` + `NSECalendar`, `Instrument` (tick/lot/band), `NSECostModel` (STT, GST, stamp, DP), daily-expiring sessions, square-off scheduler, engine hooks |
 | 19.1 Signal library | 32 features in 7 families, 44 signals in 8 families, IC on non-overlapping samples, stability, cost-adjusted PnL, correlation pruning, shuffled-label check |
+| 19.5 Research loop | bounded successive halving over a declared space: every attempt is a logged trial, the survivor is deflated by the attempts that produced it, the verdict is allowed to be "no", and it never registers a model or edits config |
 | 19.2 Complexity ladder | baseline → ridge → boosting → sequence (a numpy MLP over a 4-row window) on purged folds; promotion needs +10% net expectancy in every window, enforced in code |
 | 19.7 Explainability / leakage | ridge weight shares with a >40% warning, multi-permutation shuffled-label test, far-shift test, Platt calibration with Brier score |
 | 19.3 Meta-label runtime gate | `MetaEntryFilter` installed as the engine's veto-only entry filter (`run --meta-gate card.json`): a saved card is loaded, features are rebuilt from the live bar window and cached per bar close, and anything unexpected lets the trade through with a logged reason |
@@ -55,7 +56,6 @@ a capability that exists but has not cleared its gates is marked as such.
 | **A Telegram session against the real API** | The transport is implemented and tested through an `httpx` mock, but this sandbox cannot open TLS to `api.telegram.org` (`ConnectError`, reported as `telegram reachable: False`) | run `python -m tradebot telegram` with a real token |
 | **An NSE order at a real broker** | `KiteAdapter` is written and tested through an `httpx` mock, but nothing here has a Kite session (the sandbox cannot reach `api.kite.trade`, and a pointing-at-prod test would be reckless) | run `venues --venue nse` with real keys (it probes margins), then one 1-share order in a test account; verify tariff constants against current circulars |
 | **An MLflow tracking *server*** | Sessions and experiment cells are written to a file store on exit (and read back), but nothing streams metrics to a running `mlflow server` or a database backend, and nothing logs mid-session | point a `tracking_uri` at a server and add an `mlflow.log_metric` call at the report step if a team needs live curves; the bot's SQLite log stays the source of truth |
-| **Autonomous research loop (19.5)** | An automatic search over strategies multiplies the multiple-testing problem this repo already takes seriously | only after the trial log and promotion rule have been used by hand for a while |
 
 ## Known limitations
 
@@ -63,6 +63,12 @@ a capability that exists but has not cleared its gates is marked as such.
   results). They are reference implementations, not a strategy pack.
 * **15-minute signals are fee-sensitive.** ≈2.8% of equity went to fees over ten
   simulated days. Any real deployment needs either lower turnover or maker-only entries.
+* **The research loop searches; it does not validate.** Its recommendation means "worth a
+  walk-forward", never "promotable": a halving search on one window is still a search on
+  one window, and on two simulated days it returns "no" because the deflation kills the
+  winner (probability 0.92 against a 0.95 bar). Short stages also make its Sharpe noisier
+  than a daily one - the loop annualises at the curve's own resolution when there are
+  fewer than three daily returns, and says so in the module docstring.
 * **The synthetic market is not a forecast.** It has regime shifts and correlated
   moves, which is enough to exercise the plumbing, not enough to validate an edge.
 * **The signal screen is sample-starved.** One simulated day gives ~46 non-overlapping

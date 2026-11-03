@@ -568,6 +568,22 @@ def build_parser() -> argparse.ArgumentParser:
     arc.add_argument("--keep-days", type=int, default=None, help="delete book partitions older than this")
     arc.add_argument("--json", action="store_true")
 
+    rs = sub.add_parser(
+        "research", help="bounded search over a declared space, with every attempt counted"
+    )
+    rs.add_argument("--strategy", default="S1_ema_trend")
+    rs.add_argument("--days", type=int, default=4, help="total window the stages divide up")
+    rs.add_argument("--budget", type=int, default=16, help="cap on candidates (each is a trial)")
+    rs.add_argument("--steps", type=int, default=3, help="values per parameter when auto-building")
+    rs.add_argument("--spread", type=float, default=0.5, help="how far around each configured value")
+    rs.add_argument("--keep", type=float, default=0.5, help="fraction that survives each stage")
+    rs.add_argument("--stage", type=float, action="append", default=None,
+                    help="stage as a fraction of the window; repeatable (default 0.25, 0.5, 1.0)")
+    rs.add_argument("--space", action="append", default=None, metavar="PARAM=V1,V2",
+                    help="explicit axis, e.g. --space ema_fast=12,20 (repeatable)")
+    rs.add_argument("--seed", type=int, default=1)
+    rs.add_argument("--json", action="store_true")
+
     nws = sub.add_parser("news", help="score an RSS feed once and show the size multiplier")
     nws.add_argument("--url", default=None, help="RSS URL(s), comma separated")
     nws.add_argument("--file", default=None, help="read the RSS from a file instead (offline)")
@@ -1423,6 +1439,58 @@ def cmd_experiments(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_research(args: argparse.Namespace) -> int:
+    """The bounded research loop: search a declared space, count every attempt, deflate."""
+    from .research import format_report, search, space_from_config
+
+    cfg = _config(args)
+    strategy = args.strategy
+    if args.space:
+        space = _parse_axes(args.space, cfg, strategy)
+    else:
+        space = space_from_config(cfg, strategy, steps=args.steps, spread=args.spread)
+    if not space:
+        print(f"{strategy} has no numeric parameters to search", file=sys.stderr)
+        return 2
+
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = start + timedelta(days=args.days)
+    report = asyncio.run(
+        search(
+            cfg,
+            strategy=strategy,
+            space=space,
+            start=start,
+            end=end,
+            stages=tuple(args.stage or (0.25, 0.5, 1.0)),
+            keep=args.keep,
+            budget=args.budget,
+            seed=args.seed,
+        )
+    )
+    from .backtest.robustness import log_trials
+    from .core.store import Store
+
+    store = Store(cfg.settings.db_path)
+    try:
+        log_trials(
+            store,
+            strategy,
+            [trial.as_dict() for trial in report.trials],
+            metric="net_return",
+            seed=args.seed,
+            run_prefix="research",
+        )
+    finally:
+        store.close()
+
+    if args.json:
+        _print(report.as_dict())
+    else:
+        print(format_report(report))
+    return 0 if report.recommend or args.json else 4
+
+
 def cmd_news(args: argparse.Namespace) -> int:
     """Fetch the configured feed once and show what the sentiment overlay would do.
 
@@ -1972,6 +2040,7 @@ def main(argv: list[str] | None = None) -> int:
         "backfill": cmd_backfill,
         "experiments": cmd_experiments,
         "news": cmd_news,
+        "research": cmd_research,
     }
     if args.command in ("pause", "resume", "kill", "lockdown"):
         args.action = args.command
