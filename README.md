@@ -170,6 +170,8 @@ reported here because a failing strategy that is *proved* to fail is the deliver
 | Signal screen (44 signals, 1 day, horizon 30 bars) | A handful survive; the IC noise band at 46 non-overlapping samples is ±0.29, so most survivors are labelled **thin**, not proven |
 | Complexity ladder (4 rungs) | Baseline (IC-weighted) is retained; **ridge, boosting and the window model are all rejected** — none is profitable net of 10 bps a side, and the window model trades 2-3x as often as the others (BTC: baseline −1.6, ridge −3.2, boosting −1.9, sequence −3.1 bps a bar over 4-5x the turnover) |
 | Slippage (2 days) | median 0.0 bps, p95 **+26 bps**, worst +36 bps — the number the backtester had been silently assuming was zero |
+| Research loop (2 days, 6 run → 3 kept) | best cell +1.87%, deflated Sharpe 1.41, probability 0.92 against a 0.95 bar → **NO** ("weak: does not survive its own attempts") |
+| Sentiment overlay (local RSS, 4 negative headlines) | 8 polls, 4 headlines kept, 28 duplicates dropped, 7 entries halved to ×0.50 at score −0.38 |
 
 That is what "the AI layer" looks like when it is not allowed to lie: forty-four
 candidate signals, a screen that throws most of them away, a gradient-boosted model that
