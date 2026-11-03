@@ -31,6 +31,7 @@ class FeedKind(StrEnum):
     SYNTHETIC = "synthetic"
     CCXT = "ccxt"
     STREAM = "stream"
+    ARCHIVE = "archive"  # recorded candles on disk: the only feed a backtest may replay
 
 
 class _Strict(BaseModel):
@@ -176,6 +177,7 @@ class Settings(_Strict):
     # runtime paths, filled by the loader (not in YAML)
     config_dir: Path = DEFAULT_CONFIG_DIR
     data_dir: Path = Path("data")
+    archive_dir: Path | None = None  # default: <data_dir>/archive
     state_dir: Path = Path("data/state")
 
     @property
@@ -439,6 +441,7 @@ def load_config(
     settings = Settings(**settings_raw)
     settings.config_dir = cdir
     settings.state_dir = Path(settings.data_dir) / "state"
+    settings.archive_dir = Path(settings.archive_dir or Path(settings.data_dir) / "archive")
 
     risk_raw = _read_yaml(cdir / "risk.yaml")
     if risk_overrides:

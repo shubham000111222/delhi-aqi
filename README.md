@@ -67,6 +67,7 @@ no API key is needed.
 
 | Area | Status | Where |
 | --- | --- | --- |
+| Recorded-tape replay (`--feed archive`) | done (`depth` is modelled, and says so) | `data/archive.py`, `data/feed.py` |
 | Real-time multi-coin market data (5 coins, 1m base, 15m/1h derived) | done | `data/feed.py`, `data/hub.py` |
 | Paper exchange: book-walk fills, 0.1% fees, 100–500 ms latency, rejects, injected API failures | done | `execution/adapters/paper.py` |
 | Idempotent client order ids, query-before-retry, safe-error-only retries, rate limiting | done | `execution/order_manager.py` |
@@ -234,6 +235,7 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | `tradebot meta --days N` | triple-barrier meta-labels, gate threshold search, promote/skip verdict |
 | `tradebot stream --minutes N` | replay a recorded session through the streaming feed and print its verdict |
 | `tradebot backfill --days N --write` | paginate historical candles into the archive and report coverage and gaps |
+| `tradebot backtest --feed archive --days N` | replay the archive through the real engine (see *Replaying a recording*) |
 | `tradebot research` | bounded successive-halving search; every attempt is logged and the winner is deflated, so it can answer "no" |
 | `tradebot news --url FEED` | score an RSS feed and print the size multiplier it implies (`--file` for an offline copy) |
 | `tradebot experiments --export DIR` | list the experiment log and write it as an MLflow file store |
@@ -247,8 +249,27 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | `tradebot venues --venue nse --notional 100000` | session state, square-off deadline, round-trip cost comparison |
 | `tradebot archive --record-minutes N` | persist a session to Parquet and query it with DuckDB |
 
-`--mode paper|testnet|live`, `--feed synthetic|ccxt|stream`, `--speed N` and `--config-dir`
-are accepted before or after the sub-command.
+`--mode paper|testnet|live`, `--feed synthetic|ccxt|stream|archive`, `--archive-root PATH`,
+`--speed N` and `--config-dir` are accepted before or after the sub-command.
+
+### Replaying a recording
+
+`backfill` writes real candles to Parquet; `--feed archive` feeds them back through the
+same engine, so `backtest`, `walk-forward`, `sensitivity`, `robustness` and `signals`
+can all run on recorded prices instead of a seeded simulation:
+
+```powershell
+python -m tradebot backfill --days 30 --write            # record (needs exchange access)
+python -m tradebot backtest --feed archive --days 30     # replay it
+python -m tradebot walk-forward --feed archive --train-days 10 --test-days 5 --windows 3
+```
+
+A replay starts on the archive's first bar and stops at its last — a run asking for more
+days than were recorded is clipped, not extended into empty time. The archive holds
+candles, not depth, so a replay **models** a top-of-book around each bar close and prints
+that caveat with its result: the spread is an assumption, not a measurement. Calibrate it
+with `tradebot slippage` after a live session. `--feed ccxt`/`stream` with a simulated
+clock is refused outright, because that combination opens a real socket during a backtest.
 
 ## Going live (read this first)
 

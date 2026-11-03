@@ -171,10 +171,46 @@ formality.
 (the risk engine owns that), and cannot add a trade. The only thing a ledger card may do is
 refuse an entry, which is the same veto-only contract as the meta-label gate.
 
+## Replaying the archive, end to end
+
+The archive was write-only for a while: `backfill` recorded Parquet, and no research
+command could read it. That is now closed, and the failures found while closing it are
+worth recording because each one produced a plausible-looking wrong answer.
+
+| What was wrong | What it looked like | Fix |
+| --- | --- | --- |
+| Sim clock hard-coded to 2024-01-01 | a 2026 archive replayed 0 trades, gates FAIL `trade_count` | start on the archive's first bar, clip the window to its last |
+| Replay emitted bars only | 54 signals, 24 orders, **0 fills**, 0 trades | model a top-of-book from each bar close; print that caveat |
+| Demo fetcher priced from the absolute epoch minute | demo prices at `exp(598) ≈ 1e259` | a 30-day continuous cycle, so 2024 and 2031 look alike |
+| A NaN stop reached `save_signal` | `decimal.InvalidOperation` killed the run | refuse the signal, log `signal_rejected`, keep the session |
+
+Evidence from three days of the offline demo tape (43,200 1m bars per symbol, five
+symbols, real pagination, invented prices):
+
+```
+feeds  book modelled ...  21591 bars, 21591 books, 54 signals, 24 orders, 24 fills, 8 closed
+closed trades: 8 | win rate 1.000 | fees 3.00 | end equity 1020.58
+FAIL  out_of_sample_profit_factor  PF 0.00 >= 1.3
+PASS  sharpe                       sharpe 16.03 >= 1.0
+PASS  max_drawdown                 max DD -1.11% <= 15%
+FAIL  trade_count                  8 trades >= 200
+verdict: NOT PROMOTABLE
+```
+
+A 100% win rate and a Sharpe of 16 on a demo tape are a property of the tape, not of the
+strategies, which is exactly why the gates are not read from a synthetic run. The number
+that matters is that the replay now moves real orders through the real engine: 24 orders,
+24 fills, 8 closed trades with fees. `walk-forward`, `sensitivity`, `robustness` and
+`signals` were also run on `--feed archive` and produced results rather than tracebacks
+(`signals`: nothing survived the screen, baseline promoted - the honest answer for a
+4-bar horizon against 10 bps a side).
+
 ## What is not measured here, and why
 
 Live order placement, a WebSocket session, a real backfill, Telegram's API and FinBERT
-weights all need network egress or credentials this sandbox does not have. MLflow live
+weights all need network egress or credentials this sandbox does not have. A replay's
+depth is modelled, not measured: every fill in the archive results above happened against
+a book built from the bar close. MLflow live
 tracking is *not* on this list any more: a tracking server runs locally, so it was verified
 rather than deferred. Each is listed
 with its next step in `ROADMAP.md` → "Not built". The live ccxt adapter's logic is covered
