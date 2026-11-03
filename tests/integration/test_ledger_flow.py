@@ -224,3 +224,66 @@ class TestLedgerGateInsideTheEngine:
             assert any("entry_filter" in (row["reason"] or "") for row in vetoed)
         finally:
             engine.close()
+
+
+def test_every_attempt_is_written_to_the_trial_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An attempt that is not logged is an attempt nobody can deflate later."""
+    db = seed(tmp_path / "paper.db", learnable=False)
+    monkeypatch.setattr(cli, "_config", lambda args: _stub_config(db))
+
+    assert cli.main(["learn", "--json"]) == 0
+    run_id = json.loads(capsys.readouterr().out)["run_id"]
+
+    store = Store(str(db))
+    try:
+        rows = store.experiments(limit=10)
+    finally:
+        store.close()
+
+    assert len(rows) == 1
+    assert rows[0]["run_id"] == run_id
+    assert rows[0]["kind"] == "ledger_gate"
+    assert rows[0]["notes"] == "NO_EDGE"
+    assert rows[0]["metrics"]["trades"] == 330
+
+
+class TestInspect:
+    def _card(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        db = seed(tmp_path / "paper.db", learnable=True)
+        monkeypatch.setattr(cli, "_config", lambda args: _stub_config(db))
+        card = tmp_path / "ledger.json"
+        assert cli.main(["learn", "--save", str(card)]) == 0
+        return card
+
+    def test_a_fresh_card_is_reported_valid(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        card = self._card(tmp_path, monkeypatch)
+
+        assert cli.main(["learn", "--inspect", str(card)]) == 0
+        out = capsys.readouterr().out
+        assert "verdict PROMOTABLE" in out
+        assert "valid" in out
+
+    def test_an_expired_card_is_reported_inert(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        card = self._card(tmp_path, monkeypatch)
+        payload = json.loads(card.read_text())
+        payload["created_at"] = "2020-01-01T00:00:00+00:00"
+        card.write_text(json.dumps(payload))
+
+        assert cli.main(["learn", "--inspect", str(card)]) == 3
+        assert "INERT" in capsys.readouterr().out
+
+    def test_a_file_that_is_not_a_card_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.setattr(cli, "_config", lambda args: _stub_config(tmp_path / "x.db"))
+        broken = tmp_path / "broken.json"
+        broken.write_text('{"kind": "something_else"}')
+
+        assert cli.main(["learn", "--inspect", str(broken)]) == 2
+        assert "not a ledger-gate card" in capsys.readouterr().err

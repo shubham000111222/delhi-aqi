@@ -286,8 +286,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     if getattr(args, "ledger_gate", None):
         from .ai.ledger import LedgerEntryFilter, load_card
 
+        guards = getattr(cfg.settings, "live_guards", None)
+        max_age = float(getattr(guards, "go_nogo_max_age_days", 14) or 0)
         try:
-            card = load_card(args.ledger_gate)
+            card = load_card(args.ledger_gate, max_age_days=max_age)
         except (OSError, ValueError) as exc:
             print(f"refusing to start with that ledger model: {exc}", file=sys.stderr)
             engine.close()
@@ -304,6 +306,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"{len(card.vocabulary.strategies)} strategies x {len(card.vocabulary.symbols)} symbols, "
             f"trained on {card.meta.get('verdict', {}).get('summary', {}).get('trades', '?')} trades (veto-only)"
         )
+        if card.stale_reason:
+            print(f"ledger gate is inert: {card.stale_reason}", file=sys.stderr)
 
     news_poller = None
     if getattr(args, "news_url", None):
@@ -754,6 +758,10 @@ def build_parser() -> argparse.ArgumentParser:
     learn.add_argument("--save", default=None, metavar="PATH", help="write the card (only if promoted)")
     learn.add_argument("--json", action="store_true")
     learn.add_argument("--db", default=None, metavar="PATH", help="read this database instead of the paper one")
+    learn.add_argument(
+        "--inspect", default=None, metavar="PATH",
+        help="describe a saved card (age, threshold, training size) and say whether it is still valid",
+    )
 
     exp = sub.add_parser("experiments", help="the experiment log, and an MLflow export of it")
     exp.add_argument("--limit", type=int, default=200)
@@ -1543,6 +1551,29 @@ def cmd_learn(args: argparse.Namespace) -> int:
     )
 
     cfg = _config(args)
+    if getattr(args, "inspect", None):
+        from .ai.ledger import load_card
+
+        guards = getattr(cfg.settings, "live_guards", None)
+        max_age = float(getattr(guards, "go_nogo_max_age_days", 14) or 0)
+        try:
+            card = load_card(args.inspect, max_age_days=max_age)
+        except (OSError, ValueError) as exc:
+            print(f"cannot read that card: {exc}", file=sys.stderr)
+            return 2
+        verdict = card.meta.get("verdict") or {}
+        summary = verdict.get("summary") or {}
+        age = card.age_days()
+        print(f"card: {args.inspect}")
+        print(f"  created {card.meta.get('created_at')} ({'age unknown' if age is None else f'{age:.1f} days old'})")
+        print(f"  threshold {card.threshold:.3f}, {len(card.vocabulary.strategies)} strategies x {len(card.vocabulary.symbols)} symbols")
+        print(f"  trained on {summary.get('trades', '?')} trades, verdict {verdict.get('status', '?')}")
+        if card.stale_reason:
+            print(f"  INERT: {card.stale_reason}")
+            return 3
+        print("  valid: it will veto entries the ledger lost on")
+        return 0
+
     db_path = args.db or cfg.settings.db_path
     if not Path(db_path).exists():
         print(f"no database at {db_path}: run the bot, or backtest with --persist", file=sys.stderr)
@@ -1550,8 +1581,9 @@ def cmd_learn(args: argparse.Namespace) -> int:
     store = Store(db_path)
     try:
         report = trades_from_store(store, limit=100_000)
-    finally:
+    except Exception:
         store.close()
+        raise
 
     windows = walk_forward(report.trades, windows=args.windows)
     verdict = judge(report, windows, min_trades=args.min_trades)
@@ -1560,6 +1592,31 @@ def cmd_learn(args: argparse.Namespace) -> int:
     if args.save and verdict.may_write_card:
         gate = fit_gate(report.trades)
         card_path = str(save_card(args.save, gate, verdict, report=report))
+    # every attempt is a trial: log it, so a later multiple-testing report counts it
+    run_id = f"ledger-{utcnow().strftime('%Y%m%dT%H%M%S')}"
+    try:
+        store.save_experiment(
+            run_id,
+            kind="ledger_gate",
+            name=f"ledger walk-forward ({len(windows)} windows)",
+            strategy="ledger",
+            params={"windows": args.windows, "min_trades": args.min_trades},
+            metrics={
+                "trades": summary.get("trades", 0),
+                "win_rate": summary.get("win_rate", 0.0),
+                "mean_r": summary.get("mean_r", 0.0),
+                "fee_share_of_gross": summary.get("fee_share_of_gross", 0.0),
+                "windows": len(windows),
+                "auc_min": min((window.auc for window in windows), default=0.0),
+                "gated_r_min": min((window.gated_r for window in windows), default=0.0),
+            },
+            artifacts={"card": card_path or ""},
+            notes=verdict.status,
+        )
+    except Exception as exc:  # noqa: BLE001 - a log write must not lose the verdict
+        print(f"warning: could not log this attempt: {type(exc).__name__}", file=sys.stderr)
+    finally:
+        store.close()
 
     if args.json:
         _print(
@@ -1568,6 +1625,7 @@ def cmd_learn(args: argparse.Namespace) -> int:
                 "windows": [window.as_dict() for window in windows],
                 "verdict": verdict.as_dict(),
                 "card": card_path,
+                "run_id": run_id,
             }
         )
         return 0
@@ -1605,6 +1663,7 @@ def cmd_learn(args: argparse.Namespace) -> int:
         print(f"  a window needs {40} training trades closed before it and {20} inside it")
         print()
     print("\n".join(verdict.lines()))
+    print(f"  logged as experiment {run_id} (kind ledger_gate)")
     print()
     if verdict.status == "PROMOTABLE":
         print(

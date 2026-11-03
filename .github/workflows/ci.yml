@@ -21,7 +21,7 @@ jobs:
       - name: lint
         run: ruff check src tests
       - name: types
-        run: mypy src || true   # advisory until the type pass is complete
+        run: mypy src           # blocking: the type pass is clean across src/tradebot
       - name: config sanity
         run: PYTHONPATH=src python -m tradebot check
       - name: tests

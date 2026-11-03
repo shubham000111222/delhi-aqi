@@ -152,6 +152,21 @@ so that entry-time ATR predicts the result - a fixture, not a result):
 A card written from the first was installed with `run --ledger-gate` and refused the
 low-ATR setups in the engine's own decision path; the second writes nothing and says why.
 
+**Every attempt is a trial.** `learn` writes a `ledger_gate` row into the `experiments`
+table whatever the verdict says, so running it twenty times and keeping the best card would
+show up in the log the multiple-testing report reads:
+
+```
+  2026-11-03T19:17:12  ledger_gate  ledger   ledger-20261103T191712  trades=92, win_rate=0.413, mean_r=0.0524
+```
+
+**A card expires.** `run --ledger-gate` loads it with `live_guards.go_nogo_max_age_days`
+(default 14) and a card past that age is inert: it vetoes nothing, prints why on stderr, and
+says the same in every verdict reason. A card is a statement about a regime, and a stale one
+keeps refusing trades with confident-looking reasons long after the market that produced it
+is gone - the failure mode is identical to a real one, which is why the age check is not a
+formality.
+
 **What this does not do:** it does not retrain a strategy, does not change position size
 (the risk engine owns that), and cannot add a trade. The only thing a ledger card may do is
 refuse an entry, which is the same veto-only contract as the meta-label gate.

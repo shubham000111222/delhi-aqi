@@ -348,3 +348,62 @@ class TestEntryFilter:
 
         assert allowed is True
         assert "not ready" in reason
+
+
+class TestStaleness:
+    def _card(self, tmp_path: Path, created: str) -> Path:
+        report = LedgerReport(trades=planted_edge(300))
+        verdict = judge(report, walk_forward(report.trades, windows=3))
+        path = save_card(tmp_path / "card.json", fit_gate(report.trades), verdict, report=report)
+        import json
+
+        payload = json.loads(path.read_text())
+        payload["created_at"] = created
+        path.write_text(json.dumps(payload))
+        return path
+
+    def test_a_fresh_card_is_used(self, tmp_path: Path) -> None:
+        from datetime import UTC, datetime
+
+        fresh = datetime.now(UTC).isoformat()
+        gate = load_card(self._card(tmp_path, fresh), max_age_days=14)
+
+        assert gate.ready
+        assert gate.stale_reason == ""
+
+    def test_an_old_card_stops_vetoing_and_says_so(self, tmp_path: Path) -> None:
+        gate = load_card(self._card(tmp_path, "2020-01-01T00:00:00+00:00"), max_age_days=14)
+
+        assert not gate.ready
+        assert "days old" in gate.stale_reason
+        decision = gate.decide({}, strategy="S1_ema_trend", symbol="BTC/USDT", moment=START)
+        assert decision.take is True
+        assert "re-run" in decision.reason
+
+    def test_a_card_without_a_date_cannot_be_age_checked(self, tmp_path: Path) -> None:
+        path = self._card(tmp_path, "2020-01-01T00:00:00+00:00")
+        import json
+
+        payload = json.loads(path.read_text())
+        payload.pop("created_at")
+        path.write_text(json.dumps(payload))
+
+        gate = load_card(path, max_age_days=14)
+
+        assert not gate.ready
+        assert "no creation date" in gate.stale_reason
+
+    def test_no_limit_means_the_card_is_trusted(self, tmp_path: Path) -> None:
+        gate = load_card(self._card(tmp_path, "2020-01-01T00:00:00+00:00"))
+
+        assert gate.ready
+
+    def test_a_stale_card_lets_entries_through(self, tmp_path: Path) -> None:
+        gate = load_card(self._card(tmp_path, "2020-01-01T00:00:00+00:00"), max_age_days=14)
+        entry_filter = LedgerEntryFilter(gate=gate)
+
+        allowed, reason = entry_filter(_Signal(), _Context(atr=0.2))  # would be vetoed if fresh
+
+        assert allowed is True
+        assert "days old" in reason
+        assert entry_filter.vetoes == 0

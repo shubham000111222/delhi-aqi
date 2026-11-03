@@ -520,20 +520,43 @@ class LedgerDecision:
 
 @dataclass
 class LedgerGate:
-    """A fitted gate plus the vocabulary it was fitted on."""
+    """A fitted gate plus the vocabulary it was fitted on, and how old it is.
+
+    A card is a statement about a market regime. Left in place for long enough it becomes
+    a statement about a market that no longer exists - and it is worse than no card,
+    because it keeps refusing trades with confident-looking reasons. `stale_reason` is set
+    by `load_card` when the card is older than the configured limit, and a stale gate is
+    not ready, so the filter lets everything through and says why.
+    """
 
     model: LogisticGate
     vocabulary: Vocabulary
     threshold: float
     meta: dict[str, Any] = field(default_factory=dict)
+    stale_reason: str = ""
 
     @property
     def ready(self) -> bool:
-        return self.model.ready and bool(self.vocabulary.strategies)
+        return (
+            self.model.ready
+            and bool(self.vocabulary.strategies)
+            and not self.stale_reason
+        )
+
+    def age_days(self, now: datetime | None = None) -> float | None:
+        created = _when(self.meta.get("created_at"))
+        if created is None:
+            return None
+        return ((now or utcnow()) - created).total_seconds() / 86_400
 
     def decide(self, features: dict[str, float], *, strategy: str, symbol: str, moment: datetime) -> LedgerDecision:
         if not self.ready:
-            return LedgerDecision(True, float("nan"), self.threshold, "ledger gate not ready")
+            return LedgerDecision(
+                True,
+                float("nan"),
+                self.threshold,
+                self.stale_reason or "ledger gate not ready",
+            )
         if strategy not in self.vocabulary.strategies:
             return LedgerDecision(True, float("nan"), self.threshold, f"{strategy} was never in the ledger")
         if symbol not in self.vocabulary.symbols:
@@ -611,7 +634,8 @@ def save_card(path: str | Path, gate: LedgerGate, verdict: LedgerVerdict, *, rep
     return target
 
 
-def load_card(path: str | Path) -> LedgerGate:
+def load_card(path: str | Path, *, max_age_days: float | None = None) -> LedgerGate:
+    """Read a card. `max_age_days` is not a formality: a stale card stops vetoing."""
     payload = json.loads(Path(path).read_text())
     if payload.get("kind") != "ledger_gate":
         raise ValueError(f"{path} is not a ledger-gate card")
@@ -623,12 +647,22 @@ def load_card(path: str | Path) -> LedgerGate:
         strategies=list((payload.get("vocabulary") or {}).get("strategies") or []),
         symbols=list((payload.get("vocabulary") or {}).get("symbols") or []),
     )
-    return LedgerGate(
+    gate = LedgerGate(
         model=model,
         vocabulary=vocabulary,
         threshold=float(payload.get("threshold") or 0.5),
         meta={"created_at": payload.get("created_at"), "verdict": payload.get("verdict") or {}},
     )
+    if max_age_days is not None and max_age_days > 0:
+        age = gate.age_days()
+        if age is None:
+            gate.stale_reason = "card has no creation date, so its age cannot be checked"
+        elif age > max_age_days:
+            gate.stale_reason = (
+                f"card is {age:.1f} days old, limit {max_age_days:.1f}: "
+                "re-run `tradebot learn` on recent trades"
+            )
+    return gate
 
 
 @dataclass
@@ -648,7 +682,7 @@ class LedgerEntryFilter:
 
     def __call__(self, signal: Any, ctx: Any = None) -> tuple[bool, str]:
         if not self.gate.ready:
-            return True, "ledger gate not ready"
+            return True, self.gate.stale_reason or "ledger gate not ready"
         try:
             mark = float(getattr(ctx, "mark", 0) or 0)
             if mark <= 0:

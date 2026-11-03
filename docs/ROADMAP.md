@@ -30,7 +30,7 @@ a capability that exists but has not cleared its gates is marked as such.
 | 12 Reliability & security | crash recovery, reconciliation, structured logs with redaction, heartbeats, disk guards, scoped auto-resume |
 | 12 Inbound commands | Telegram router: chat-id whitelist, confirm step with TTL and single use, audit line per command, transport-agnostic |
 | 12 Telegram transport | `getUpdates` long polling with persisted offset, `sendMessage`, backoff on failure, injected HTTP client, started by `run` when a token and chat id exist, `tradebot telegram` readiness check |
-| 13 Testing | 570 passing, 4 skipped (optional MLflow extras): unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity, ledger) |
+| 13 Testing | 579 passing, 4 skipped (optional MLflow extras): unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity, ledger) |
 | 18.1 Book recording | recorded on every session (`RecordingFeed`), archived to Parquet, summarised as spread statistics |
 | 18.6 Experiment tracking | `experiments` table, deterministic run ids, trial log used by the multiple-testing report |
 | 18.6 MLflow export | `experiments --export DIR` writes MLflow's file-store layout, `run --mlflow DIR` writes each session as it ends, and `experiments --read DIR` reads a store back into the bot; non-numeric metrics move to tags; verified by reading all three back with real MLflow 3.17 |

@@ -359,3 +359,12 @@ Expect "not yet" for a long time: the floor is 200 closed trades, because at 92 
 fitted gate scored AUC 0.16 - worse than a coin flip - and would have made the strategy
 lose faster. `models/*.json` is gitignored, so a card is never committed.
 
+Each `learn` writes a `ledger_gate` row to the experiment log whatever the verdict, so
+`tradebot experiments` shows how many times you asked, and a card older than
+`live_guards.go_nogo_max_age_days` (14 by default) is loaded inert and says so - re-run
+`learn` rather than trusting a stale one. Ask before you start anything:
+
+```bash
+python -m tradebot learn --inspect models/ledger.json   # exit 3 means "inert, retrain me"
+```
+
