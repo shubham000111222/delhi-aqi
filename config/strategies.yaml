@@ -1,0 +1,73 @@
+# Strategy registry. Strategies are pure functions of (candles, params) -> Signals.
+# `regimes` gates a strategy by the detected market regime (section 5).
+# `enabled` looks at the *canary* rule: nothing goes live without a validated backtest.
+
+strategies:
+  S1_ema_trend:
+    class: tradebot.strategies.ema_trend:EmaTrend
+    enabled: true
+    timeframes: ["15m", "1h"]
+    regimes: ["trend"]
+    priority: 10
+    params:
+      ema_fast: 20
+      ema_slow: 50
+      adx_min: 20
+      atr_period: 14
+      entry_type: limit          # limit entry with cancel-on-timeout; market only for exits
+      limit_offset_bps: 5
+
+  S2_meanrev:
+    class: tradebot.strategies.meanrev:MeanReversion
+    enabled: true
+    timeframes: ["15m"]
+    regimes: ["range"]
+    priority: 20
+    params:
+      bb_period: 20
+      bb_stdev: 2.0
+      rsi_period: 14
+      rsi_oversold: 30
+      rsi_maxtrend_adx: 22
+      atr_period: 14
+
+  S3_breakout:
+    class: tradebot.strategies.breakout:Breakout
+    enabled: true
+    timeframes: ["15m", "1h"]
+    regimes: ["trend", "high_vol"]
+    priority: 15
+    params:
+      donchian: 20
+      vol_lookback: 20
+      vol_factor: 1.2
+      atr_period: 14
+
+  # S4 reads an *approved* model card and does nothing without one. Wiring it in is
+  # deliberately off: section 8 says a strategy ships only after it beats the acceptance
+  # gates, and there is no trained model here. `tradebot signals` shows why the ladder has
+  # not promoted anything yet. See docs/ROADMAP.md.
+  S4_ml_signal:
+    class: tradebot.strategies.ml_signal:MlSignal
+    enabled: false
+    timeframes: ["1h"]
+    regimes: ["trend", "range", "high_vol"]
+    priority: 30
+    params:
+      registry: models/registry.json
+      entry_threshold: 0.35
+      stop_atr_mult: 1.75
+
+regime:
+  adx_period: 14
+  adx_trend: 25
+  adx_range_max: 20
+  vol_lookback: 96
+  high_vol_percentile: 0.85
+
+exit_management:
+  time_stop_bars: 64
+  partial_tp_r: 1.5
+  partial_tp_fraction: 0.5
+  trail_atr_mult: 3.0
+  breakeven_after_partial: true

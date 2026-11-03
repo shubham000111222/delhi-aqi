@@ -1,0 +1,37 @@
+# secrets
+.env
+*.pem
+*.key
+
+# runtime state / data / output (repo-root only: `data/` would also ignore
+# src/tradebot/data/ and silently drop the market data package from every commit)
+/data/
+/reports/
+/logs/
+*.db
+*.db-wal
+*.db-shm
+*.parquet
+*.duckdb
+KILL
+
+# trained model cards: a model fitted on synthetic data must never be able to trade
+# because someone committed it. `tradebot signals --save-model` writes here.
+/models/*.json
+/models/*.pkl
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# os
+.DS_Store

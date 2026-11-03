@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>tradebot · paper trading dashboard</title>
+<style>
+  :root {
+    --bg: #0b0f14; --panel: #121821; --panel-2: #0f151d; --line: #1e2937;
+    --text: #e6edf5; --muted: #8b9bb0; --green: #2fbf71; --red: #ef5350;
+    --amber: #f5a623; --blue: #4c9aff; --chip: #1b2532;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 28px; align-items: center;
+    padding: 18px 24px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 15px; margin: 0 12px 0 0; letter-spacing: .3px; font-weight: 600; }
+  header .brand span { color: var(--muted); font-weight: 400; }
+  .metric { display: flex; flex-direction: column; gap: 2px; }
+  .metric .label { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); }
+  .metric .value { font-size: 18px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .pill { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--chip); }
+  .pill.L0 { background: rgba(47,191,113,.14); color: var(--green); }
+  .pill.L1 { background: rgba(245,166,35,.16); color: var(--amber); }
+  .pill.L2, .pill.L3 { background: rgba(239,83,80,.16); color: var(--red); }
+  .up { color: var(--green); } .down { color: var(--red); } .muted { color: var(--muted); }
+  main { padding: 20px 24px 60px; display: grid; gap: 18px; grid-template-columns: repeat(12, 1fr); }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px;
+    grid-column: span 12; min-width: 0;
+  }
+  .card.half { grid-column: span 6; }
+  .card.third { grid-column: span 4; }
+  @media (max-width: 1000px) { .card.half, .card.third { grid-column: span 12; } }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .9px; color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .7px; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--line); font-weight: 600; }
+  td { padding: 7px 8px; border-bottom: 1px solid rgba(30,41,55,.6); font-size: 13px; }
+  tr:last-child td { border-bottom: none; }
+  .chip { display: inline-block; background: var(--chip); border-radius: 6px; padding: 1px 7px; font-size: 11px; color: var(--muted); }
+  .chip.buy { background: rgba(47,191,113,.14); color: var(--green); }
+  .chip.sell { background: rgba(239,83,80,.14); color: var(--red); }
+  .empty { color: var(--muted); padding: 12px 0; font-size: 13px; }
+  .feed { max-height: 300px; overflow: auto; font-size: 12px; }
+  .feed .row { display: flex; gap: 10px; padding: 4px 0; border-bottom: 1px dashed rgba(30,41,55,.7); }
+  .feed .ts { color: var(--muted); width: 78px; flex: none; font-variant-numeric: tabular-nums; }
+  .feed .kind { width: 130px; flex: none; color: var(--blue); }
+  .feed .kind.WARN { color: var(--amber); } .feed .kind.CRIT { color: var(--red); }
+  .bar { height: 7px; background: var(--panel-2); border-radius: 4px; overflow: hidden; margin-top: 6px; }
+  .bar > i { display: block; height: 100%; background: linear-gradient(90deg, #2fbf71, #4c9aff); }
+  .bar.warn > i { background: linear-gradient(90deg, #f5a623, #ef5350); }
+  .kv { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px dashed rgba(30,41,55,.7); font-size: 13px; }
+  .kv:last-child { border-bottom: none; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; }
+  button {
+    background: var(--chip); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 14px; font-size: 13px; cursor: pointer; font-weight: 500;
+  }
+  button:hover { border-color: #2c3a4d; }
+  button.danger { border-color: rgba(239,83,80,.4); color: #ffb4b2; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  svg.spark { width: 100%; height: 150px; display: block; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-top: 8px; }
+  #conn {
+    position: sticky; top: 0; z-index: 6; padding: 6px 24px; font-size: 12px;
+    font-variant-numeric: tabular-nums; border-bottom: 1px solid var(--line);
+  }
+  #conn.conn-live { background: rgba(47,191,113,.10); color: var(--green); }
+  #conn.conn-wait { background: rgba(76,154,255,.10); color: var(--blue); }
+  #conn.conn-error { background: rgba(239,83,80,.14); color: var(--red); font-weight: 600; }
+  .flash { position: fixed; right: 18px; bottom: 18px; background: var(--panel); border: 1px solid var(--line);
+           border-radius: 10px; padding: 10px 16px; font-size: 13px; opacity: 0; transition: opacity .2s; }
+  .flash.show { opacity: 1; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+  .tabs button { padding: 4px 10px; font-size: 12px; }
+  .tabs button.active { border-color: var(--blue); color: var(--blue); }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><h1>tradebot <span>· paper</span></h1></div>
+  <div class="metric"><span class="label">Kill switch</span><span id="kill" class="pill L0">L0</span></div>
+  <div class="metric"><span class="label">Equity</span><span class="value" id="equity">–</span></div>
+  <div class="metric"><span class="label">Day PnL</span><span class="value" id="daypnl">–</span></div>
+  <div class="metric"><span class="label">Realized</span><span class="value" id="realized">–</span></div>
+  <div class="metric"><span class="label">Open</span><span class="value" id="open">–</span></div>
+  <div class="metric"><span class="label">Trades</span><span class="value" id="trades">–</span></div>
+  <div class="metric"><span class="label">Market time (UTC)</span><span class="value" id="clock" style="font-size:14px">–</span></div>
+  <div style="margin-left:auto" class="muted" id="heartbeat">connecting…</div>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Equity curve</h2>
+    <svg class="spark" id="spark" viewBox="0 0 1000 150" preserveAspectRatio="none"></svg>
+    <div class="legend"><span id="curve-meta">waiting for equity snapshots…</span></div>
+  </section>
+
+  <section class="card half">
+    <h2>Open positions</h2>
+    <table id="positions"><tbody><tr><td class="empty">flat</td></tr></tbody></table>
+  </section>
+
+  <section class="card half">
+    <h2>Risk limits in use</h2>
+    <div id="risk"></div>
+  </section>
+
+  <section class="card half">
+    <h2>Latest signals <span class="muted">(with reasons)</span></h2>
+    <table id="signals"><tbody><tr><td class="empty">no signals yet</td></tr></tbody></table>
+  </section>
+
+  <section class="card half">
+    <h2>Closed trades</h2>
+    <table id="closed"><tbody><tr><td class="empty">no closed trades yet</td></tr></tbody></table>
+  </section>
+
+  <section class="card half">
+    <h2>Execution cost <span class="muted">(slippage vs decision price)</span></h2>
+    <div id="slippage"><p class="empty">no fills with a decision price yet</p></div>
+  </section>
+
+  <section class="card half">
+    <h2>Why entries were refused <span class="muted">(by risk check)</span></h2>
+    <div id="vetoes"><p class="empty">no risk verdicts logged yet</p></div>
+  </section>
+
+  <section class="card half">
+    <h2>Event log</h2>
+    <div class="feed" id="feed"></div>
+  </section>
+
+  <section class="card half">
+    <h2>Controls</h2>
+    <div class="controls" id="controls">
+      <button data-action="pause">Pause entries (L1)</button>
+      <button data-action="resume">Resume (L0)</button>
+      <button class="danger" data-action="flatten">Flatten (L2)</button>
+      <button class="danger" data-action="kill">Kill (L2 + confirm)</button>
+    </div>
+    <p class="muted" style="font-size:12px;margin-top:12px">
+      Destructive actions ask for confirmation. Every control action is written to the append-only event log.
+    </p>
+    <div class="kv"><span>Data source</span><span class="chip">synthetic feed · seeded</span></div>
+    <div class="kv"><span>Mode</span><span class="chip" id="mode">paper</span></div>
+    <div class="kv"><span>Disk used</span><span id="disk">–</span></div>
+    <div class="kv"><span>Database</span><span id="db">–</span></div>
+  </section>
+</main>
+<div class="flash" id="flash"></div>
+<div id="conn" role="status" aria-live="polite"></div>
+
+<script>
+const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(Number(v)))
+  ? "–" : Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+const pct = v => (Number(v) * 100).toFixed(2) + "%";
+const el = id => document.getElementById(id);
+let lastEquity = null;
+let failures = 0;
+
+/* One visible place that says whether the dashboard is actually refreshing. If the
+   server is restarting (or the preview was just re-created) the page says so and
+   retries, instead of sitting silently on stale numbers. */
+function setConn(state, message) {
+  const box = el("conn");
+  if (!box) return;
+  box.dataset.state = state;
+  box.textContent = message;
+  box.className = state === "live" ? "conn-live" : state === "error" ? "conn-error" : "conn-wait";
+}
+
+function flash(msg) {
+  const f = el("flash");
+  f.textContent = msg; f.classList.add("show");
+  setTimeout(() => f.classList.remove("show"), 2200);
+}
+
+function renderSpark(curve) {
+  const svg = el("spark");
+  if (!curve || curve.length < 2) {
+    svg.innerHTML = '<text x="10" y="80" fill="#8b9bb0" font-size="13">warming up: equity snapshots will appear here</text>';
+    return;
+  }
+  const values = curve.map(p => p.equity);
+  const min = Math.min(...values), max = Math.max(...values);
+  const span = Math.max(max - min, 1e-9);
+  const W = 1000, H = 150, pad = 8;
+  const pts = values.map((v, i) => {
+    const x = pad + (i / (values.length - 1)) * (W - pad * 2);
+    const y = H - pad - ((v - min) / span) * (H - pad * 2);
+    return [x, y];
+  });
+  const line = pts.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+  const area = `${pad},${H - pad} ${line} ${W - pad},${H - pad}`;
+  const rising = values[values.length - 1] >= values[0];
+  const stroke = rising ? "#2fbf71" : "#ef5350";
+  svg.innerHTML = `
+    <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${stroke}" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="${stroke}" stop-opacity="0"/>
+    </linearGradient></defs>
+    <polygon points="${area}" fill="url(#g)"/>
+    <polyline points="${line}" fill="none" stroke="${stroke}" stroke-width="2" stroke-linejoin="round"/>
+    <circle cx="${pts[pts.length-1][0].toFixed(1)}" cy="${pts[pts.length-1][1].toFixed(1)}" r="3.5" fill="${stroke}"/>`;
+  el("curve-meta").textContent =
+    `${curve.length} snapshots · low ${fmt(min)} · high ${fmt(max)} · last ${fmt(values[values.length-1])}`;
+}
+
+function renderPositions(rows) {
+  const tbody = el("positions").querySelector("tbody");
+  if (!rows || rows.length === 0) { tbody.innerHTML = '<tr><td class="empty">flat</td></tr>'; return; }
+  tbody.innerHTML = rows.map(p => `
+    <tr>
+      <td>${p.symbol}</td>
+      <td><span class="chip">${p.strategy.split("_")[0]}</span></td>
+      <td>${p.qty}</td>
+      <td>${fmt(p.avg_entry)}</td>
+      <td>${fmt(p.stop)}</td>
+      <td>${fmt(p.target)}</td>
+      <td class="${Number(p.unrealized) >= 0 ? "up" : "down"}">${fmt(p.unrealized)}</td>
+    </tr>`).join("");
+}
+
+function renderTrades(rows) {
+  const tbody = el("closed").querySelector("tbody");
+  if (!rows || rows.length === 0) { tbody.innerHTML = '<tr><td class="empty">no closed trades yet</td></tr>'; return; }
+  tbody.innerHTML = rows.slice(0, 8).map(t => `
+    <tr>
+      <td>${(t.closed_at || "").slice(5, 16).replace("T", " ")}</td>
+      <td>${t.symbol}</td>
+      <td><span class="chip">${String(t.strategy).split("_")[0]}</span></td>
+      <td class="${Number(t.pnl) >= 0 ? "up" : "down"}">${fmt(t.pnl)}</td>
+      <td><span class="chip">${t.exit_reason || ""}</span></td>
+    </tr>`).join("");
+}
+
+function renderSignals(rows) {
+  const tbody = el("signals").querySelector("tbody");
+  if (!rows || rows.length === 0) { tbody.innerHTML = '<tr><td class="empty">no signals yet (strategies warm up on 15m/1h bars)</td></tr>'; return; }
+  tbody.innerHTML = rows.slice(0, 6).map(s => `
+    <tr>
+      <td>${(s.ts || "").slice(5, 16).replace("T", " ")}</td>
+      <td>${s.symbol}</td>
+      <td><span class="chip buy">${s.side}</span></td>
+      <td class="muted" style="font-size:12px">${(s.reason || "").slice(0, 90)}</td>
+    </tr>`).join("");
+}
+
+function renderSlippage(slip) {
+  const box = el("slippage");
+  if (!box) return;
+  if (!slip || !slip.available) {
+    box.innerHTML = `<p class="empty">${(slip && slip.note) || "no fills with a decision price yet"}</p>`;
+    return;
+  }
+  const over = Number(slip.p95_bps) > Number(slip.budget_bps);
+  box.innerHTML =
+    `<div class="kv"><span>Fills measured</span><span>${slip.fills}</span></div>` +
+    `<div class="kv"><span>Median</span><span>${Number(slip.median_bps).toFixed(2)} bps</span></div>` +
+    `<div class="kv"><span>Mean</span><span>${Number(slip.mean_bps).toFixed(2)} bps</span></div>` +
+    `<div class="kv"><span>p95 ${over ? "⚠ over budget" : "(inside budget)"}</span>` +
+    `<span style="color:${over ? "var(--red)" : "inherit"}">${Number(slip.p95_bps).toFixed(2)} bps / ${Number(slip.budget_bps).toFixed(0)}</span></div>` +
+    `<div class="kv"><span>Worst</span><span>${Number(slip.worst_bps).toFixed(2)} bps</span></div>` +
+    `<div class="kv"><span>Size cap model</span><span>${slip.sizing_model ? slip.sizing_model.samples + " fills" : "not fitted yet"}</span></div>`;
+}
+
+function renderVetoes(view) {
+  const box = el("vetoes");
+  if (!box) return;
+  if (!view || !view.available) {
+    box.innerHTML = `<p class="empty">${(view && view.note) || "no risk verdicts logged yet"}</p>`;
+    return;
+  }
+  const rows = (view.by_check || []).map(row => {
+    const pct = Math.round((Number(row.share) || 0) * 100);
+    const colour = row.check === "cost_budget" ? "var(--amber)" : "var(--blue)";
+    return `<div class="kv"><span>${row.check}</span><span>${row.count} <span class="muted">(${pct}%)</span></span></div>` +
+      `<div style="height:4px;background:var(--line,#222);border-radius:2px;margin:0 0 8px">` +
+      `<div style="height:4px;width:${Math.max(2, pct)}%;background:${colour};border-radius:2px"></div></div>`;
+  }).join("");
+  box.innerHTML =
+    `<div class="kv"><span>Verdicts in window</span><span>${view.window}</span></div>` +
+    `<div class="kv"><span>Approved</span><span>${view.approved} <span class="muted">(${Math.round((Number(view.approval_rate) || 0) * 100)}%)</span></span></div>` +
+    (view.note ? `<p class="muted" style="font-size:12px;margin:6px 0">${view.note}</p>` : "") +
+    (rows || `<p class="empty">every entry in the window was approved</p>`) +
+    `<p class="muted" style="font-size:12px;margin-top:8px">cost_budget in amber: the strategies are proposing trades that cannot pay for themselves.</p>`;
+}
+
+function renderRisk(data) {
+  const limits = data.limits, status = data.status, positions = data.positions || [];
+  const equity = Number(data.equity) || 1;
+  const exposure = positions.reduce((acc, p) => acc + Number(p.qty) * Number(p.avg_entry || 0), 0);
+  const expPct = Math.min(exposure / equity, 1.5);
+  const dayPnl = Number(data.day_pnl) / (Number(data.day_start_equity) || 1);
+  const ddLimit = Math.abs(Number(limits.max_drawdown));
+  const dayLimit = Math.abs(Number(limits.daily_loss_flatten));
+  const row = (label, used, limit, text) => `
+    <div style="margin-bottom:12px">
+      <div class="kv" style="border:none;padding:0"><span>${label}</span><span>${text}</span></div>
+      <div class="bar ${used > limit ? "warn" : ""}"><i style="width:${Math.min(100, (used / limit) * 100).toFixed(1)}%"></i></div>
+    </div>`;
+  el("risk").innerHTML =
+    row("Total exposure", expPct, Number(limits.total_exposure), `${pct(expPct)} of ${pct(Number(limits.total_exposure))} cap`) +
+    row("Open positions", positions.length, limits.max_open_positions, `${positions.length} of ${limits.max_open_positions}`) +
+    row("Day loss vs flatten limit", Math.max(0, -dayPnl), dayLimit, `${pct(Math.min(0, dayPnl))} vs -${pct(dayLimit)}`) +
+    row("Drawdown vs lockdown limit", Math.abs(Math.min(0, dayPnl)), ddLimit, `${pct(Math.min(0, dayPnl))} vs -${pct(ddLimit)}`) +
+    `<div class="kv"><span>Risk per trade</span><span>${pct(Number(limits.risk_per_trade))}</span></div>
+     <div class="kv"><span>Daily stop for new entries</span><span>${pct(Number(limits.daily_loss_stop))}</span></div>`;
+}
+
+function renderFeed(events) {
+  const feed = el("feed");
+  if (!events || events.length === 0) { feed.innerHTML = '<div class="empty">no events yet</div>'; return; }
+  feed.innerHTML = events.map(e => {
+    const payload = JSON.stringify(e.payload || {});
+    const short = payload.length > 110 ? payload.slice(0, 110) + "…" : payload;
+    const kindClass = e.level === "CRIT" ? "kind CRIT" : e.level === "WARN" ? "kind WARN" : "kind";
+    return `<div class="row">
+      <span class="ts">${(e.ts || "").slice(11, 19)}</span>
+      <span class="${kindClass}">${e.kind}</span>
+      <span class="muted">${short.replace(/</g, "&lt;")}</span>
+    </div>`;
+  }).join("");
+}
+
+async function tick() {
+  try {
+    const res = await fetch("/api/snapshot", { cache: "no-store" });
+    if (!res.ok) throw new Error(`snapshot ${res.status}`);
+    const data = await res.json();
+    failures = 0;
+    const status = data.status || {};
+    const equity = Number(data.equity);
+    const prev = lastEquity;
+    lastEquity = equity;
+    const up = equity >= (prev ?? equity);
+    el("equity").textContent = fmt(equity);
+    el("equity").className = "value " + (up ? "up" : "down");
+    const dp = Number(data.day_pnl);
+    el("daypnl").textContent = `${dp >= 0 ? "+" : ""}${fmt(dp)} (${(Number(data.day_pnl_pct) * 100).toFixed(2)}%)`;
+    el("daypnl").className = "value " + (dp >= 0 ? "up" : "down");
+    el("realized").textContent = fmt(status.realized_pnl);
+    el("open").textContent = (data.positions || []).length;
+    el("trades").textContent = (data.trades || []).length;
+    el("clock").textContent = (status.now || data.server_time || "").slice(0, 16).replace("T", " ");
+    const kill = (data.kill || {}).level || "L0";
+    el("kill").textContent = kill;
+    el("kill").className = "pill " + kill;
+    el("mode").textContent = status.mode || "paper";
+    el("disk").textContent = ((data.health || {}).disk * 100).toFixed(1) + "%";
+    el("db").textContent = JSON.stringify((data.health || {}).db || {}).slice(0, 60);
+    el("heartbeat").textContent = "live · updated " + new Date().toLocaleTimeString();
+    setConn("live", `live · ${status.mode || "paper"} · market clock ${(status.now || "").slice(0, 16).replace("T", " ")} · refreshed ${new Date().toLocaleTimeString()}`);
+    renderSpark(data.equity_curve);
+    renderPositions(data.positions);
+    renderTrades(data.trades);
+    renderSignals(data.signals);
+    renderRisk(data);
+    renderSlippage(data.slippage);
+    renderVetoes(data.veto_breakdown);
+    renderFeed(data.events);
+    const disabled = !data.controls_enabled;
+    document.querySelectorAll("#controls button").forEach(b => { b.disabled = disabled; });
+  } catch (err) {
+    failures += 1;
+    el("heartbeat").textContent = "dashboard offline";
+    setConn(
+      "error",
+      `not refreshing (attempt ${failures}): ${err && err.message ? err.message : err}. ` +
+      "The bot may be restarting — this page retries automatically every 2s."
+    );
+  }
+}
+
+document.querySelectorAll("#controls button").forEach(btn => {
+  btn.addEventListener("click", async () => {
+    const action = btn.dataset.action;
+    let body = { reason: "dashboard" };
+    if (action === "flatten" || action === "kill") {
+      if (!confirm(`Confirm ${action.toUpperCase()}? This cancels orders and closes positions at market.`)) return;
+      body.confirm = "CONFIRM";
+    }
+    const res = await fetch(`/api/control/${action}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body)
+    });
+    const out = await res.json().catch(() => ({}));
+    flash(res.ok ? `${action}: ok (${out.kill_level || ""})` : `${action} failed: ${out.detail || res.status}`);
+    tick();
+  });
+});
+
+setConn("wait", "connecting to the trading engine…");
+tick();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>

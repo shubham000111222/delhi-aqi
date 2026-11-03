@@ -1,0 +1,419 @@
+"""Tests for slippage recording and calibration."""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime
+from decimal import Decimal
+
+import pytest
+
+from tradebot.core.models import BookLevel, Fill, OrderBook, Side
+from tradebot.core.money import D
+from tradebot.execution.slippage import (
+    SlippageModel,
+    SlippageRecorder,
+    bucket_for,
+    calibrate_from_fills,
+    depth_at_best,
+    implied_bps,
+    size_for_budget,
+)
+
+TS = datetime(2024, 1, 1, tzinfo=UTC)
+
+
+def book(symbol: str = "BTC/USDT", bid_depth: str = "10", ask_depth: str = "10") -> OrderBook:
+    return OrderBook(
+        symbol=symbol,
+        ts=TS,
+        bids=(BookLevel(price=D("100.0"), qty=D(bid_depth)),),
+        asks=(BookLevel(price=D("100.1"), qty=D(ask_depth)),),
+    )
+
+
+def fill(price: str, expected: str | None, side: Side = Side.BUY, qty: str = "1",
+         symbol: str = "BTC/USDT") -> Fill:
+    return Fill(
+        order_id="o1",
+        symbol=symbol,
+        side=side,
+        price=D(price),
+        qty=D(qty),
+        fee=D("0"),
+        ts=TS,
+        expected_price=D(expected) if expected is not None else None,
+    )
+
+
+class TestImpliedSlippage:
+    def test_a_buy_above_expectation_is_adverse(self):
+        assert implied_bps(fill("101", "100")) == pytest.approx(100.0)
+
+    def test_a_buy_below_expectation_is_favourable(self):
+        assert implied_bps(fill("99", "100")) < 0
+
+    def test_signs_flip_for_a_sell(self):
+        # selling below the expected price is the adverse case
+        assert implied_bps(fill("99", "100", side=Side.SELL)) == pytest.approx(100.0)
+
+    def test_no_expected_price_falls_back(self):
+        assert implied_bps(fill("101", None)) == 0.0
+
+    def test_zero_prices_are_ignored(self):
+        assert implied_bps(fill("0", "0")) == 0.0
+
+
+class TestBuckets:
+    def test_sizes_map_to_the_largest_edge_they_do_not_exceed(self):
+        assert bucket_for(0.05) == 0.1
+        assert bucket_for(0.1) == 0.1
+        assert bucket_for(0.3) == 0.25
+        assert bucket_for(9.0) == 5.0
+
+    def test_depth_reads_the_side_we_trade_against(self):
+        assert depth_at_best(book(ask_depth="7"), Side.BUY) == 7.0
+        assert depth_at_best(book(bid_depth="3"), Side.SELL) == 3.0
+        assert depth_at_best(None, Side.BUY) == 0.0
+
+
+class TestRecorder:
+    def test_fills_without_an_expected_price_are_counted_not_guessed(self):
+        recorder = SlippageRecorder()
+        recorder.observe(fill("101", None))
+        assert recorder.records == []
+        assert recorder.skipped == 1
+
+    def test_records_carry_the_depth_fraction(self):
+        recorder = SlippageRecorder()
+        recorder.observe(fill("100.1", "100.0", qty="2"), book=book(ask_depth="10"))
+        record = recorder.records[0]
+        assert record.depth_fraction == pytest.approx(0.2)
+        assert record.bps == pytest.approx(10.0, rel=1e-6)
+
+    def test_summary_reports_the_distribution(self):
+        recorder = SlippageRecorder()
+        for price in ("100.0", "100.1", "100.2"):
+            recorder.observe(fill(price, "100.0"))
+        summary = recorder.summary()
+        assert summary["fills"] == 3
+        assert summary["worst_bps"] == pytest.approx(20.0, rel=1e-6)
+        assert summary["median_bps"] == pytest.approx(10.0, rel=1e-6)
+
+    def test_an_empty_recorder_says_so(self):
+        assert SlippageRecorder().summary()["fills"] == 0
+
+
+class TestModel:
+    def _recorder(self) -> SlippageRecorder:
+        recorder = SlippageRecorder()
+        recorder.observe(fill("100.1", "100.0", qty="1"), book=book(ask_depth="10"))  # 10 bps, 0.1x
+        recorder.observe(fill("100.3", "100.0", qty="3"), book=book(ask_depth="10"))  # 30 bps, 0.3x
+        recorder.observe(fill("100.5", "100.0", qty="8"), book=book(ask_depth="10"))  # 50 bps, 0.8x
+        return recorder
+
+    def test_fit_builds_a_bucket_per_size_class(self):
+        model = self._recorder().model()
+        assert set(model.buckets["BTC/USDT"]) == {0.1, 0.25, 0.5}
+
+    def test_predictions_never_flatter(self):
+        model = self._recorder().model()
+        small = model.predict_bps("BTC/USDT", D("0.5"), book(ask_depth="10"), Side.BUY)
+        large = model.predict_bps("BTC/USDT", D("9"), book(ask_depth="10"), Side.BUY)
+        assert large >= small
+
+    def test_an_unknown_symbol_gets_the_conservative_fallback(self):
+        model = self._recorder().model()
+        assert model.predict_bps("DOGE/USDT", D("1"), None, Side.BUY) == model.fallback_bps
+
+    def test_a_missing_book_assumes_the_worst_bucket(self):
+        model = self._recorder().model()
+        predicted = model.predict_bps("BTC/USDT", D("1"), None, Side.BUY)
+        assert predicted == max(bucket.p95_bps for bucket in model.buckets["BTC/USDT"].values())
+
+    def test_calibration_flags_an_optimistic_model(self):
+        recorder = self._recorder()
+        model = SlippageModel.fit([])
+        model.fallback_bps = 0.0
+        result = recorder.calibration(model)
+        assert result["samples"] == 3
+        assert "optimistic" in result["verdict"]
+
+    def test_calibration_is_not_alarmed_by_a_conservative_model(self):
+        recorder = self._recorder()
+        pessimistic = recorder.model()
+        for buckets in pessimistic.buckets.values():
+            for bucket in buckets.values():
+                bucket.p95_bps += 100.0
+        assert "not systematically optimistic" in recorder.calibration(pessimistic)["verdict"]
+
+    def test_table_rows_are_reportable(self):
+        rows = self._recorder().model().table()
+        assert rows and {"symbol", "size_vs_depth_up_to", "p95_bps"} <= set(rows[0])
+
+
+class TestSizing:
+    def test_sizing_respects_the_slippage_budget(self):
+        recorder = SlippageRecorder()
+        recorder.observe(fill("100.1", "100.0", qty="1"), book=book(ask_depth="10"))   # 10 bps
+        recorder.observe(fill("100.9", "100.0", qty="9"), book=book(ask_depth="10"))   # 90 bps
+        model = recorder.model()
+        qty = size_for_budget(model, "BTC/USDT", book(ask_depth="10"), Side.BUY, budget_bps=20)
+        assert qty == D("1")  # 0.1 of depth, since the 0.5 bucket costs 90 bps
+
+    def test_no_book_means_no_size(self):
+        model = SlippageModel()
+        assert size_for_budget(model, "BTC/USDT", book(ask_depth="0"), Side.BUY, budget_bps=20) == D("0")
+
+    def test_an_expensive_venue_gets_no_size_at_all(self):
+        model = SlippageModel(fallback_bps=50.0)
+        assert size_for_budget(model, "BTC/USDT", book(), Side.BUY, budget_bps=20) == D("0")
+
+
+class TestEngineIntegration:
+    def test_a_market_order_carries_a_reference_price(self):
+        """Regression: before the reference price, every market fill measured 0 bps.
+
+        The paper adapter stamps the decision price on the order; a market order that only
+        knew its fill price would report zero slippage by construction.
+        """
+        from tradebot.core.models import Order, OrderStatus, OrderType
+
+        order = Order(
+            client_order_id="c1",
+            symbol="BTC/USDT",
+            side=Side.BUY,
+            type=OrderType.MARKET,
+            qty=D("1"),
+            price=None,
+            status=OrderStatus.NEW,
+            reference_price=D("100"),
+        )
+        assert Decimal(str(order.to_dict()["reference_price"])) == D("100")
+        assert implied_bps(fill("100.5", str(order.reference_price))) == pytest.approx(50.0)
+
+    def test_calibrate_from_fills_wraps_the_recorder(self):
+        model, summary = calibrate_from_fills(
+            [fill("100.2", "100.0"), fill("100.4", "100.0")], books={"BTC/USDT": book()}
+        )
+        assert summary["fills"] == 2
+        assert "BTC/USDT" in model.buckets
+
+
+class TestEngineSizingCap:
+    """The engine caps entries at what the calibrated model says the book can absorb."""
+
+    def _engine(self):
+        import asyncio
+        from datetime import UTC, datetime
+
+        from tradebot.config import load_config
+        from tradebot.core.clock import SimClock
+        from tradebot.core.models import OrderType, Side, Signal
+        from tradebot.core.money import D
+        from tradebot.core.store import Store
+        from tradebot.engine import Engine
+
+        now = datetime(2024, 1, 1, tzinfo=UTC)
+        cfg = load_config()
+
+        async def build():
+            return await Engine.build(cfg, clock=SimClock(now), store=Store(":memory:"))
+
+        engine = asyncio.run(build())
+        signal = Signal(
+            id="sig1", strategy="S1_ema_trend", symbol="BTC/USDT", timeframe="1h", side=Side.BUY,
+            entry_type=OrderType.LIMIT, ts=now, stop=D("1900"), target=D("2200"), limit_price=D("2000"),
+        )
+        return engine, signal, D
+
+    def _model(self):
+        recorder = SlippageRecorder()
+        for _ in range(5):
+            recorder.observe(fill("100.1", "100.0", qty="1"), book=book(ask_depth="10"))
+            recorder.observe(fill("100.9", "100.0", qty="9"), book=book(ask_depth="10"))
+        return recorder.model()
+
+    def test_without_a_model_nothing_is_capped(self):
+        engine, signal, D = self._engine()
+        try:
+            rules = engine.adapter.get_market_rules("BTC/USDT")
+            assert engine._apply_slippage_budget(signal, D("5"), rules) == D("5")
+        finally:
+            engine.close()
+
+    def test_a_model_caps_the_size_to_the_affordable_bucket(self):
+        engine, signal, D = self._engine()
+        try:
+            engine.slippage_model = self._model()
+            engine.market.books["BTC/USDT"] = book(ask_depth="10")
+            rules = engine.adapter.get_market_rules("BTC/USDT")
+            capped = engine._apply_slippage_budget(signal, D("9"), rules)
+            assert capped == D("1")
+        finally:
+            engine.close()
+
+    def test_a_cap_never_grows_an_order(self):
+        engine, signal, D = self._engine()
+        try:
+            engine.slippage_model = self._model()
+            engine.market.books["BTC/USDT"] = book(ask_depth="10")
+            rules = engine.adapter.get_market_rules("BTC/USDT")
+            assert engine._apply_slippage_budget(signal, D("0.5"), rules) <= D("0.5")
+        finally:
+            engine.close()
+
+    def test_a_broken_model_does_not_block_the_order(self):
+        engine, signal, D = self._engine()
+        try:
+            class Broken:
+                buckets: dict = {}
+                samples = 0
+
+                def predict_bps(self, *args, **kwargs):
+                    raise RuntimeError("model on fire")
+
+            engine.slippage_model = Broken()
+            engine.market.books["BTC/USDT"] = book(ask_depth="10")
+            rules = engine.adapter.get_market_rules("BTC/USDT")
+            assert engine._apply_slippage_budget(signal, D("2"), rules) == D("2")
+        finally:
+            engine.close()
+
+
+_NOW = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+
+
+class TestExpectedSlippage:
+    """The cost budget compares a target against the *expected* fill cost."""
+
+    def _model(self):
+        from tradebot.execution.slippage import SlippageModel
+
+        async def noop() -> None:
+            return None
+
+        return SlippageModel.fit([
+            self._record("BTC/USDT", 0.02, 4.0),
+            self._record("BTC/USDT", 0.03, 2.0),
+            self._record("ETH/USDT", 0.05, 9.0),
+            self._record("ETH/USDT", 0.60, 120.0),
+        ])
+
+    @staticmethod
+    def _record(symbol: str, depth: float, bps: float):
+        from decimal import Decimal as _D
+
+        from tradebot.core.models import Side
+        from tradebot.execution.slippage import SlippageRecord
+
+        return SlippageRecord(
+            symbol=symbol, ts=_NOW, strategy="S1", side=Side.BUY, qty=_D("1"), price=_D("100"),
+            expected_price=_D("100"), bps=bps, depth_fraction=depth, liquidity="taker",
+        )
+
+    def test_the_expectation_is_between_the_mean_and_the_worst(self):
+        model = self._model()
+        expected = model.expected_bps()
+        assert 0 < expected < model.fallback_bps, "the worst fill must not be the expectation"
+        assert expected == pytest.approx((4 + 2 + 9 + 120) / 4)
+
+    def test_the_expectation_weights_by_sample_count(self):
+        from tradebot.execution.slippage import SlippageModel
+
+        records = [self._record("BTC/USDT", 0.02, 2.0) for _ in range(9)]
+        records.append(self._record("BTC/USDT", 0.60, 100.0))
+        model = SlippageModel.fit(records)
+        assert model.expected_bps() == pytest.approx((2.0 * 9 + 100.0) / 10)
+
+    def test_an_empty_model_falls_back_rather_than_dividing_by_zero(self):
+        from tradebot.execution.slippage import SlippageModel
+
+        assert SlippageModel().expected_bps() == pytest.approx(10.0)
+
+
+class TestEngineCostEstimate:
+    """The risk engine's cost estimate: fees always, slippage only on evidence."""
+
+    def test_fees_for_both_legs_are_always_counted(self):
+        from decimal import Decimal
+
+        from tradebot.config import load_config
+        from tradebot.core.clock import SimClock
+        from tradebot.core.store import Store
+        from tradebot.engine import Engine
+
+        cfg = load_config()
+
+        async def build():
+            return await Engine.build(cfg, clock=SimClock(_NOW), store=Store(":memory:"))
+
+        engine = asyncio.run(build())
+        try:
+            rules = engine.adapter.get_market_rules("BTC/USDT")
+            expected = Decimal(2) * rules.taker_fee * Decimal("10000")
+            assert engine._round_trip_cost_bps("BTC/USDT") == expected
+            assert expected > 0, "a zero-fee estimate would silently disable the cost check"
+        finally:
+            engine.close()
+
+    def test_the_calibrated_model_adds_its_slippage(self):
+        from decimal import Decimal
+
+        from tradebot.config import load_config
+        from tradebot.core.clock import SimClock
+        from tradebot.core.store import Store
+        from tradebot.engine import Engine
+
+        cfg = load_config()
+
+        async def build():
+            return await Engine.build(cfg, clock=SimClock(_NOW), store=Store(":memory:"))
+
+        engine = asyncio.run(build())
+        try:
+            without = engine._round_trip_cost_bps("BTC/USDT")
+            engine.slippage_model = type(
+                "Model", (), {"fallback_bps": 99.0, "expected_bps": staticmethod(lambda: 12.5)}
+            )()
+            with_model = engine._round_trip_cost_bps("BTC/USDT")
+            assert with_model == without + Decimal("12.5")
+            assert with_model < without + Decimal("99"), "the stress number is not the expectation"
+        finally:
+            engine.close()
+
+    def test_a_model_without_an_expectation_contributes_nothing(self):
+        from tradebot.config import load_config
+        from tradebot.core.clock import SimClock
+        from tradebot.core.store import Store
+        from tradebot.engine import Engine
+
+        cfg = load_config()
+
+        async def build():
+            return await Engine.build(cfg, clock=SimClock(_NOW), store=Store(":memory:"))
+
+        engine = asyncio.run(build())
+        try:
+            without = engine._round_trip_cost_bps("BTC/USDT")
+            engine.slippage_model = type("Model", (), {"fallback_bps": 99.0})()
+            assert engine._round_trip_cost_bps("BTC/USDT") == without
+        finally:
+            engine.close()
+
+    def test_an_unknown_symbol_returns_zero_rather_than_raising(self):
+        from tradebot.config import load_config
+        from tradebot.core.clock import SimClock
+        from tradebot.core.store import Store
+        from tradebot.engine import Engine
+
+        cfg = load_config()
+
+        async def build():
+            return await Engine.build(cfg, clock=SimClock(_NOW), store=Store(":memory:"))
+
+        engine = asyncio.run(build())
+        try:
+            assert engine._round_trip_cost_bps("NOPE/USDT") == 0
+        finally:
+            engine.close()
