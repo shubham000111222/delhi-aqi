@@ -173,3 +173,92 @@ class TestCandle:
         )
         assert c.close_time == datetime(2024, 1, 1, 10, 15, tzinfo=UTC)
         assert c.to_dict()["close"] == "2"
+
+
+class TestVetoBreakdown:
+    """The dashboard's "why were entries refused" table."""
+
+    def _store(self):
+        from tradebot.core.store import Store
+
+        return Store(":memory:")
+
+    def _verdict(self, name: str, detail: str = "detail"):
+        from tradebot.core.models import RiskCheck, RiskVerdict
+
+        return RiskVerdict(approved=False, reason=f"{name}: {detail}", checks=[RiskCheck(name, False, detail)])
+
+    def test_counts_are_grouped_by_the_failing_check(self):
+        from tradebot.dashboard.app import _veto_view
+
+        store = self._store()
+        try:
+            for _ in range(3):
+                store.save_verdict("s1", self._verdict("cooldown"))
+            store.save_verdict("s2", self._verdict("cost_budget", "target 20 bps vs 80"))
+            view = _veto_view(store)
+        finally:
+            store.close()
+        assert view["available"] is True
+        assert view["window"] == 4 and view["refused"] == 4
+        assert view["by_check"][0] == {"check": "cooldown", "count": 3, "share": 0.75}
+        assert view["by_check"][1]["check"] == "cost_budget"
+
+    def test_the_window_counts_reasons_not_distinct_checks(self):
+        from tradebot.dashboard.app import _veto_view
+
+        store = self._store()
+        try:
+            store.save_verdict("s1", self._verdict("cooldown", "cooldown until 10:00"))
+            store.save_verdict("s2", self._verdict("cooldown", "cooldown until 11:00"))
+            view = _veto_view(store)
+        finally:
+            store.close()
+        assert view["by_check"] == [{"check": "cooldown", "count": 2, "share": 1.0}]
+
+    def test_approved_entries_are_counted_but_not_listed_as_reasons(self):
+        from tradebot.core.models import RiskVerdict
+        from tradebot.dashboard.app import _veto_view
+
+        store = self._store()
+        try:
+            store.save_verdict("s1", RiskVerdict(approved=True, reason="approved", checks=[]))
+            store.save_verdict("s2", self._verdict("spread"))
+            view = _veto_view(store)
+        finally:
+            store.close()
+        assert view["approved"] == 1 and view["refused"] == 1
+        assert view["approval_rate"] == 0.5
+        assert [row["check"] for row in view["by_check"]] == ["spread"]
+
+    def test_only_the_top_ten_reasons_are_returned(self):
+        from tradebot.dashboard.app import _veto_view
+
+        store = self._store()
+        try:
+            for index in range(14):
+                store.save_verdict(f"s{index}", self._verdict(f"check_{index}"))
+            view = _veto_view(store)
+        finally:
+            store.close()
+        assert len(view["by_check"]) == 10
+        assert view["window"] == 14
+
+    def test_an_empty_log_says_so_instead_of_showing_zeroes(self):
+        from tradebot.dashboard.app import _veto_view
+
+        store = self._store()
+        try:
+            view = _veto_view(store)
+        finally:
+            store.close()
+        assert view["available"] is False and "no risk verdicts" in view["note"]
+
+    def test_an_unreadable_store_is_reported_not_raised(self):
+        from tradebot.dashboard.app import _veto_view
+
+        class Broken:
+            def verdicts(self, limit: int = 10):
+                raise RuntimeError("database is locked")
+
+        assert _veto_view(Broken())["available"] is False

@@ -255,6 +255,7 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
                     },
                     "marks": {k: to_str(v) for k, v in marks.items()},
                     "slippage": _slippage_view(engine),
+                    "veto_breakdown": _veto_view(store),
                     "server_time": iso(datetime.now(UTC)),
                 }
             )
@@ -345,6 +346,45 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
         return await _control(action, request, str(body.get("reason", "")), str(body.get("confirm", "")))
 
     return app
+
+
+def _veto_view(store: Any, *, limit: int = 1000) -> dict[str, Any]:
+    """Why entries were refused, by check - the most useful table on the page.
+
+    A bot that trades rarely looks identical to a bot that is broken; the difference
+    is here. Counts come from the risk verdict log, which records every rejection with
+    the check that failed, so a rising `cost_budget` line means the strategies are
+    proposing trades that cannot pay for themselves, not that the venue is down.
+    """
+    try:
+        rows = store.verdicts(limit=limit)
+    except Exception:  # noqa: BLE001 - a dashboard must render on a broken DB
+        return {"available": False, "note": "risk verdict log unreadable"}
+    if not rows:
+        return {"available": False, "note": "no risk verdicts logged yet"}
+    counts: dict[str, int] = defaultdict(int)
+    approved = 0
+    for row in rows:
+        if row.get("approved"):
+            approved += 1
+            continue
+        check = (row.get("reason") or "unknown").split(":", 1)[0].strip() or "unknown"
+        counts[check] += 1
+    total = len(rows)
+    aggregated: list[dict[str, Any]] = [
+        {"check": name, "count": count, "share": round(count / total, 4)}
+        for name, count in counts.items()
+    ]
+    aggregated.sort(key=lambda item: item["count"], reverse=True)
+    by_check = aggregated[:10]
+    return {
+        "available": True,
+        "window": total,
+        "approved": approved,
+        "refused": total - approved,
+        "approval_rate": round(approved / total, 4),
+        "by_check": by_check,
+    }
 
 
 def _disk_pct(config: Config) -> float:

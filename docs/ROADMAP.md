@@ -26,11 +26,11 @@ a capability that exists but has not cleared its gates is marked as such.
 | 8 Multiple testing | every grid cell logged as an experiment; best Sharpe deflated by the number of attempts, with the skew/kurtosis correction and a probability alongside the z-score |
 | 8 Parity | record the tape, replay it, diff decisions and fills (`MATCH`, 22/22 and 8/8) |
 | 10 Reporting | daily report (11 sections) → markdown/HTML/JSON/Telegram/trades CSV/tax CSV |
-| 11 Dashboard | live equity, positions, risk usage, signals with reasons, trades, execution-cost panel (median/mean/p95 vs budget), event log, controls, PNG export |
+| 11 Dashboard | live equity, positions, risk usage, signals with reasons, trades, execution-cost panel (median/mean/p95 vs budget), a veto breakdown by failing check, event log, controls, PNG export |
 | 12 Reliability & security | crash recovery, reconciliation, structured logs with redaction, heartbeats, disk guards, scoped auto-resume |
 | 12 Inbound commands | Telegram router: chat-id whitelist, confirm step with TTL and single use, audit line per command, transport-agnostic |
 | 12 Telegram transport | `getUpdates` long polling with persisted offset, `sendMessage`, backoff on failure, injected HTTP client, started by `run` when a token and chat id exist, `tradebot telegram` readiness check |
-| 13 Testing | 525 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
+| 13 Testing | 531 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
 | 18.1 Book recording | recorded on every session (`RecordingFeed`), archived to Parquet, summarised as spread statistics |
 | 18.6 Experiment tracking | `experiments` table, deterministic run ids, trial log used by the multiple-testing report |
 | 18.6 MLflow export | `experiments --export DIR` writes MLflow's file-store layout, `run --mlflow DIR` writes each session as it ends, and `experiments --read DIR` reads a store back into the bot; non-numeric metrics move to tags; verified by reading all three back with real MLflow 3.17 |

@@ -128,6 +128,11 @@
   </section>
 
   <section class="card half">
+    <h2>Why entries were refused <span class="muted">(by risk check)</span></h2>
+    <div id="vetoes"><p class="empty">no risk verdicts logged yet</p></div>
+  </section>
+
+  <section class="card half">
     <h2>Event log</h2>
     <div class="feed" id="feed"></div>
   </section>
@@ -266,6 +271,27 @@ function renderSlippage(slip) {
     `<div class="kv"><span>Size cap model</span><span>${slip.sizing_model ? slip.sizing_model.samples + " fills" : "not fitted yet"}</span></div>`;
 }
 
+function renderVetoes(view) {
+  const box = el("vetoes");
+  if (!box) return;
+  if (!view || !view.available) {
+    box.innerHTML = `<p class="empty">${(view && view.note) || "no risk verdicts logged yet"}</p>`;
+    return;
+  }
+  const rows = (view.by_check || []).map(row => {
+    const pct = Math.round((Number(row.share) || 0) * 100);
+    const colour = row.check === "cost_budget" ? "var(--amber)" : "var(--blue)";
+    return `<div class="kv"><span>${row.check}</span><span>${row.count} <span class="muted">(${pct}%)</span></span></div>` +
+      `<div style="height:4px;background:var(--line,#222);border-radius:2px;margin:0 0 8px">` +
+      `<div style="height:4px;width:${Math.max(2, pct)}%;background:${colour};border-radius:2px"></div></div>`;
+  }).join("");
+  box.innerHTML =
+    `<div class="kv"><span>Verdicts in window</span><span>${view.window}</span></div>` +
+    `<div class="kv"><span>Approved</span><span>${view.approved} <span class="muted">(${Math.round((Number(view.approval_rate) || 0) * 100)}%)</span></span></div>` +
+    (rows || `<p class="empty">every entry in the window was approved</p>`) +
+    `<p class="muted" style="font-size:12px;margin-top:8px">cost_budget in amber: the strategies are proposing trades that cannot pay for themselves.</p>`;
+}
+
 function renderRisk(data) {
   const limits = data.limits, status = data.status, positions = data.positions || [];
   const equity = Number(data.equity) || 1;
@@ -337,6 +363,7 @@ async function tick() {
     renderSignals(data.signals);
     renderRisk(data);
     renderSlippage(data.slippage);
+    renderVetoes(data.veto_breakdown);
     renderFeed(data.events);
     const disabled = !data.controls_enabled;
     document.querySelectorAll("#controls button").forEach(b => { b.disabled = disabled; });

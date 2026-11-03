@@ -74,7 +74,7 @@ no API key is needed.
 | Reconciliation against the venue every health tick | done | `engine.reconcile` |
 | Daily report (11 sections) → markdown, HTML, JSON, Telegram text, trades CSV, tax CSV | done | `reporting/daily.py` |
 | Tax reserve (30%) and TDS tracking for Schedule VDA records | done | `portfolio/ledger.py`, `reporting/` |
-| Dashboard: equity curve, positions, risk usage, signals with reasons, trades, event log, controls, live connection bar | done | `dashboard/` |
+| Dashboard: equity curve, positions, risk usage, signals with reasons, trades, execution cost, veto breakdown by risk check, event log, controls, live connection bar | done | `dashboard/` |
 | Dashboard PNG export for environments where a page will not render | done | `dashboard/render.py` |
 | Backtest through the *same* engine, metrics, Monte Carlo, acceptance gates | done | `backtest/` |
 | Live-mode guards: two switches, typed confirmation, go/no-go record, key permissions, ramp | done (adapter path untested without keys) | `risk/live_guards.py` |
