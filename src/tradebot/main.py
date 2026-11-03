@@ -22,6 +22,7 @@ import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from .config import Config, Mode, load_config
@@ -64,6 +65,18 @@ def _config(args: argparse.Namespace) -> Config:
     level = "DEBUG" if getattr(args, "verbose", False) else cfg.settings.logging.level
     setup_logging(level, cfg.settings.logging.json_logs, cfg.settings.logging.file)
     return cfg
+
+
+def _chain_filters(first: Any, second: Any) -> Any:
+    """Both filters must agree. Each is veto-only, so chaining can only remove trades."""
+
+    def chained(signal: Any, ctx: Any = None) -> tuple[bool, str]:
+        allowed, reason = first(signal, ctx)
+        if not allowed:
+            return False, reason
+        return second(signal, ctx)
+
+    return chained
 
 
 def _kill_number(status: dict[str, Any]) -> float:
@@ -115,12 +128,18 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
-async def _run_backtest(cfg: Config, days: int, seed: int | None = None, capital: Decimal | None = None) -> dict:
+async def _run_backtest(
+    cfg: Config,
+    days: int,
+    seed: int | None = None,
+    capital: Decimal | None = None,
+    persist: str | None = None,
+) -> dict:
     from .engine import Engine
 
     start = datetime(2024, 1, 1, tzinfo=UTC)
     clock = SimClock(start)
-    store = Store(":memory:")
+    store = Store(persist) if persist else Store(":memory:")
     engine = await Engine.build(cfg, clock=clock, store=store)
     if capital is not None:
         engine.ledger.starting_cash = capital
@@ -169,7 +188,12 @@ async def _run_backtest(cfg: Config, days: int, seed: int | None = None, capital
 
 def cmd_backtest(args: argparse.Namespace) -> int:
     cfg = _config(args)
-    result = asyncio.run(_run_backtest(cfg, args.days, args.seed, D(args.capital) if args.capital else None))
+    persist = getattr(args, "persist", None)
+    if persist:
+        Path(persist).parent.mkdir(parents=True, exist_ok=True)
+    result = asyncio.run(
+        _run_backtest(cfg, args.days, args.seed, D(args.capital) if args.capital else None, persist)
+    )
     if args.json:
         _print(result)
     else:
@@ -258,6 +282,27 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(
             f"meta gate: {entry_filter.gate.name} threshold {entry_filter.gate.threshold:.2f}, "
             f"{len(entry_filter.gate.features)} features (veto-only)"
+        )
+    if getattr(args, "ledger_gate", None):
+        from .ai.ledger import LedgerEntryFilter, load_card
+
+        try:
+            card = load_card(args.ledger_gate)
+        except (OSError, ValueError) as exc:
+            print(f"refusing to start with that ledger model: {exc}", file=sys.stderr)
+            engine.close()
+            return 2
+        ledger_filter = LedgerEntryFilter(gate=card)
+        existing = engine.entry_filter
+        engine.entry_filter = (
+            ledger_filter
+            if existing is None
+            else _chain_filters(existing, ledger_filter)
+        )
+        print(
+            f"ledger gate: threshold {card.threshold:.2f}, "
+            f"{len(card.vocabulary.strategies)} strategies x {len(card.vocabulary.symbols)} symbols, "
+            f"trained on {card.meta.get('verdict', {}).get('summary', {}).get('trades', '?')} trades (veto-only)"
         )
 
     news_poller = None
@@ -553,12 +598,21 @@ def build_parser() -> argparse.ArgumentParser:
     bt.add_argument("--seed", type=int, default=None)
     bt.add_argument("--capital", default=None)
     bt.add_argument("--json", action="store_true")
+    bt.add_argument(
+        "--persist", default=None, metavar="PATH",
+        help="write the backtest to a real database instead of memory, so `learn`, "
+             "`metrics` and `report` can read it afterwards",
+    )
 
     run_parser = sub.add_parser("run", help="start the trading loop (paper by default)")
     run_parser.add_argument("--confirm", default=None, help='live mode: type the capital amount and "LIVE"')
     run_parser.add_argument(
         "--meta-gate", default=None, metavar="PATH",
         help="a saved meta-label model card; it may refuse entries, never resize them",
+    )
+    run_parser.add_argument(
+        "--ledger-gate", default=None, metavar="PATH",
+        help="a card written by `tradebot learn`: vetoes setups the bot's own trades lost on",
     )
     run_parser.add_argument(
         "--news-url", default=None, metavar="URL[,URL]",
@@ -693,6 +747,13 @@ def build_parser() -> argparse.ArgumentParser:
     nws.add_argument("--symbols", default=None, help="default: the configured symbols")
     nws.add_argument("--limit", type=int, default=10)
     nws.add_argument("--json", action="store_true")
+
+    learn = sub.add_parser("learn", help="learn from the bot's own closed trades (veto-only)")
+    learn.add_argument("--windows", type=int, default=3, help="purged walk-forward windows")
+    learn.add_argument("--min-trades", type=int, default=200, help="sample floor before a model gets a say")
+    learn.add_argument("--save", default=None, metavar="PATH", help="write the card (only if promoted)")
+    learn.add_argument("--json", action="store_true")
+    learn.add_argument("--db", default=None, metavar="PATH", help="read this database instead of the paper one")
 
     exp = sub.add_parser("experiments", help="the experiment log, and an MLflow export of it")
     exp.add_argument("--limit", type=int, default=200)
@@ -1470,6 +1531,95 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     return 0 if ok else 4
 
 
+def cmd_learn(args: argparse.Namespace) -> int:
+    """Learn from the bot's own closed trades: label, purge, walk forward, decide."""
+    from .ai.ledger import (
+        MIN_TRADES,
+        fit_gate,
+        judge,
+        save_card,
+        trades_from_store,
+        walk_forward,
+    )
+
+    cfg = _config(args)
+    db_path = args.db or cfg.settings.db_path
+    if not Path(db_path).exists():
+        print(f"no database at {db_path}: run the bot, or backtest with --persist", file=sys.stderr)
+        return 1
+    store = Store(db_path)
+    try:
+        report = trades_from_store(store, limit=100_000)
+    finally:
+        store.close()
+
+    windows = walk_forward(report.trades, windows=args.windows)
+    verdict = judge(report, windows, min_trades=args.min_trades)
+    summary = report.summary()
+    card_path = None
+    if args.save and verdict.may_write_card:
+        gate = fit_gate(report.trades)
+        card_path = str(save_card(args.save, gate, verdict, report=report))
+
+    if args.json:
+        _print(
+            {
+                "ledger": summary,
+                "windows": [window.as_dict() for window in windows],
+                "verdict": verdict.as_dict(),
+                "card": card_path,
+            }
+        )
+        return 0
+
+    if not report.trades:
+        print(f"no closed trades in {db_path}: run the bot first")
+        return 1
+    print(f"ledger: {summary['trades']} closed trades, {summary['first'][:10]} -> {summary['last'][:10]}")
+    if summary.get("skipped"):
+        reasons = ", ".join(f"{count} {reason}" for reason, count in summary["reasons"].items())
+        print(f"  skipped {summary['skipped']} ({reasons})")
+    print(
+        f"  win rate {summary['win_rate']:.1%}, mean {summary['mean_r']:+.2f}R, "
+        f"median {summary['median_r']:+.2f}R, total {summary['total_r']:+.2f}R, "
+        f"fees ate {summary['fee_share_of_gross']:.0%} of gross"
+    )
+    print()
+    if windows:
+        below = len(report.trades) < args.min_trades
+        print(
+            f"purged walk-forward over the ledger, {len(windows)} windows"
+            + (" (indicative only: below the sample floor)" if below else "")
+        )
+        print(f"  {'window':22s} {'train':>6s} {'test':>5s} {'AUC':>6s} {'all':>7s} {'gated':>7s} {'2x':>7s} {'lift':>7s}")
+        for window in windows:
+            span = f"{window.start:%m-%d}->{window.end:%m-%d}"
+            print(
+                f"  {span:22s} {window.n_train:6d} {window.n_test:5d} {window.auc:6.3f} "
+                f"{window.base_r:+7.3f} {window.gated_r:+7.3f} {window.stress_r:+7.3f} "
+                f"{window.improvement:+6.0%}"
+            )
+        print()
+    else:
+        print("purged walk-forward: not enough resolved trades to build a window")
+        print(f"  a window needs {40} training trades closed before it and {20} inside it")
+        print()
+    print("\n".join(verdict.lines()))
+    print()
+    if verdict.status == "PROMOTABLE":
+        print(
+            "the gate beat taking every trade out of sample and survived 2x costs."
+            if not card_path
+            else f"card written to {card_path}; install it with `tradebot run --ledger-gate {card_path}`"
+        )
+    else:
+        print(
+            f"nothing to install. {MIN_TRADES} trades is the same floor the acceptance gates use;\n"
+            "until then the rule trades unfiltered, which is the honest default."
+        )
+    return 0
+
+
 def cmd_experiments(args: argparse.Namespace) -> int:
     """Show the experiment log, export it, or read a file store back."""
     from .ai.tracking import export_from_store, read_runs
@@ -2153,6 +2303,7 @@ def main(argv: list[str] | None = None) -> int:
         "kill": cmd_control,
         "lockdown": cmd_control,
         "drill": cmd_drill,
+        "learn": cmd_learn,
         "dashboard": cmd_dashboard,
         "dashboard-png": _cmd_dashboard_png,
         "walk-forward": cmd_walk_forward,

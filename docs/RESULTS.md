@@ -102,6 +102,60 @@ python -m tradebot experiments --read-server http://127.0.0.1:5055
   SQLite-backed store), including the optional-dependency path: a host without MLflow
   imports, keeps running, and says why tracking is off
 
+## Learning from its own trades
+
+`tradebot learn` reads the closed positions the engine wrote, labels each one by net R
+(P&L divided by the risk that was on the table, fees included), and runs a purged,
+walk-forward gate over them. It writes a card only if the gate beats *taking every trade*
+by 10% in every window, with AUC above 0.55 and the 2x-cost rerun still positive.
+
+**The bot's own paper ledger (a live session):**
+
+```
+tradebot learn
+ledger: 92 closed trades, 2026-11-04 -> 2026-11-12
+  win rate 47.8%, mean +0.24R, median -0.55R, total +21.9R, fees ate 25% of gross
+purged walk-forward over the ledger, 2 windows (indicative only: below the sample floor)
+  window              train test    AUC     all   gated      2x    lift
+  11-08->11-09           43   23  0.258  -0.069  -0.925  -1.020 -1231%
+  11-09->11-12           68   23  0.158  -0.094  -0.442  -0.548  -368%
+verdict: NEED_MORE_DATA
+```
+
+An AUC of 0.16-0.26 is **worse than a coin flip** - the gate ranks winners below losers -
+and its "gated" expectancy is far worse than simply taking every trade. On 43-68 training
+rows a 13-feature logistic model fits noise and generalises backwards. This is the single
+best argument for the 200-trade floor: had the floor been 50, this card would have been
+written, installed and would have made a losing strategy lose faster.
+
+**A persisted 20-day backtest (101 trades, stopped at the timeout):**
+
+```
+tradebot backtest --days 20 --persist /tmp/backtest.db
+tradebot learn --db /tmp/backtest.db
+  window              train test    AUC     all   gated      2x    lift
+  01-07->01-09           49   25  0.480  -0.037  -0.027  -0.137   +28%
+  01-09->01-11           74   26  0.429  -0.331  -0.363  -0.487   -10%
+verdict: NEED_MORE_DATA   (101 trades, 200 required)
+```
+
+Note what the "+28%" window is worth: lift on a negative base, with AUC 0.48. Nothing.
+
+**The machinery's positive path, on a constructed ledger** (300 trades, outcome planted
+so that entry-time ATR predicts the result - a fixture, not a result):
+
+| ledger | windows | AUC | gated R | 2x R | verdict |
+| --- | --- | --- | --- | --- | --- |
+| planted edge | 3 | 1.000 | +1.000 | +0.950 | **PROMOTABLE** -> card written |
+| pure noise | 3 | 0.500 | -0.013 | -0.063 | **NO_EDGE**, no card |
+
+A card written from the first was installed with `run --ledger-gate` and refused the
+low-ATR setups in the engine's own decision path; the second writes nothing and says why.
+
+**What this does not do:** it does not retrain a strategy, does not change position size
+(the risk engine owns that), and cannot add a trade. The only thing a ledger card may do is
+refuse an entry, which is the same veto-only contract as the meta-label gate.
+
 ## What is not measured here, and why
 
 Live order placement, a WebSocket session, a real backfill, Telegram's API and FinBERT

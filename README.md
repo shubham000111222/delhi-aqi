@@ -86,6 +86,7 @@ no API key is needed.
 | Multiple-testing log and deflated Sharpe (with skew/kurtosis correction) | done | `robustness.py`, `core/store.py` (`experiments`) |
 | MLflow export of the experiment log (file store, verified by MLflow itself) | done | `ai/tracking.py` |
 | MLflow **live** tracking: stream a running session to a tracking server, fail fast when it is down | done (verified against a real `mlflow server`) | `ai/tracking.py` |
+| Learning from the bot's **own trades**: net-R labels, purged walk-forward, a card only on repeated evidence | done, and it promotes nothing on this data (92 trades → "not yet") | `ai/ledger.py`, `tradebot learn` |
 | Signal library: 44 signals in 8 families, IC screening, correlation pruning, leakage tests | done | `ai/features.py`, `ai/signals.py`, `ai/ladder.py` |
 | Complexity ladder (baseline → ridge → boosting → sequence) with a promotion rule | done, and it **promotes nothing** on this data | `ai/ladder.py` |
 | Model registry + model cards; S4 wired to an approved card | done, **no model is registered** | `ai/registry.py`, `strategies/ml_signal.py` |
@@ -215,7 +216,7 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | `tradebot dashboard-png` | render the live dashboard to a PNG, no browser needed (`--out`, `--url`) |
 | `tradebot backtest --days N` | deterministic synthetic run through the real engine, writes reports |
 | `tradebot metrics` | metrics, Monte Carlo and acceptance gates for the paper database |
-| `tradebot run` | paper trading on the configured feed until Ctrl-C or `--minutes N` (`--mlflow DIR` logs the session on exit, `--mlflow-server URI` streams it live, `--news-url` adds the reduce-only sentiment overlay, `--meta-gate` adds the veto filter) |
+| `tradebot run` | paper trading on the configured feed until Ctrl-C or `--minutes N` (`--mlflow DIR` logs the session on exit, `--mlflow-server URI` streams it live, `--news-url` adds the reduce-only sentiment overlay, `--meta-gate` adds the meta veto filter, `--ledger-gate` adds one trained on the bot's own trades) |
 | `tradebot status` | positions, kill level, recent events |
 | `tradebot report` | build today's report now |
 | `tradebot pause` / `resume` / `kill` / `lockdown` | manual kill-switch controls |
@@ -234,6 +235,8 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | `tradebot experiments --export DIR` | list the experiment log and write it as an MLflow file store |
 | `tradebot experiments --read DIR` | read an MLflow file store back and print what is in it |
 | `tradebot experiments --read-server URI` | read runs back from a tracking server (`http://`, `sqlite://`, `file://`) |
+| `tradebot learn` | label the bot's own closed trades, walk forward over them, and write a veto card only if it earned one |
+| `tradebot backtest --persist PATH` | run the backtest into a real database so `learn`/`metrics`/`report` can read it |
 | `tradebot run --mlflow-server URI` | stream the session's metrics to a running `mlflow server` while it runs |
 | `tradebot telegram` | check the inbound-command wiring: token, chat id, does Telegram answer |
 | `tradebot venues --venue nse --notional 100000` | session state, square-off deadline, round-trip cost comparison |

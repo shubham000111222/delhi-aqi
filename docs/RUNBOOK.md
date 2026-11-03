@@ -335,3 +335,27 @@ exchange support:            ______________________
 Telegram commands:           /status /pnl /positions /report /pause /flatten /kill
 CLI commands:                tradebot status | pause | resume | kill | lockdown | drill
 ```
+
+## Learning from the bot's own trades
+
+Once there are closed trades, ask the ledger whether any setup is worth refusing:
+
+```bash
+python -m tradebot learn                     # the paper database
+python -m tradebot learn --db /tmp/bt.db     # a persisted backtest, below
+python -m tradebot backtest --days 20 --persist /tmp/bt.db
+```
+
+It prints the labels (win rate, mean/median R, what share of gross the fees ate), a purged
+walk-forward with the gate's AUC and expectancy against taking every trade, and a verdict.
+Card written only on `PROMOTABLE`:
+
+```bash
+python -m tradebot learn --save models/ledger.json
+python -m tradebot run --ledger-gate models/ledger.json
+```
+
+Expect "not yet" for a long time: the floor is 200 closed trades, because at 92 trades the
+fitted gate scored AUC 0.16 - worse than a coin flip - and would have made the strategy
+lose faster. `models/*.json` is gitignored, so a card is never committed.
+
