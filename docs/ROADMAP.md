@@ -30,7 +30,7 @@ a capability that exists but has not cleared its gates is marked as such.
 | 12 Reliability & security | crash recovery, reconciliation, structured logs with redaction, heartbeats, disk guards, scoped auto-resume |
 | 12 Inbound commands | Telegram router: chat-id whitelist, confirm step with TTL and single use, audit line per command, transport-agnostic |
 | 12 Telegram transport | `getUpdates` long polling with persisted offset, `sendMessage`, backoff on failure, injected HTTP client, started by `run` when a token and chat id exist, `tradebot telegram` readiness check |
-| 13 Testing | 439 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
+| 13 Testing | 454 tests: unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity) |
 | 18.1 Book recording | recorded on every session (`RecordingFeed`), archived to Parquet, summarised as spread statistics |
 | 18.6 Experiment tracking | `experiments` table, deterministic run ids, trial log used by the multiple-testing report |
 | 18.6 MLflow export | `tradebot experiments --export DIR` writes MLflow's file-store layout (meta/metrics/params/tags), non-numeric metrics moved to tags, verified by reading the export back with real MLflow 3.17 |
@@ -72,6 +72,12 @@ a capability that exists but has not cleared its gates is marked as such.
 * **The boosting rung is a reference implementation**, not LightGBM: depth-limited
   stumps with shrinkage and early stopping. It exists to answer "does non-linearity help
   here?" and so far the answer is no.
+* **Sentiment is feed-dependent, and the lexicon is weak.** The overlay can only shrink a
+  position, so a bad feed costs edge rather than money - but the lexicon scores headlines
+  as bag-of-words, and no FinBERT weights were ever downloaded here (`FinBertScorer` is
+  written and takes any `transformers` pipeline). The one thing not to read into it: on a
+  mixed feed the aggregate score is a weighted mean, so one alarming story among cheerful
+  ones can stay above the -0.15 cut and change nothing.
 * **Slippage is measured on a synthetic book.** The p95 of +26 bps reflects this venue
   simulator's depth, not Binance's.
 * **Live adapter is unproven.** `ccxt_live.py` is written against the same interface

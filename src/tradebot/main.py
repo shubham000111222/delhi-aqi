@@ -249,10 +249,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"{len(entry_filter.gate.features)} features (veto-only)"
         )
 
+    news_poller = None
+    if getattr(args, "news_url", None):
+        from .news import attach as attach_news
+
+        urls = [url.strip() for url in str(args.news_url).split(",") if url.strip()]
+        news_poller = attach_news(engine, urls, interval_seconds=float(args.news_interval))
+        print(f"sentiment: {len(urls)} feed(s), polled every {args.news_interval:.0f}s (reduce-only)")
+
     async def _main() -> int:
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
         listener = _start_command_listener(cfg, engine)
+        news_task = asyncio.create_task(news_poller.run(stop)) if news_poller is not None else None
 
         def _stop(*_: object) -> None:
             stop.set()
@@ -267,9 +276,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             engine.running = False
             run_task.cancel()
         await asyncio.gather(run_task, return_exceptions=True)
-        if listener is not None:
-            listener.cancel()
-            await asyncio.gather(listener, return_exceptions=True)
+        for task in (listener, news_task):
+            if task is None:
+                continue
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if news_poller is not None:
+            print(f"news: {json.dumps(news_poller.stats.as_dict(), default=str)}")
         print(json.dumps(engine.status(), indent=2, default=str))
         engine.close()
         return 0
@@ -440,6 +453,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--meta-gate", default=None, metavar="PATH",
         help="a saved meta-label model card; it may refuse entries, never resize them",
     )
+    run_parser.add_argument(
+        "--news-url", default=None, metavar="URL[,URL]",
+        help="RSS feed(s) to score; sentiment can only shrink an entry, never grow it",
+    )
+    run_parser.add_argument("--news-interval", type=float, default=300.0, help="seconds between polls")
 
     live_check = sub.add_parser("live-check", help="run every live-mode gate (never trades)")
     live_check.add_argument("--confirm", default=None)
@@ -521,6 +539,13 @@ def build_parser() -> argparse.ArgumentParser:
     arc.add_argument("--seed", type=int, default=7)
     arc.add_argument("--keep-days", type=int, default=None, help="delete book partitions older than this")
     arc.add_argument("--json", action="store_true")
+
+    nws = sub.add_parser("news", help="score an RSS feed once and show the size multiplier")
+    nws.add_argument("--url", default=None, help="RSS URL(s), comma separated")
+    nws.add_argument("--file", default=None, help="read the RSS from a file instead (offline)")
+    nws.add_argument("--symbols", default=None, help="default: the configured symbols")
+    nws.add_argument("--limit", type=int, default=10)
+    nws.add_argument("--json", action="store_true")
 
     exp = sub.add_parser("experiments", help="the experiment log, and an MLflow export of it")
     exp.add_argument("--limit", type=int, default=200)
@@ -1344,6 +1369,72 @@ def cmd_experiments(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_news(args: argparse.Namespace) -> int:
+    """Fetch the configured feed once and show what the sentiment overlay would do.
+
+    Read-only, and deliberately dull: a lexicon score per headline and the size
+    multiplier it implies, so the number that reaches the engine can be inspected before
+    anyone trusts it.
+    """
+    from .ai.sentiment import LexiconScorer, explain
+    from .news import NewsPoller
+
+    cfg = _config(args)
+    urls = [url.strip() for url in str(args.url).split(",") if url.strip()] if args.url else []
+    if not urls and not args.file:
+        print("no feed: pass --url https://example.com/rss or --file feed.xml", file=sys.stderr)
+        return 2
+    poller = NewsPoller(urls=tuple(urls) or ("file://local",), clock=Clock())
+    if args.file:
+        from pathlib import Path as _Path
+
+        from .ai.sentiment import parse_simple_rss
+
+        text = _Path(args.file).read_text(encoding="utf-8", errors="replace")
+        batch = parse_simple_rss(text, source=str(args.file))
+        poller.stats.polls += 1
+        poller.stats.fetched += 1
+        poller.stats.parsed += len(batch)
+        poller.stats.added += poller.store.add_many(batch)
+        poller.stats.last_poll_at = poller.clock.now()
+    if urls:
+        asyncio.run(poller.poll_once())
+    overlay = poller.overlay
+    now = poller.clock.now()
+    symbols: list[str] = args.symbols.split(",") if args.symbols else cfg.symbol_names()
+    report: dict[str, Any] = {
+        "feeds": urls,
+        "stats": poller.stats.as_dict(),
+        "symbols": explain(overlay, {symbol: symbol for symbol in symbols}, now),
+        "headlines": [
+            {"text": headline.text, "ts": headline.ts.isoformat(), "score": LexiconScorer().score(headline.text)}
+            for headline in list(poller.store._items)[-args.limit :]
+        ],
+    }
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+        return 0 if poller.stats.fetched else 3
+    if not poller.stats.fetched:
+        print(f"could not read any feed (last error: {poller.stats.last_error})", file=sys.stderr)
+        return 3
+    sources = len(urls) or (1 if args.file else 0)
+    print(
+        f"polled {sources} feed(s): {poller.stats.parsed} headline(s), "
+        f"{poller.stats.added} new, {poller.stats.duplicates} already seen"
+    )
+    rows: list[dict[str, Any]] = report["headlines"]
+    decisions: dict[str, dict[str, Any]] = report["symbols"]
+    for headline in rows:
+        print(f"  {headline['score']:+.2f}  {headline['ts'][:16]}  {headline['text'][:96]}")
+    print("\nwhat this would do to entry size:")
+    for symbol, decision in decisions.items():
+        print(
+            f"  {symbol:10s} x{decision['multiplier']:.2f}  score {decision['score']:+.2f}  {decision['reason']}"
+        )
+    print("\n(the multiplier is capped at 1.0: good news never makes an order bigger)")
+    return 0
+
+
 def _frame_ts(frame: Any) -> datetime | None:
     """The instant an exchange frame refers to, if it says."""
     data = frame.get("data") if isinstance(frame, dict) else None
@@ -1826,6 +1917,7 @@ def main(argv: list[str] | None = None) -> int:
         "telegram": cmd_telegram,
         "backfill": cmd_backfill,
         "experiments": cmd_experiments,
+        "news": cmd_news,
     }
     if args.command in ("pause", "resume", "kill", "lockdown"):
         args.action = args.command
