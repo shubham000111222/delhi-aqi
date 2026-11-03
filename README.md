@@ -158,18 +158,21 @@ signals, which is exactly the cost problem section 17.2 of the plan warns about.
 ### The validation suite, on the same data
 
 Every one of these ran and every one of them agrees with the verdict above. They are
-reported here because a failing strategy that is *proved* to fail is the deliverable:
+reported here because a failing strategy that is *proved* to fail is the deliverable. All
+numbers are from **2026-11-03, commit `8486021`**, on the seeded synthetic market;
+`docs/RESULTS.md` has every command and the caveats.
 
 | Check | Result |
 | --- | --- |
-| Walk-forward (3 windows × 1 day, seed 5) | Windows −2.04%, +0.21%, ... → compound **−1.42%**, "inconsistent"; OOS PF 0.20, Sharpe −11.4, 19 trades → **NOT PROMOTABLE** |
-| Parameter sensitivity (S1 × `ema_fast` 12/20/30) | Best cell −0.98%, neighbour median −1.0%, plateau share 0.67 → **"no edge — best cell is not profitable"** (a wide plateau of losses is still a loss) |
+| Walk-forward (3 windows × 1 day, seed 5) | Windows +0.43%, −2.04%, +0.21% → compound **−1.42%**, "inconsistent"; OOS PF 0.20, Sharpe −11.4, 19 trades → **NOT PROMOTABLE** |
+| Parameter sensitivity (S1 × `ema_fast` 12/20/30, 3 days) | Best cell +2.39%, neighbour median +2.35%, plateau share 1.0 → "broad plateau" — then the deflation kills it: best Sharpe 0.02 against the 1.48 expected from 3 attempts |
 | Parity (recorded tape, 1 200 minutes) | **MATCH**: 22/22 decisions, 8/8 fills, 24 984 tape events |
-| Robustness (4 days, 2× costs rerun) | Nominal +1.02%, at 2× costs **+0.03%** → survives by a rounding error, and the command says "thin margin" rather than PASS. 82% of gross P&L went to fees |
-| Benchmark | Strategy beat buy-and-hold by 1.4 points over 4 days — on a sample far too small to mean anything |
-| Signal screen (44 signals, 1 day, horizon 30 bars) | A handful survive; the IC noise band at 46 non-overlapping samples is ±0.29, so most survivors are labelled **thin**, not proven |
-| Complexity ladder (4 rungs) | Baseline (IC-weighted) is retained; **ridge, boosting and the window model are all rejected** — none is profitable net of 10 bps a side, and the window model trades 2-3x as often as the others (BTC: baseline −1.6, ridge −3.2, boosting −1.9, sequence −3.1 bps a bar over 4-5x the turnover) |
-| Slippage (2 days) | median 0.0 bps, p95 **+26 bps**, worst +36 bps — the number the backtester had been silently assuming was zero |
+| Robustness (4 days, 2× costs rerun) | Nominal **−1.50%** (PF 0.74, 26 trades), at 2× costs −1.41% (PF 0.80) → cost stress **FAILS**, "the edge is the fee". 61% of gross P&L went to fees |
+| Benchmark | Buy-and-hold −0.36% over the same bars; the strategy **trailed it by 1.13 points** |
+| Signal screen (44 signals, 1 day) | Kept BTC 0/44, ETH 1/44, SOL 3/44, BNB 0/44, XRP 3/44; the IC noise band at ~46 non-overlapping samples is ±0.29, so most survivors are "thin", not proven |
+| Complexity ladder (4 rungs) | Baseline retained everywhere; **ridge, boosting and the window model are all rejected** — and the window model is the worst (BTC: −2.5 / −2.3 / −0.6 / **−7.2** bps a bar at 2-3× the turnover) |
+| Meta-labelling (1 day) | SOL AUC 0.485, XRP 0.531 → "do not use it": the gate's gain does not cover 20 bps of cost |
+| Slippage (2 days) | p95 up to **+36 bps** per symbol (SOL), +26 (XRP), +16 (ETH); calibration error +19 bps, i.e. the model is *pessimistic*, not optimistic |
 | Research loop (2 days, 6 run → 3 kept) | best cell +1.87%, deflated Sharpe 1.41, probability 0.92 against a 0.95 bar → **NO** ("weak: does not survive its own attempts") |
 | Sentiment overlay (local RSS, 4 negative headlines) | 8 polls, 4 headlines kept, 28 duplicates dropped, 7 entries halved to ×0.50 at score −0.38 |
 | Cost budget (target ≥ N× round-trip cost, 10 days) | N=4 neutral (97 trades, PF 0.91); N=8 prunes to 69 trades, PF 1.03, still a loss; N=16 leaves 12 trades where PF 5.54 and Sharpe 6.37 pass but trade count fails — a small sample, not an edge |

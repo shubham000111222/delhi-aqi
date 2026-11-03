@@ -49,7 +49,7 @@ synthetic days (`docs/RUNBOOK.md` has the command):
 | ratio | trades | fees | equity | PF | what it means |
 | --- | --- | --- | --- | --- | --- |
 | 0 (off) | 97 | 27.69 | 971.23 | 0.91 | the unfiltered baseline |
-| 4 (default) | 97 | 27.69 | 971.23 | 0.91 | every target here already clears 4× cost, so it is neutral |
+| 4 (default) | 97 | 27.69 | 971.23 | 0.91 | every target in this run already clears 4× cost, so it is neutral here (on the 4-day robustness window it vetoes 1 trade of 27) |
 | 8 | 69 | 19.47 | 993.70 | 1.03 | prunes 29% of trades, still a loss |
 | 16 | 12 | 3.28 | 1028.95 | 5.54 | PF and Sharpe pass, trade count fails: a small sample, not an edge |
 

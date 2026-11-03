@@ -57,6 +57,8 @@ a capability that exists but has not cleared its gates is marked as such.
 | **An NSE order at a real broker** | `KiteAdapter` is written and tested through an `httpx` mock, but nothing here has a Kite session (the sandbox cannot reach `api.kite.trade`, and a pointing-at-prod test would be reckless) | run `venues --venue nse` with real keys (it probes margins), then one 1-share order in a test account; verify tariff constants against current circulars |
 | **An MLflow tracking *server*** | Sessions and experiment cells are written to a file store on exit (and read back), but nothing streams metrics to a running `mlflow server` or a database backend, and nothing logs mid-session | point a `tracking_uri` at a server and add an `mlflow.log_metric` call at the report step if a team needs live curves; the bot's SQLite log stays the source of truth |
 
+The full evidence sheet — every command, every number, dated — is in `docs/RESULTS.md`.
+
 ## Known limitations
 
 * **The strategies do not pass the acceptance gates** on synthetic data (see README
