@@ -348,7 +348,7 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
     return app
 
 
-def _veto_view(store: Any, *, limit: int = 1000) -> dict[str, Any]:
+def _veto_view(store: Any, *, limit: int = 2000) -> dict[str, Any]:
     """Why entries were refused, by check - the most useful table on the page.
 
     A bot that trades rarely looks identical to a bot that is broken; the difference
@@ -377,12 +377,23 @@ def _veto_view(store: Any, *, limit: int = 1000) -> dict[str, Any]:
     ]
     aggregated.sort(key=lambda item: item["count"], reverse=True)
     by_check = aggregated[:10]
+    dominant = by_check[0]["check"] if by_check and by_check[0]["share"] >= 0.9 else ""
+    note = ""
+    if dominant == "kill_switch":
+        note = (
+            "almost every refusal is the kill switch, not a market condition: entries are "
+            "blocked entirely until it is cleared"
+        )
+    elif dominant:
+        note = f"one check accounts for almost all refusals: {dominant}"
     return {
         "available": True,
         "window": total,
         "approved": approved,
         "refused": total - approved,
         "approval_rate": round(approved / total, 4),
+        "dominant": dominant,
+        "note": note,
         "by_check": by_check,
     }
 

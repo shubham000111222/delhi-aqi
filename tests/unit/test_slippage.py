@@ -284,6 +284,54 @@ class TestEngineSizingCap:
 _NOW = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
 
 
+class TestExpectedSlippage:
+    """The cost budget compares a target against the *expected* fill cost."""
+
+    def _model(self):
+        from tradebot.execution.slippage import SlippageModel
+
+        async def noop() -> None:
+            return None
+
+        return SlippageModel.fit([
+            self._record("BTC/USDT", 0.02, 4.0),
+            self._record("BTC/USDT", 0.03, 2.0),
+            self._record("ETH/USDT", 0.05, 9.0),
+            self._record("ETH/USDT", 0.60, 120.0),
+        ])
+
+    @staticmethod
+    def _record(symbol: str, depth: float, bps: float):
+        from decimal import Decimal as _D
+
+        from tradebot.core.models import Side
+        from tradebot.execution.slippage import SlippageRecord
+
+        return SlippageRecord(
+            symbol=symbol, ts=_NOW, strategy="S1", side=Side.BUY, qty=_D("1"), price=_D("100"),
+            expected_price=_D("100"), bps=bps, depth_fraction=depth, liquidity="taker",
+        )
+
+    def test_the_expectation_is_between_the_mean_and_the_worst(self):
+        model = self._model()
+        expected = model.expected_bps()
+        assert 0 < expected < model.fallback_bps, "the worst fill must not be the expectation"
+        assert expected == pytest.approx((4 + 2 + 9 + 120) / 4)
+
+    def test_the_expectation_weights_by_sample_count(self):
+        from tradebot.execution.slippage import SlippageModel
+
+        records = [self._record("BTC/USDT", 0.02, 2.0) for _ in range(9)]
+        records.append(self._record("BTC/USDT", 0.60, 100.0))
+        model = SlippageModel.fit(records)
+        assert model.expected_bps() == pytest.approx((2.0 * 9 + 100.0) / 10)
+
+    def test_an_empty_model_falls_back_rather_than_dividing_by_zero(self):
+        from tradebot.execution.slippage import SlippageModel
+
+        assert SlippageModel().expected_bps() == pytest.approx(10.0)
+
+
 class TestEngineCostEstimate:
     """The risk engine's cost estimate: fees always, slippage only on evidence."""
 
@@ -325,9 +373,31 @@ class TestEngineCostEstimate:
         engine = asyncio.run(build())
         try:
             without = engine._round_trip_cost_bps("BTC/USDT")
-            engine.slippage_model = type("Model", (), {"fallback_bps": 12.5})()
+            engine.slippage_model = type(
+                "Model", (), {"fallback_bps": 99.0, "expected_bps": staticmethod(lambda: 12.5)}
+            )()
             with_model = engine._round_trip_cost_bps("BTC/USDT")
             assert with_model == without + Decimal("12.5")
+            assert with_model < without + Decimal("99"), "the stress number is not the expectation"
+        finally:
+            engine.close()
+
+    def test_a_model_without_an_expectation_contributes_nothing(self):
+        from tradebot.config import load_config
+        from tradebot.core.clock import SimClock
+        from tradebot.core.store import Store
+        from tradebot.engine import Engine
+
+        cfg = load_config()
+
+        async def build():
+            return await Engine.build(cfg, clock=SimClock(_NOW), store=Store(":memory:"))
+
+        engine = asyncio.run(build())
+        try:
+            without = engine._round_trip_cost_bps("BTC/USDT")
+            engine.slippage_model = type("Model", (), {"fallback_bps": 99.0})()
+            assert engine._round_trip_cost_bps("BTC/USDT") == without
         finally:
             engine.close()
 

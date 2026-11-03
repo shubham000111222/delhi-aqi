@@ -44,20 +44,33 @@ the estimate is partial; if the rules themselves are unknown the check reports "
 estimate unavailable" and passes, because a made-up number is worse than an admitted gap).
 
 It is not a profitability test, and it is not a substitute for the gates. Measured on ten
-synthetic days (`docs/RUNBOOK.md` has the command):
+synthetic days (`docs/RESULTS.md` has every command):
 
-| ratio | trades | fees | equity | PF | what it means |
-| --- | --- | --- | --- | --- | --- |
-| 0 (off) | 97 | 27.69 | 971.23 | 0.91 | the unfiltered baseline |
-| 4 (default) | 97 | 27.69 | 971.23 | 0.91 | every target in this run already clears 4× cost, so it is neutral here (on the 4-day robustness window it vetoes 1 trade of 27) |
-| 8 | 69 | 19.47 | 993.70 | 1.03 | prunes 29% of trades, still a loss |
-| 16 | 12 | 3.28 | 1028.95 | 5.54 | PF and Sharpe pass, trade count fails: a small sample, not an edge |
+| ratio | trades | fees | equity | PF | Sharpe | gates |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 (off) | 97 | 27.69 | 971.23 | 0.91 | −9.77 | NOT PROMOTABLE |
+| 4 (default) | 97 | 27.69 | 971.23 | 0.91 | −9.77 | NOT PROMOTABLE |
+| 8 | 97 | 27.69 | 971.23 | 0.91 | −9.77 | NOT PROMOTABLE |
+| 16 | 49 | 13.74 | 1,005.06 | 1.14 | −4.15 | NOT PROMOTABLE (PF, Sharpe, 49 trades) |
+| 32 | 38 | 9.98 | 962.40 | 0.58 | −6.32 | NOT PROMOTABLE |
 
-The 16 row is the one to remember. Raising the ratio until the numbers look good produces
-twelve trades and a Sharpe of 6.37 that the acceptance gates refuse for the only honest
-reason: twelve trades is not evidence. The default is 4 because it is neutral on this data
-and would still refuse a genuinely unreachable target on a wider cost venue - not because
-it made a backtest look better.
+Two things to read from that table.
+
+**The default is deliberately inert here.** At 4 and 8 every target on this data already
+clears the cost, so the check changes nothing; on the four-day robustness window at 2×
+costs it vetoes one trade of twenty-seven. It is a floor for venues where costs are higher,
+not a tuning knob.
+
+**The one earlier measurement of this table was wrong, and the way it was wrong is the
+lesson.** The first version used `SlippageModel.fallback_bps` as the expected slippage.
+That number is the *worst single fill* on record (67 bps in the demo) - the right figure
+for stress-testing a size cap, the wrong one for "what will this trade cost?". With it, a
+ratio of 16 refused almost everything and left **12 trades at PF 5.54 and Sharpe 6.37**.
+Corrected to the sample-weighted mean of observed fills (`SlippageModel.expected_bps()`),
+the same ratio leaves 49 trades, PF 1.14, Sharpe −4.15. The apparent research triumph was
+an artefact of a pessimistic input, which is the exact failure mode this repository is
+supposed to catch rather than commit. `expected_bps` now exists as its own method, tested
+separately, precisely so the two numbers cannot be confused again.
 
 ## 2. Loss handling
 

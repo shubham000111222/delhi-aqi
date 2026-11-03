@@ -670,7 +670,10 @@ class Engine:
             return ZERO
         slippage = ZERO
         if self.slippage_model is not None:
-            slippage = D(str(getattr(self.slippage_model, "fallback_bps", 0.0)))
+            # the *expected* fill cost, not the worst one: `fallback_bps` is the stress
+            # number the size cap uses, and a cost budget built on it refuses everything
+            expected = getattr(self.slippage_model, "expected_bps", None)
+            slippage = D(str(expected() if callable(expected) else 0.0))
         return fees + slippage
 
     def adapter_cash(self) -> Decimal:

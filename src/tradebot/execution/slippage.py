@@ -164,6 +164,25 @@ class SlippageModel:
         nearest = max(table)  # the largest bucket we know about
         return table[nearest].worst_bps if edge > nearest else table[nearest].p95_bps
 
+    def expected_bps(self) -> float:
+        """A sample-weighted average of what fills have actually cost.
+
+        Distinct from `fallback_bps`, which is the *worst single fill* and exists to keep
+        the size cap pessimistic. A cost budget asks a different question - "can this
+        target pay for the round trip?" - and answering it with the worst fill on record
+        would refuse almost everything. This is the number to compare a target against;
+        the worst is the number to size against.
+        """
+        weighted = 0.0
+        weight = 0
+        for buckets in self.buckets.values():
+            for bucket in buckets.values():
+                weighted += bucket.mean_bps * bucket.samples
+                weight += bucket.samples
+        if weight == 0:
+            return self.fallback_bps if not self.buckets else 0.0
+        return weighted / weight
+
     def table(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for symbol, buckets in sorted(self.buckets.items()):

@@ -88,7 +88,7 @@ def render_png(snapshot: dict[str, Any], out_path: str | Path) -> Path:
     """Draw ``snapshot`` (the /api/snapshot payload) to ``out_path`` and return it."""
     Image, ImageDraw, _ = _require_pillow()
 
-    width, height = 1500, 940
+    width, height = 1500, 1000
     image = Image.new("RGB", (width, height), BG)
     draw = ImageDraw.Draw(image)
 
@@ -231,8 +231,39 @@ def render_png(snapshot: dict[str, Any], out_path: str | Path) -> Path:
             draw.text((x0, cost_top + 24), value, font=f_small, fill=colour)
             x0 += 150
 
+    # ---- refusals -----------------------------------------------------------
+    veto_top = 510
+    card((24, veto_top, width - 24, veto_top + 44))
+    draw.text((44, veto_top + 15), "WHY ENTRIES WERE REFUSED", font=f_head, fill=TEXT)
+    draw.text((292, veto_top + 17), "top risk checks over the recent verdict log", font=f_small, fill=MUTED)
+    veto = snapshot.get("veto_breakdown") or {}
+    if not veto.get("available"):
+        draw.text((600, veto_top + 17), str(veto.get("note") or "no risk verdicts logged yet"),
+                  font=f_small, fill=MUTED)
+    else:
+        draw.text(
+            (600, veto_top + 8),
+            f"{veto.get('refused', 0)} refused / {veto.get('window', 0)} verdicts",
+            font=f_lbl,
+            fill=MUTED,
+        )
+        draw.text(
+            (600, veto_top + 24),
+            f"{float(veto.get('approval_rate') or 0) * 100:.1f}% of entries approved",
+            font=f_small,
+            fill=GREEN if float(veto.get("approval_rate") or 0) > 0.05 else AMBER,
+        )
+        if veto.get("note"):
+            draw.text((44, veto_top + 32), str(veto["note"])[:120], font=f_small, fill=MUTED)
+        x0 = 860
+        for row in (veto.get("by_check") or [])[:4]:
+            colour = AMBER if row.get("check") == "cost_budget" else TEXT
+            draw.text((x0, veto_top + 8), str(row.get("check", ""))[:16], font=f_lbl, fill=MUTED)
+            draw.text((x0, veto_top + 24), f"{row.get('count', 0)}", font=f_small, fill=colour)
+            x0 += 150
+
     # ---- positions ----------------------------------------------------------
-    table_top = 516
+    table_top = 568
     card((24, table_top, 730, height - 24))
     draw.text((44, table_top + 16), "OPEN POSITIONS", font=f_head, fill=TEXT)
     for name, xcol in (

@@ -25,7 +25,7 @@ cost: 27.69 USDT of fees on a 1,000 USDT account over ten simulated days is 2.8%
 | Walk-forward, 3 out-of-sample windows | `walk-forward --train-days 3 --test-days 1 --windows 3 --seed 5` | Windows +0.43%, −2.04%, +0.21% → compound **−1.42%**, "inconsistent"; OOS PF 0.20, Sharpe −11.4, 19 trades → **NOT PROMOTABLE** |
 | Parameter sensitivity | `sensitivity --strategy S1_ema_trend --param ema_fast=12,20,30 --days 3` | Best cell +2.39%, neighbour median +2.35%, plateau share 1.0 → "broad plateau" — and then the multiple-testing line kills it: best Sharpe 0.02 is no better than the 1.48 expected from 3 attempts |
 | Parity against a recorded tape | `parity --minutes 1200` | **MATCH**: 22/22 decisions, 8/8 fills, 24,984 tape events |
-| Robustness | `robustness --days 4` | Nominal **−1.50%** (PF 0.74, 26 trades); at 2× costs **−1.41%** (PF 0.80). Cost stress **FAILS**; 61% of gross P&L went to fees |
+| Robustness | `robustness --days 4` | Nominal **−1.29%** (PF 0.79, 27 trades); at 2× costs **−2.25%** (PF 0.68, 26 trades). Cost stress **FAILS** |
 | Benchmark | inside `robustness` | Buy-and-hold −0.36% over the same bars; the strategy trailed it by **1.13 points** — fees and work for less return |
 | Signal screen | `signals --days 1` | 44 signals in 8 families; kept BTC 0/44, ETH 1/44, SOL 3/44, BNB 0/44, XRP 3/44. The rest are dropped as thin or unstable |
 | Complexity ladder, 4 rungs | inside `signals` | Baseline retained everywhere. Net expectancy per bar: BTC base −2.5 / ridge −2.3 / boost −0.6 / seq −7.2; SOL +5.6 / +0.2 / −2.7 / −5.4 — the window model is the worst of the four and trades 2–3× as often |
@@ -38,23 +38,33 @@ cost: 27.69 USDT of fees on a 1,000 USDT account over ten simulated days is 2.8%
 ## The cost budget, measured
 
 `risk.min_target_cost_ratio` refuses an entry whose target is nearer than N× the round-trip
-cost. On the ten-day backtest:
+cost (two taker fees plus expected slippage from the calibrated model). On the ten-day
+backtest:
 
-| N | Trades | Fees | Equity | PF | Gates |
-| --- | --- | --- | --- | --- | --- |
-| 0 (off) | 97 | 27.69 | 971.23 | 0.91 | NOT PROMOTABLE |
-| 4 (default) | 97 | 27.69 | 971.23 | 0.91 | NOT PROMOTABLE |
-| 8 | 69 | 19.47 | 993.70 | 1.03 | NOT PROMOTABLE (PF, Sharpe, trade count) |
-| 16 | 12 | 3.28 | 1,028.95 | **5.54** | NOT PROMOTABLE — **trade count 12 < 200** |
+| N | Trades | Fees | Equity | PF | Sharpe | Gates |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 (off) | 97 | 27.69 | 971.23 | 0.91 | −9.77 | NOT PROMOTABLE |
+| 4 (default) | 97 | 27.69 | 971.23 | 0.91 | −9.77 | NOT PROMOTABLE |
+| 8 | 97 | 27.69 | 971.23 | 0.91 | −9.77 | NOT PROMOTABLE |
+| 16 | 49 | 13.74 | 1,005.06 | 1.14 | −4.15 | NOT PROMOTABLE — PF, Sharpe, 49 trades |
+| 32 | 38 | 9.98 | 962.40 | 0.58 | −6.32 | NOT PROMOTABLE |
 
-The last row is the most important number on this page. Raising the ratio until the
-backtest looks good produces a Sharpe of 6.37 on twelve trades, and the gate refuses it for
-the only honest reason: twelve trades is not evidence. The default is 4 because it is
-neutral here and would still refuse a genuinely unreachable target on a higher-cost venue —
-not because it improved anything.
+The default is inert on this data on purpose: it is a floor for higher-cost venues, not a
+knob to turn until the backtest looks good. Turning it anyway shows what the data does -
+PF 1.14 at N=16, then 0.58 at N=32, on a strategy that loses money - which is noise on top
+of a loss, not an edge.
 
-(On the shorter four-day robustness window N=4 vetoes one trade of 27, which is the
-honest caveat to "neutral": neutral *on this ten-day run*, not universally.)
+### A correction, recorded rather than quietly fixed
+
+The first version of this section reported **12 trades at PF 5.54 and Sharpe 6.37** for
+N=16. That was wrong: the cost estimate used `SlippageModel.fallback_bps`, which is the
+*worst single fill* on record (67 bps) rather than what a fill is expected to cost. Fed
+that number, ratio 16 refused almost everything and the survivors looked excellent because
+there were twelve of them. `SlippageModel.expected_bps()` - the sample-weighted mean of
+observed fills - now supplies the expectation, the size cap keeps using the worst value,
+and the two are tested separately so they cannot be confused again. The corrected table is
+above; the number it replaced is in this paragraph so a reader can see what the mistake
+looked like.
 
 ## Sentiment, end to end
 

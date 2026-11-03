@@ -116,12 +116,15 @@ of them means the strategies are proposing trades that cannot pay for themselves
 ```
 python -m tradebot backtest --days 10 --min-target-cost-ratio 0   # off
 python -m tradebot backtest --days 10 --min-target-cost-ratio 8   # prunes ~30% of trades
-python -m tradebot backtest --days 10 --min-target-cost-ratio 16  # 12 trades, great ratios
+python -m tradebot backtest --days 10 --min-target-cost-ratio 16  # 49 trades, PF 1.14
+python -m tradebot backtest --days 10 --min-target-cost-ratio 32  # 38 trades, PF 0.58
 ```
 
-The last one is the trap this repository exists to avoid: it lifts PF to 5.5 and Sharpe to
-6.4 on twelve trades, and the gates still say NOT PROMOTABLE. Tuning the ratio upwards
-until a backtest looks good is fitting, not research.
+The last two are the trap this repository exists to avoid: PF 1.14 at 16 and 0.58 at 32, on
+a strategy that loses money, is noise on top of a loss. Tuning the ratio upwards until a
+backtest looks good is fitting, not research - and if a run ever looks spectacular here,
+check the cost input first (see `docs/RESULTS.md`, "a correction, recorded rather than
+quietly fixed").
 
 ## Execution cost and the size cap
 

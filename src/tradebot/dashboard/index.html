@@ -288,6 +288,7 @@ function renderVetoes(view) {
   box.innerHTML =
     `<div class="kv"><span>Verdicts in window</span><span>${view.window}</span></div>` +
     `<div class="kv"><span>Approved</span><span>${view.approved} <span class="muted">(${Math.round((Number(view.approval_rate) || 0) * 100)}%)</span></span></div>` +
+    (view.note ? `<p class="muted" style="font-size:12px;margin:6px 0">${view.note}</p>` : "") +
     (rows || `<p class="empty">every entry in the window was approved</p>`) +
     `<p class="muted" style="font-size:12px;margin-top:8px">cost_budget in amber: the strategies are proposing trades that cannot pay for themselves.</p>`;
 }
