@@ -1,4 +1,4 @@
-.PHONY: help install check test lint fmt dashboard backtest drill report status clean
+.PHONY: help install check test lint fmt dashboard backtest drill report status learn soak clean
 
 PY := python
 export PYTHONPATH := src
@@ -37,5 +37,11 @@ report:  ## build today's report now
 status:  ## positions, kill switch, recent events
 	$(PY) -m tradebot status
 
+learn:  ## learn from the bot's own closed trades (writes a card only if it earned one)
+	$(PY) -m tradebot learn --save models/ledger.json
+
+soak:  ## one supervised paper hour: no card, no orders outside the simulator
+	$(PY) -m tradebot run --minutes 60 --mlflow-server $${MLFLOW_URI:-http://127.0.0.1:5055}
+
 clean:  ## remove local state (not the config)
-	rm -rf data reports logs .pytest_cache .ruff_cache
+	rm -rf data reports logs .pytest_cache .ruff_cache models/*.json

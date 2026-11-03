@@ -35,6 +35,7 @@ data = [
     "pytz",
 ]
 dev = [
+    "mlflow>=2.10",    # in dev on purpose: CI must exercise `tracking`, not skip it
     "pillow>=10.0",
     "pyarrow>=15.0",
     "duckdb>=1.0",

@@ -53,7 +53,11 @@ python -m tradebot drill                   # kill-switch fire drill, measures ti
 python -m tradebot metrics                 # metrics + validation gates for the paper DB
 python -m tradebot status                  # positions, kill switch, recent events
 python -m tradebot dashboard-png           # render the dashboard to reports/dashboard.png
+python -m tradebot learn                   # learn from the bot's own closed trades
 ```
+
+Or through the Makefile: `make dashboard`, `make backtest`, `make learn`, `make soak`,
+`make test`, `make lint`. `make soak` runs one supervised paper hour.
 
 Everything runs on a **seeded synthetic market** by default: five coins, regime
 shifts, order books with depth, spread and volume. Nothing leaves your machine and
