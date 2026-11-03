@@ -143,6 +143,8 @@ def export_runs(
         metrics: dict[str, Any] = dict(run.get("metrics") or {})
         params: dict[str, Any] = dict(run.get("params") or {})
         tags: dict[str, Any] = {"run_kind": run.get("kind", ""), "strategy": run.get("strategy", "")}
+        # a caller's own tags (session mode, kill level, feeds) must survive the export
+        tags.update({str(k): v for k, v in dict(run.get("tags") or {}).items()})
         if run.get("git_commit"):
             tags["git_commit"] = run["git_commit"]
         if run.get("data_hash"):
@@ -181,7 +183,7 @@ def export_runs(
             (run_dir / "params" / _safe(key)).write_text(str(value))
             report.params += 1
         for key, value in tags.items():
-            if value in (None, ""):
+            if value is None or (isinstance(value, str) and not value.strip()):
                 continue
             text = str(value).replace("\n", " ")
             (run_dir / "tags" / _safe(key)).write_text(text)
@@ -196,4 +198,149 @@ def export_from_store(store: Any, root: str | Path, *, limit: int = 500, name: s
     return export_runs(store.experiments(limit=limit), root, name=name)
 
 
-__all__ = ["ExportReport", "export_from_store", "export_runs", "write_experiment"]
+def session_run(
+    *,
+    run_id: str,
+    store: Any,
+    status: dict[str, Any],
+    started: datetime,
+    mode: str = "paper",
+    capital: Any = None,
+    extra_params: dict[str, Any] | None = None,
+    extra_tags: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Turn a finished trading session into one MLflow run.
+
+    A session is not a backtest cell, so the metrics here are the ones an operator reads
+    at the end of a day (equity, realised P&L, fees, trade count, win rate) and the tags
+    say what the run *was* (paper or live, kill level at exit). Numeric-only metric keys
+    are the caller's job to respect; `export_runs` moves anything else to a tag.
+    """
+    stats = (status.get("stats") or {}) if status else {}
+    closed = int(stats.get("trades_closed") or 0)
+    # the engine counts trades, not winners, so honest win rate needs the closed positions
+    wins = 0
+    try:
+        wins = sum(1 for position in store.closed_positions(limit=10_000) if float(position["pnl"]) > 0)
+    except Exception:  # noqa: BLE001 - a store without that query must not break a log
+        wins = 0
+    metrics: dict[str, Any] = {
+        "equity": status.get("equity"),
+        "cash": status.get("cash"),
+        "realized_pnl": status.get("realized_pnl"),
+        "unrealized_pnl": status.get("unrealized_pnl"),
+        "fees": status.get("fees"),
+        "trades_closed": closed,
+        "win_rate": (wins / closed) if closed else 0.0,
+        "signals": stats.get("signals"),
+        "vetoes": stats.get("vetoes"),
+        "orders": stats.get("orders"),
+        "fills": stats.get("fills"),
+    }
+    params: dict[str, Any] = {"mode": mode}
+    if capital is not None:
+        params["capital"] = capital
+    params.update(extra_params or {})
+    tags: dict[str, Any] = {
+        "kind": "session",
+        "mode": mode,
+        "kill_level": (status.get("kill_state") or {}).get("level", "L0"),
+    }
+    tags.update(extra_tags or {})
+    return {
+        "run_id": run_id,
+        "kind": "session",
+        "created_at": started.isoformat(),
+        "metrics": {key: value for key, value in metrics.items() if value is not None},
+        "params": params,
+        "tags": tags,
+    }
+
+
+def read_runs(root: str | Path, *, limit: int = 200) -> list[dict[str, Any]]:
+    """Read a file store back into plain run dicts.
+
+    This is the other half of the export: the bot's SQLite log stays the source of truth,
+    but a run written by a teammate's `mlflow server` (file backend) or by an older
+    checkout has to be readable before it can be compared with anything. Missing or
+    malformed files are skipped rather than raising - a half-written store is a normal
+    accident, not a reason for a stack trace.
+    """
+    base = Path(root)
+    if not base.exists():
+        return []
+    runs: list[dict[str, Any]] = []
+    for experiment in sorted(p for p in base.iterdir() if p.is_dir()):
+        name = _experiment_name(experiment)
+        for run_dir in sorted(p for p in experiment.iterdir() if p.is_dir()):
+            if not (run_dir / "meta.yaml").exists():
+                continue
+            metrics: dict[str, float] = {}
+            for path in sorted((run_dir / "metrics").glob("*")) if (run_dir / "metrics").exists() else []:
+                parts = path.read_text().split()
+                if len(parts) < 2:
+                    continue
+                try:
+                    metrics[path.name] = float(parts[-2] if len(parts) > 2 else parts[1])
+                except ValueError:
+                    continue
+            params = _read_dir(run_dir / "params")
+            tags = _read_dir(run_dir / "tags")
+            meta = _read_meta(run_dir / "meta.yaml")
+            runs.append(
+                {
+                    "run_id": meta.get("run_id") or run_dir.name,
+                    "experiment": name,
+                    "start_time": meta.get("start_time"),
+                    "metrics": metrics,
+                    "params": params,
+                    "tags": tags,
+                }
+            )
+            if len(runs) >= limit:
+                return runs
+    return runs
+
+
+def _read_dir(directory: Path) -> dict[str, str]:
+    if not directory.exists():
+        return {}
+    out: dict[str, str] = {}
+    for path in sorted(directory.iterdir()):
+        if path.is_file():
+            try:
+                out[path.name] = path.read_text().strip()
+            except OSError:  # pragma: no cover - unreadable file in a foreign store
+                continue
+    return out
+
+
+def _read_meta(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text()
+    except OSError:  # pragma: no cover
+        return out
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        out[key.strip()] = value.strip().strip('"')
+    return out
+
+
+def _experiment_name(directory: Path) -> str:
+    meta = directory / "meta.yaml"
+    if meta.exists():
+        return _read_meta(meta).get("name", directory.name)
+    return directory.name
+
+
+__all__ = [
+    "ExportReport",
+    "export_from_store",
+    "export_runs",
+    "read_runs",
+    "session_run",
+    "write_experiment",
+]

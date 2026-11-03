@@ -208,7 +208,7 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | `tradebot dashboard-png` | render the live dashboard to a PNG, no browser needed (`--out`, `--url`) |
 | `tradebot backtest --days N` | deterministic synthetic run through the real engine, writes reports |
 | `tradebot metrics` | metrics, Monte Carlo and acceptance gates for the paper database |
-| `tradebot run` | paper trading on the configured feed until Ctrl-C |
+| `tradebot run` | paper trading on the configured feed until Ctrl-C (`--mlflow DIR` logs the session, `--news-url` adds the reduce-only sentiment overlay, `--meta-gate` adds the veto filter) |
 | `tradebot status` | positions, kill level, recent events |
 | `tradebot report` | build today's report now |
 | `tradebot pause` / `resume` / `kill` / `lockdown` | manual kill-switch controls |
@@ -224,6 +224,7 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | `tradebot backfill --days N --write` | paginate historical candles into the archive and report coverage and gaps |
 | `tradebot news --url FEED` | score an RSS feed and print the size multiplier it implies (`--file` for an offline copy) |
 | `tradebot experiments --export DIR` | list the experiment log and write it as an MLflow file store |
+| `tradebot experiments --read DIR` | read an MLflow file store back and print what is in it |
 | `tradebot telegram` | check the inbound-command wiring: token, chat id, does Telegram answer |
 | `tradebot venues --venue nse --notional 100000` | session state, square-off deadline, round-trip cost comparison |
 | `tradebot archive --record-minutes N` | persist a session to Parquet and query it with DuckDB |

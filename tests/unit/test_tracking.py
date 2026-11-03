@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from tradebot.ai.tracking import export_runs, write_experiment
+from tradebot.ai.tracking import export_runs, read_runs, session_run, write_experiment
 from tradebot.core.store import Store
 
 NOW = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
@@ -160,3 +160,68 @@ class TestAgainstRealMlflow:
         assert entry.data.params["ema_fast"] == "12"
         assert entry.data.tags["git_commit"] == "abc123"
         assert "verdict" not in entry.data.metrics
+
+
+class TestReadingBack:
+    def test_what_we_export_is_what_we_read(self, tmp_path: Path):
+        export_runs([run()], tmp_path, now=NOW)
+        runs = read_runs(tmp_path)
+        assert len(runs) == 1
+        back = runs[0]
+        assert back["run_id"] == "run-1"
+        assert back["experiment"] == "tradebot"
+        assert back["metrics"]["sharpe"] == pytest.approx(1.42)
+        assert back["params"]["ema_fast"] == "12"
+        assert back["tags"]["git_commit"] == "abc123"
+
+    def test_a_store_that_is_not_there_reads_as_nothing(self, tmp_path: Path):
+        assert read_runs(tmp_path / "missing") == []
+
+    def test_a_half_written_store_is_skipped_not_fatal(self, tmp_path: Path):
+        export_runs([run()], tmp_path, now=NOW)
+        broken = tmp_path / "0" / "run-broken"
+        (broken / "metrics").mkdir(parents=True)
+        (broken / "meta.yaml").write_text("run_id: run-broken\n")
+        (broken / "metrics" / "sharpe").write_text("not-a-number\n")
+        runs = read_runs(tmp_path)
+        assert [r["run_id"] for r in runs] == ["run-1", "run-broken"]
+        assert runs[1]["metrics"] == {}
+
+    def test_the_limit_is_respected(self, tmp_path: Path):
+        export_runs([run(f"run-{i}") for i in range(5)], tmp_path, now=NOW)
+        assert len(read_runs(tmp_path, limit=2)) == 2
+
+
+class TestSessionRun:
+    def test_a_session_becomes_one_comparable_run(self, tmp_path: Path):
+        status = {
+            "equity": "1012.5",
+            "cash": "900",
+            "realized_pnl": "12.5",
+            "unrealized_pnl": "0",
+            "fees": "3.25",
+            "kill_state": {"level": "L1"},
+            "stats": {"signals": 40, "vetoes": 30, "orders": 10, "fills": 10, "trades_closed": 4},
+        }
+        session = session_run(
+            run_id="session-1", store=Store(":memory:"), status=status, started=NOW,
+            mode="paper", capital=250, extra_tags={"news_feeds": "https://example/rss"},
+        )
+        assert session["metrics"]["equity"] == "1012.5"
+        assert session["metrics"]["trades_closed"] == 4
+        assert session["params"]["capital"] == 250
+        assert session["tags"]["kill_level"] == "L1"
+        assert session["tags"]["news_feeds"] == "https://example/rss"
+
+        export_runs([session], tmp_path, now=NOW)
+        back = read_runs(tmp_path)[0]
+        assert back["metrics"]["equity"] == pytest.approx(1012.5)
+        assert back["params"]["mode"] == "paper"
+        assert back["tags"]["kill_level"] == "L1"
+
+    def test_no_closed_trades_reports_a_zero_win_rate_not_a_crash(self):
+        session = session_run(
+            run_id="s", store=Store(":memory:"), status={"stats": {"trades_closed": 0}},
+            started=NOW,
+        )
+        assert session["metrics"]["win_rate"] == 0.0

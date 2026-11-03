@@ -121,6 +121,22 @@ changed.
 Read the p95, not the mean: a median of 0 bps with a long tail is a strategy that looks
 fine until it is not.
 
+## Logging a session to MLflow
+
+`python -m tradebot run --mlflow ./mlruns` writes one run when the session ends: equity,
+cash, realised and unrealised P&L, fees, trade count, win rate and the signal/veto/order/
+fill counts as metrics; mode, capital and feed as params; and the exit kill level, mode
+and feed list as tags. Nothing is written mid-session, so a crash loses the run - the
+SQLite log is still the record of what happened, and `tradebot metrics` is still the
+thing that judges it.
+
+Read a store back with `python -m tradebot experiments --read ./mlruns`, or point MLflow
+at it: `mlflow ui --backend-store-uri file://$PWD/mlruns`.
+
+Do not read a session run's `win_rate` as a strategy result: it is a few dozen trades of
+a reference strategy on synthetic data, and the gates in `tradebot metrics` are the only
+thing allowed to call a strategy good.
+
 ## Meta-label gate (optional)
 
 A meta-model decides *whether to take* a setup the strategies already produced. It cannot

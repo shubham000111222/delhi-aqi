@@ -257,6 +257,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         news_poller = attach_news(engine, urls, interval_seconds=float(args.news_interval))
         print(f"sentiment: {len(urls)} feed(s), polled every {args.news_interval:.0f}s (reduce-only)")
 
+    started_at = engine.clock.now()
+
     async def _main() -> int:
         loop = asyncio.get_running_loop()
         stop = asyncio.Event()
@@ -283,7 +285,24 @@ def cmd_run(args: argparse.Namespace) -> int:
             await asyncio.gather(task, return_exceptions=True)
         if news_poller is not None:
             print(f"news: {json.dumps(news_poller.stats.as_dict(), default=str)}")
-        print(json.dumps(engine.status(), indent=2, default=str))
+        status = engine.status()
+        print(json.dumps(status, indent=2, default=str))
+        if getattr(args, "mlflow", None):
+            from .ai.tracking import export_runs, session_run
+
+            run = session_run(
+                run_id=f"session-{started_at.strftime('%Y%m%dT%H%M%S')}",
+                store=engine.store,
+                status=status,
+                started=started_at,
+                mode=cfg.mode.value,
+                capital=cfg.settings.max_capital_usdt,
+                extra_params={"feed": cfg.settings.feed.value},
+                extra_tags={"news_feeds": ",".join(news_poller.urls) if news_poller else ""},
+            )
+            report = export_runs([run], args.mlflow, name="tradebot-sessions")
+            print(f"mlflow: wrote {report.runs} run to {args.mlflow} "
+                  f"({report.metrics} metrics, {report.params} params, {report.tags} tags)")
         engine.close()
         return 0
 
@@ -458,6 +477,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="RSS feed(s) to score; sentiment can only shrink an entry, never grow it",
     )
     run_parser.add_argument("--news-interval", type=float, default=300.0, help="seconds between polls")
+    run_parser.add_argument(
+        "--mlflow", default=None, metavar="DIR",
+        help="write the session to an MLflow file store on exit (read it back with "
+             "`tradebot experiments --read DIR`)",
+    )
 
     live_check = sub.add_parser("live-check", help="run every live-mode gate (never trades)")
     live_check.add_argument("--confirm", default=None)
@@ -556,6 +580,8 @@ def build_parser() -> argparse.ArgumentParser:
     exp.add_argument("--strategy", default=None)
     exp.add_argument("--export", default=None, metavar="DIR", help="write an MLflow file store here")
     exp.add_argument("--json", action="store_true")
+    exp.add_argument("--read", default=None, metavar="DIR",
+                     help="read an MLflow file store back: what a teammate's runs contain")
 
     bfl = sub.add_parser("backfill", help="paginate historical candles into the archive")
     bfl.add_argument("--symbols", default=None, help="comma-separated; default: config symbols")
@@ -1324,8 +1350,30 @@ def cmd_backfill(args: argparse.Namespace) -> int:
 
 
 def cmd_experiments(args: argparse.Namespace) -> int:
-    """Show the experiment log, and export it into MLflow's file store layout."""
-    from .ai.tracking import export_from_store
+    """Show the experiment log, export it, or read a file store back."""
+    from .ai.tracking import export_from_store, read_runs
+
+    if args.read:
+        runs = read_runs(args.read, limit=args.limit)
+        if args.json:
+            _print({"store": args.read, "runs": runs})
+            return 0
+        if not runs:
+            print(f"no runs in {args.read}: is that a directory of experiments?")
+            return 0
+        print(f"{len(runs)} run(s) in {args.read}")
+        for run in runs:
+            head = run["metrics"].get("equity") or run["metrics"].get("end_equity")
+            summary = ", ".join(
+                f"{key}={value:.4g}" for key, value in list(run["metrics"].items())[:4]
+            )
+            print(
+                f"  {run['experiment']:20s} {run['run_id'][:28]:28s} "
+                f"equity={head if head is not None else '-':>12}  {summary}"
+            )
+        kinds = sorted({run["tags"].get("run_kind") or run["tags"].get("kind") or "?" for run in runs})
+        print(f"\nrun kinds: {', '.join(kinds)}")
+        return 0
 
     cfg = _config(args)
     store = Store(cfg.settings.db_path)
