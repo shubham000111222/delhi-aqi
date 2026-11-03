@@ -211,3 +211,79 @@ class TestSyntheticFetcher:
 
         _got, report = asyncio.run(run())
         assert report.gaps, "the synthetic exchange's holes must be visible in the report"
+
+
+class TestTheTail:
+    """The right edge of a real backfill: the bar that has not closed yet.
+
+    A live exchange answers with the forming candle, so the last page of a long fetch
+    contains a row the loop must drop. That page then moves no cursor, which used to be
+    reported as `stuck` - "the exchange is repeating itself" - on a backfill that was in
+    fact perfect. These are the numbers a real 30-day Binance backfill produced.
+    """
+
+    def _exchange(self, moment: datetime):
+        calls = {"n": 0}
+
+        async def fetch(symbol, timeframe, since, until, limit):  # noqa: ARG001
+            calls["n"] += 1
+            first = since.replace(second=0, microsecond=0)
+            ts = first if first >= since else first + timedelta(minutes=1)
+            out = []
+            while len(out) < limit and ts < until and ts <= moment.replace(second=0, microsecond=0):
+                out.append(bar(ts))
+                ts += timedelta(minutes=1)
+            return out
+
+        return fetch
+
+    def test_an_unclosed_tail_is_complete_not_stuck(self):
+        end = datetime(2026, 11, 3, 21, 52, 5, tzinfo=UTC)
+        start = end - timedelta(days=30)
+
+        async def run():
+            return await Backfill(self._exchange(end), page_limit=1000).run(
+                "BTC/USDT", "1m", start, end, now=end
+            )
+
+        got, report = asyncio.run(run())
+        assert report.stuck is False, "the exchange did not repeat itself; the last bar was open"
+        assert report.complete is True
+        assert report.dropped_unclosed == 2, "counted once per page that returns the open bar"
+        assert report.gaps == []
+        assert report.expected_bars == report.kept, "expected must exclude the bar that had not closed"
+        assert report.coverage == 1.0
+        assert got[-1].ts + timedelta(minutes=1) <= end
+
+    def test_a_page_of_closed_rows_that_does_not_advance_is_still_stuck(self):
+        bars = series(START, 3)
+
+        async def fetch(symbol, timeframe, since, until, limit):  # noqa: ARG001
+            return [bars[0]]  # one closed row, forever: the shape `stuck` exists for
+
+        async def run():
+            return await Backfill(fetch).run(
+                "BTC/USDT", "1m", START, START + timedelta(minutes=30), now=NOW
+            )
+
+        _got, report = asyncio.run(run())
+        assert report.stuck is True
+        assert report.complete is False
+
+    def test_a_missing_bar_in_the_middle_is_not_complete(self):
+        bars = series(START, 10)
+        holed = bars[:4] + bars[7:]
+
+        async def fetch(symbol, timeframe, since, until, limit):  # noqa: ARG001
+            return holed
+
+        async def run():
+            return await Backfill(fetch).run(
+                "BTC/USDT", "1m", START, START + timedelta(minutes=10), now=NOW
+            )
+
+        _got, report = asyncio.run(run())
+        assert report.expected_bars == 10
+        assert report.kept == 7
+        assert report.complete is False
+        assert round(report.coverage, 4) == 0.7

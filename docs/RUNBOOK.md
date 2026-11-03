@@ -264,6 +264,20 @@ bars: a backfill with holes is a backfill with holes.
 The current bar is always dropped. A bar that has not closed yet is a future leak, and the
 archive is the one place that must never contain one.
 
+### Filling months of history in one command
+
+`backfill` covers one window. For the six months the gates need, use the resumable form:
+
+```powershell
+python -m tradebot backfill-history --months 6 --page-limit 1000 --json > history.json
+```
+
+It splits the window on UTC month boundaries, writes every chunk to the archive as it
+arrives, and records each one in `data/backfill-history.json`. Rerunning the same command
+skips the chunks that are already complete, so an interrupted night costs one chunk. Any
+chunk that comes back `incomplete` makes the command exit 4 - rerun it, or add
+`--retry-incomplete`. It never fills a hole with invented bars.
+
 ### Replaying what was recorded
 
 Once the archive has bars, every research command can run on them instead of on the

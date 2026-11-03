@@ -12,7 +12,7 @@ a capability that exists but has not cleared its gates is marked as such.
 | 2 Architecture | single asyncio process, separate watchdog and dashboard, SQLite state + event log |
 | 3 Modes and paper→live switch | paper/testnet/live, separate DBs and keys, seven live gates, enforced ramp |
 | 4 Data layer | 1m base bars, derived 15m/1h, spike quarantine, staleness guards, gap detector, self-healing reconnect policy |
-| 4 Historical backfill | resumable `fetch_ohlcv` pagination, per-bar de-duplication, unclosed bar dropped, gap detection with sizes, coverage and `stuck` reporting, writes straight into the Parquet archive, `tradebot backfill` |
+| 4 Historical backfill | resumable `fetch_ohlcv` pagination, per-bar de-duplication, unclosed bar dropped, gap detection with sizes, coverage and `stuck` reporting, writes straight into the Parquet archive, `tradebot backfill`, plus `backfill-history` for months at a time: month-sized chunks, a resume file, and a non-zero exit on any chunk that did not land |
 | 4 Streaming feed | `WebSocketFeed`: injected transport, Binance frame decoding (closed klines, depth snapshots, trades), symbol canonicalisation, exponential backoff with jitter, REST gap fill on reconnect, health counters, `--feed stream` and a `stream` replay command |
 | 4 / 18.1 Archive | partitioned Parquet candles and order books, DuckDB views, idempotent rewrites, retention job, `spread_stats()` from recorded books |
 | 4 / 8 Archive replay | `--feed archive`: recorded candles feed the real engine, so `backtest`, `walk-forward`, `sensitivity`, `robustness` and `signals` run on the tape instead of a seeded simulation. The window is the data's (starts on the first bar, clipped at the last), depth is modelled from the bar close and the result says so, and a live feed on a simulated clock is refused |
@@ -31,7 +31,7 @@ a capability that exists but has not cleared its gates is marked as such.
 | 12 Reliability & security | crash recovery, reconciliation, structured logs with redaction, heartbeats, disk guards, scoped auto-resume |
 | 12 Inbound commands | Telegram router: chat-id whitelist, confirm step with TTL and single use, audit line per command, transport-agnostic |
 | 12 Telegram transport | `getUpdates` long polling with persisted offset, `sendMessage`, backoff on failure, injected HTTP client, started by `run` when a token and chat id exist, `tradebot telegram` readiness check |
-| 13 Testing | 599 passing, 2 skipped (MLflow is a dev dependency, so CI exercises the tracking paths): unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity, ledger) |
+| 13 Testing | 607 passing, 2 skipped (MLflow is a dev dependency, so CI exercises the tracking paths): unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity, ledger) |
 | 18.1 Book recording | recorded on every session (`RecordingFeed`), archived to Parquet, summarised as spread statistics |
 | 18.6 Experiment tracking | `experiments` table, deterministic run ids, trial log used by the multiple-testing report |
 | 18.6 MLflow export | `experiments --export DIR` writes MLflow's file-store layout, `run --mlflow DIR` writes each session as it ends, and `experiments --read DIR` reads a store back into the bot; non-numeric metrics move to tags; verified by reading all three back with real MLflow 3.17 |

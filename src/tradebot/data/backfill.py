@@ -50,9 +50,19 @@ class BackfillReport:
     stuck: bool = False
     complete: bool = False
     error: str | None = None
+    #: Set by ``run`` once it knows what had closed; falls back to the window arithmetic.
+    expected: int | None = None
 
     @property
     def expected_bars(self) -> int:
+        """Bars that could have been fetched: the window, clipped to what had closed.
+
+        The window's right edge is a wall-clock instant, so a 30-day backfill started at
+        ``21:52:05`` ends while the ``21:52`` bar is still forming. Counting that bar as
+        expected made every clean real backfill report one bar short.
+        """
+        if self.expected is not None:
+            return self.expected
         if self.kept == 0:
             return 0
         step = timedelta(seconds=timeframe_seconds(self.timeframe))
@@ -108,6 +118,7 @@ class Backfill:
         step = timedelta(seconds=timeframe_seconds(timeframe))
         moment = _utc(now or datetime.now(tz=UTC))
         report = BackfillReport(symbol=symbol, timeframe=timeframe, start=start, end=end)
+        report.expected = _expected_bars(start, end, step, moment)
         bars: dict[datetime, Candle] = {}
         cursor = start
         last_cursor: datetime | None = None
@@ -144,15 +155,49 @@ class Backfill:
                 bars[ts] = candle
                 newest = max(newest, ts)
             if newest <= cursor:
-                report.stuck = True
+                # Nothing in this page could move the cursor. If every row the exchange
+                # sent is simply not closed yet, that is the end of the data - not an
+                # exchange repeating itself, which is the only thing `stuck` reports.
+                if page and all(_utc(row.ts) + step > moment for row in page):
+                    report.complete = True
+                else:
+                    report.stuck = True
                 break
             cursor = newest + step
 
         ordered = [bars[ts] for ts in sorted(bars)]
         report.kept = len(ordered)
         report.gaps = _find_gaps(ordered, step)
-        report.complete = report.complete or (bool(ordered) and ordered[-1].ts + step >= end)
+        if not report.stuck:
+            report.complete = report.complete or (
+                report.expected > 0 and report.kept >= report.expected and not report.gaps
+            )
         return ordered, report
+
+
+def _align(ts: datetime, step: timedelta, *, up: bool) -> datetime:
+    """Round a timestamp onto the exchange's bar grid (epoch-aligned multiples of `step`)."""
+    seconds = int(step.total_seconds())
+    base = int(ts.timestamp())
+    aligned = -(-base // seconds) * seconds if up else (base // seconds) * seconds
+    return datetime.fromtimestamp(aligned, tz=UTC)
+
+
+def _expected_bars(start: datetime, end: datetime, step: timedelta, moment: datetime) -> int:
+    """How many bars a complete backfill could have kept.
+
+    A bar counts only if its open time is inside the window *and* it has closed by
+    `moment`; anything else is a future leak the fetcher is not allowed to keep.
+    """
+    first = _align(start, step, up=True)
+    last_in_window = _align(end, step, up=False)
+    if last_in_window == end:
+        last_in_window -= step  # the window is half-open: a bar opening at `end` is outside
+    last_closed = _align(moment - step, step, up=False)
+    last = min(last_in_window, last_closed)
+    if last < first:
+        return 0
+    return int((last - first) / step) + 1
 
 
 def _find_gaps(candles: Sequence[Candle], step: timedelta) -> list[tuple[datetime, int]]:

@@ -40,6 +40,9 @@ are reported as failures (see [Results](#results-so-far)).
                        Kill switch L0–L3 ◀── watchdog process ◀── heartbeats
 ```
 
+**Where the project stands and what is left:** [`docs/CHECKLIST.md`](docs/CHECKLIST.md) —
+phase by phase, with the command and the pass criterion for each.
+
 ## Quick start (no keys, no network, no real money)
 
 ```bash
@@ -235,6 +238,7 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | `tradebot meta --days N` | triple-barrier meta-labels, gate threshold search, promote/skip verdict |
 | `tradebot stream --minutes N` | replay a recorded session through the streaming feed and print its verdict |
 | `tradebot backfill --days N --write` | paginate historical candles into the archive and report coverage and gaps |
+| `tradebot backfill-history --months 6` | fill months of history in one go: month-sized chunks, each written as it arrives, resumable from `data/backfill-history.json`, exit 4 on any incomplete chunk |
 | `tradebot backtest --feed archive --days N` | replay the archive through the real engine (see *Replaying a recording*) |
 | `tradebot research` | bounded successive-halving search; every attempt is logged and the winner is deflated, so it can answer "no" |
 | `tradebot news --url FEED` | score an RSS feed and print the size multiplier it implies (`--file` for an offline copy) |
