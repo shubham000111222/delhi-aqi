@@ -37,7 +37,7 @@ a capability that exists but has not cleared its gates is marked as such.
 | 18.8 NSE execution | `KiteAdapter`: order shaping (LIMIT/MARKET/SL/SL-M, MIS/CNC/NRML), local tick/lot/band checks before any HTTP call, tag-based idempotency with a lookup after a timeout, status mapping, balances, positions, LTP cache, closed-session refusal, `venues --venue nse` reports readiness |
 | 18.8 NSE-ready seams | `MarketCalendar` + `NSECalendar`, `Instrument` (tick/lot/band), `NSECostModel` (STT, GST, stamp, DP), daily-expiring sessions, square-off scheduler, engine hooks |
 | 19.1 Signal library | 32 features in 7 families, 44 signals in 8 families, IC on non-overlapping samples, stability, cost-adjusted PnL, correlation pruning, shuffled-label check |
-| 19.2 Complexity ladder | baseline → ridge → gradient boosting on purged folds; promotion needs +10% net expectancy in every window, enforced in code |
+| 19.2 Complexity ladder | baseline → ridge → boosting → sequence (a numpy MLP over a 4-row window) on purged folds; promotion needs +10% net expectancy in every window, enforced in code |
 | 19.7 Explainability / leakage | ridge weight shares with a >40% warning, multi-permutation shuffled-label test, far-shift test, Platt calibration with Brier score |
 | 19.3 Meta-label runtime gate | `MetaEntryFilter` installed as the engine's veto-only entry filter (`run --meta-gate card.json`): a saved card is loaded, features are rebuilt from the live bar window and cached per bar close, and anything unexpected lets the trade through with a logged reason |
 | 19.8 Guardrails | risk package imports nothing from `ai`; the AI layer imports no execution/engine code (both enforced by tests); unapproved or stale models produce no trade |
@@ -49,7 +49,6 @@ a capability that exists but has not cleared its gates is marked as such.
 | --- | --- | --- |
 | **Any strategy that passes the gates** | The strategies are reference implementations, the data is synthetic, and costs eat an untuned 15-minute signal. Three independent validation methods agree | real recorded data first; then lower turnover or maker-only entries; rerun the whole suite |
 | **A live news feed and FinBERT weights** | The lexicon scorer, the optional FinBERT scorer, the RSS parser, the dedupe/decay store and the reduce-only sizing overlay all exist and are tested (28 tests), but nothing here fetches headlines and the FinBERT weights were never downloaded | point `overlay_from_provider` at a real feed, score offline with FinBERT, and keep the multiplier capped at 1.0 |
-| **Neural / sequence models (ladder rung 4)** | The plan allows rung 4 only if it beats rung 3 net of costs; rung 3 has not earned promotion, so rung 4 has nothing to beat | not before rung 3 wins |
 | **Live exchange connectivity** | This sandbox has no exchange access; untestable code on money paths is a liability | run `ccxt_live` against testnet with keys, then a 2-week paper soak |
 | **A WebSocket session against a real exchange** | The feed, its decoders and its reconnect/gap-fill logic are written and tested, but this sandbox blocks the socket (it was tried: `ConnectionResetError`, three reconnects, no frames) | run `python -m tradebot stream --live` from a networked host and watch `describe()` |
 | **A backfill against a real exchange** | The paginator, its de-duplication and its gap report are tested against a fake endpoint and a deterministic offline exchange; `--source ccxt` cannot reach Binance from this sandbox | `python -m tradebot backfill --days 30 --write` from a networked host, then check `coverage` and `gaps` |
@@ -72,6 +71,12 @@ a capability that exists but has not cleared its gates is marked as such.
 * **The boosting rung is a reference implementation**, not LightGBM: depth-limited
   stumps with shrinkage and early stopping. It exists to answer "does non-linearity help
   here?" and so far the answer is no.
+* **Rung 4 is a small numpy network, not a sequence model in the modern sense.** One
+  hidden layer over the last four rows, Adam, early stopping: 2,209 parameters and no
+  recurrence, attention or embeddings. It is enough to test whether temporal structure
+  adds net expectancy - on two simulated days it loses 3 to 8 bps a bar and trades 2-3x
+  as often as the simpler rungs, so the answer is again no. A real sequence model would
+  need recorded data and a GPU budget, and would still have to clear the same margin.
 * **Sentiment is feed-dependent, and the lexicon is weak.** The overlay can only shrink a
   position, so a bad feed costs edge rather than money - but the lexicon scores headlines
   as bag-of-words, and no FinBERT weights were ever downloaded here (`FinBertScorer` is

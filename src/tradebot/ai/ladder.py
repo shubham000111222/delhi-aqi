@@ -1,4 +1,4 @@
-"""The complexity ladder (§19.2): baseline, ridge, gradient boosting - in that order.
+"""The complexity ladder (§19.2): baseline, ridge, boosting, sequence - in that order.
 
 Each rung has to *earn* promotion over the rung below, out of sample, across at least
 three walk-forward windows, by a clear margin (10% net expectancy). If it does not, the
@@ -14,9 +14,14 @@ Why the fold machinery matters more than the models:
 * **Weekly retrain on a rolling window** - what production would do, simulated here.
 
 The boosting implementation is deliberately small (depth-limited squared-loss trees with
-shrinkage and early stopping). It is a reference rung, not a LightGBM replacement; the
-docstring says so, and `LADDER_LEVELS` records what is not yet implemented so nobody
-mistakes this for a finished research stack.
+shrinkage and early stopping). It is a reference rung, not a LightGBM replacement, and
+the sequence rung is a numpy MLP over a window of rows rather than a torch model: both
+exist to answer "does this extra complexity earn 10% net expectancy here?" and neither is
+a production research stack.
+
+Rung 4 is included, and it is rejected on the evidence so far (see the README results):
+on two simulated days it turns over far more than the simpler rungs and loses more to
+fees than it gains. That is the ladder working, not the ladder failing.
 """
 
 from __future__ import annotations
@@ -32,9 +37,10 @@ from .signals import SIGNALS, SignalSpec, ic_weighted_score, pearson, rank_corre
 
 EPS = 1e-12
 
-#: Rung 4 (neural/sequence models) is not here on purpose: the plan only allows it if it
-#: beats rung 3 net of costs, and there is no evidence for that yet.
-LADDER_LEVELS = ("baseline", "ridge", "boosting")
+#: Rung 4 is a sequence model. It is here, and it has to earn its place like every other
+#: rung: the promotion test does not care that a model is fashionable, only that it beats
+#: the rung below by 10% net expectancy in every window.
+LADDER_LEVELS = ("baseline", "ridge", "boosting", "sequence")
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +326,187 @@ class BoostingModel:
         }
 
 
+class SequenceModel:
+    """Level 4: a one-hidden-layer network over a *window* of rows.
+
+    Rungs 1-3 see a single row of features. This one sees the last ``lookback`` rows
+    flattened, so it can learn something a cross-sectional model cannot: the shape of the
+    move leading into the bar (acceleration, compression before expansion, a failed push).
+
+    Written in numpy on purpose - a torch dependency on a research rung would make the
+    repo's test story worse, and the point of the rung is to test whether *temporal
+    structure* adds anything, not to be a deep-learning stack. It is small (one hidden
+    layer, tanh, Adam, early stopping on the tail of the training window) and it is
+    seeded, so two runs on the same folds agree.
+
+    Two honesty notes, both visible in `describe()`:
+
+    * rows whose window is not fully available get a score of 0.0 - a neutral position,
+      not a guess;
+    * ``parameters`` is reported so the ladder can be read as "this rung bought X
+      parameters to gain Y bps".
+    """
+
+    level = "sequence"
+
+    def __init__(
+        self,
+        *,
+        lookback: int = 4,
+        hidden: int = 16,
+        epochs: int = 200,
+        learning_rate: float = 0.01,
+        l2: float = 1e-3,
+        patience: int = 20,
+        names: Sequence[str] | None = None,
+        seed: int = 11,
+    ) -> None:
+        self.lookback = max(1, lookback)
+        self.hidden = hidden
+        self.epochs = epochs
+        self.learning_rate = learning_rate
+        self.l2 = l2
+        self.patience = patience
+        self.names = list(names) if names else None
+        self.seed = seed
+        self.mean_: Array | None = None
+        self.scale_: Array | None = None
+        self.w1_: Array | None = None
+        self.b1_: Array | None = None
+        self.w2_: Array | None = None
+        self.b2_: float = 0.0
+        self.best_epoch_ = 0
+        self.rows_without_history_ = 0
+
+    # -- windowing ---------------------------------------------------------
+
+    def _windows(self, frame: FeatureFrame) -> tuple[Array, Array]:
+        """Flattened windows for every row, plus the mask of rows with full history."""
+        names = self.names or frame.names
+        matrix = np.nan_to_num(frame.matrix(names), nan=0.0)
+        n_rows, n_features = matrix.shape
+        windows = np.zeros((n_rows, self.lookback * n_features))
+        available = np.zeros(n_rows, dtype=bool)
+        for lag in range(self.lookback):
+            # lag 0 is "now", lag k is k rows ago; the block sits at the *front* of the
+            # window so the recent shape is at a stable offset for every row
+            offset = (self.lookback - 1 - lag) * n_features
+            if lag == 0:
+                windows[:, offset : offset + n_features] = matrix
+            else:
+                windows[lag:, offset : offset + n_features] = matrix[:-lag]
+        # a window is only usable when its oldest slot is real data, not zero padding
+        available[self.lookback - 1 :] = True
+        self.rows_without_history_ = int((~available).sum())
+        return windows, available
+
+    def _standardise(self, matrix: Array) -> Array:
+        if self.mean_ is None or self.scale_ is None:
+            return matrix
+        return (matrix - self.mean_) / self.scale_
+
+    # -- fitting -----------------------------------------------------------
+
+    def fit(self, frame: FeatureFrame, train: Array, target: Array) -> SequenceModel:
+        self.names = list(self.names or frame.names)
+        windows, available = self._windows(frame)
+        usable = available[train] & ~np.isnan(target[train])
+        rows = train[usable]
+        if rows.size < 60:
+            return self
+        x = windows[rows]
+        y = np.nan_to_num(target[rows])
+        cut = max(1, int(len(rows) * 0.8))
+        x_fit, y_fit = x[:cut], y[:cut]
+        x_val, y_val = x[cut:], y[cut:]
+        self.mean_ = x_fit.mean(axis=0)
+        self.scale_ = x_fit.std(axis=0)
+        self.scale_[self.scale_ <= EPS] = 1.0
+        x_fit = self._standardise(x_fit)
+        x_val = self._standardise(x_val)
+
+        rng = np.random.default_rng(self.seed)
+        w1 = rng.normal(0.0, 1.0 / np.sqrt(x_fit.shape[1]), (x_fit.shape[1], self.hidden))
+        b1 = np.zeros(self.hidden)
+        w2 = rng.normal(0.0, 1.0 / np.sqrt(self.hidden), self.hidden)
+        b2 = 0.0
+        # Adam state
+        moments = {name: np.zeros_like(value) for name, value in
+                   (("w1", w1), ("b1", b1), ("w2", w2))}
+        moments["b2"] = np.zeros(1)
+        second = {name: np.zeros_like(value) for name, value in moments.items()}
+        beta1, beta2 = 0.9, 0.999
+        best_loss = np.inf
+        best = (w1.copy(), b1.copy(), w2.copy(), b2)
+        stale = 0
+        for epoch in range(1, self.epochs + 1):
+            hidden_pre = x_fit @ w1 + b1
+            hidden = np.tanh(hidden_pre)
+            prediction = hidden @ w2 + b2
+            error = prediction - y_fit
+            scale = 1.0 / len(y_fit)
+            d_prediction = 2.0 * error * scale
+            grad_w2 = hidden.T @ d_prediction + self.l2 * w2
+            grad_b2 = float(np.sum(d_prediction))
+            d_hidden = np.outer(d_prediction, w2) * (1.0 - hidden**2)
+            grad_w1 = x_fit.T @ d_hidden + self.l2 * w1
+            grad_b1 = d_hidden.sum(axis=0)
+
+            grads = {"w1": grad_w1, "b1": grad_b1, "w2": grad_w2, "b2": np.array([grad_b2])}
+            params = {"w1": w1, "b1": b1, "w2": w2, "b2": np.array([b2])}
+            for name in grads:
+                moments[name] = beta1 * moments[name] + (1 - beta1) * grads[name]
+                second[name] = beta2 * second[name] + (1 - beta2) * grads[name] ** 2
+                m_hat = moments[name] / (1 - beta1**epoch)
+                v_hat = second[name] / (1 - beta2**epoch)
+                params[name] -= self.learning_rate * m_hat / (np.sqrt(v_hat) + 1e-8)
+            w1, b1, w2 = params["w1"], params["b1"], params["w2"]
+            b2 = float(params["b2"][0])
+
+            if len(x_val):
+                val = float(np.mean((np.tanh(x_val @ w1 + b1) @ w2 + b2 - y_val) ** 2))
+            else:
+                val = float(np.mean(error**2))
+            if val < best_loss - 1e-12:
+                best_loss = val
+                best = (w1.copy(), b1.copy(), w2.copy(), b2)
+                self.best_epoch_ = epoch
+                stale = 0
+            else:
+                stale += 1
+                if stale >= self.patience:
+                    break
+
+        self.w1_, self.b1_, self.w2_, self.b2_ = best
+        return self
+
+    def predict(self, frame: FeatureFrame, rows: Array | None = None) -> Array:
+        windows, available = self._windows(frame)
+        if rows is not None:
+            windows, available = windows[rows], available[rows]
+        if self.w1_ is None or self.w2_ is None:
+            return np.zeros(len(windows))
+        matrix = self._standardise(windows)
+        scores = np.tanh(matrix @ self.w1_ + self.b1_) @ self.w2_ + self.b2_
+        # a row without a full window has no evidence behind it: neutral, not guessed
+        scores = np.where(available, scores, 0.0)
+        return scores
+
+    def describe(self) -> dict[str, Any]:
+        parameters = 0
+        if self.w1_ is not None and self.b1_ is not None and self.w2_ is not None:
+            parameters = int(self.w1_.size + self.b1_.size + self.w2_.size + 1)
+        return {
+            "level": self.level,
+            "lookback": self.lookback,
+            "hidden": self.hidden,
+            "parameters": parameters,
+            "best_epoch": self.best_epoch_,
+            "features": len(self.names or []),
+            "rows_without_history": self.rows_without_history_,
+        }
+
+
 # ---------------------------------------------------------------------------
 # probability calibration
 # ---------------------------------------------------------------------------
@@ -523,8 +710,12 @@ def run_ladder(
     specs: Sequence[SignalSpec] | None = None,
     ridge_alpha: float = 10.0,
     boosting_estimators: int = 120,
+    sequence_lookback: int = 4,
+    sequence_hidden: int = 16,
+    sequence_epochs: int = 200,
+    include_sequence: bool = True,
 ) -> LadderResult:
-    """Walk the three rungs on the same purged folds and apply the promotion rule."""
+    """Walk every rung on the same purged folds and apply the promotion rule."""
     target = forward_returns(frame.close, horizon)
     usable = ~np.isnan(target)
     # keep the frame's row count; masks handle the edges
@@ -550,6 +741,18 @@ def run_ladder(
     )
 
     levels = [baseline, ridge, boosting]
+    if include_sequence:
+        levels.append(
+            _run_level(
+                "sequence",
+                lambda: SequenceModel(
+                    lookback=sequence_lookback,
+                    hidden=sequence_hidden,
+                    epochs=sequence_epochs,
+                ),
+                frame, folds, np.where(usable, target, np.nan), fee_per_side=fee_per_side,
+            )
+        )
     promoted = baseline.level
     notes = []
     for lower, higher in zip(levels, levels[1:], strict=False):

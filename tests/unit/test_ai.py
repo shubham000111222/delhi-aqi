@@ -358,13 +358,53 @@ class TestPromotion:
 class TestLadder:
     def test_the_ladder_runs_and_promotes_only_with_evidence(self, frame):
         result = run_ladder(frame, n_folds=3)
-        assert [level.level for level in result.levels] == ["baseline", "ridge", "boosting"]
-        assert result.promoted in {"baseline", "ridge", "boosting"}
+        assert [level.level for level in result.levels] == [
+            "baseline", "ridge", "boosting", "sequence"
+        ]
+        assert result.promoted in {"baseline", "ridge", "boosting", "sequence"}
         assert result.windows == 3
         if result.promoted != "baseline":
             # promotion must never happen without a profitable, consistent improvement
             best = next(level for level in result.levels if level.level == result.promoted)
             assert best.net_expectancy > 0
+
+    def test_the_sequence_rung_is_a_window_model_not_a_rerun_of_ridge(self, frame):
+        from tradebot.ai.ladder import SequenceModel
+
+        model = SequenceModel(lookback=5, hidden=8, epochs=40).fit(
+            frame, purged_folds(len(frame), n_folds=3, horizon=4)[0].train,
+            forward_returns(frame.close, 4),
+        )
+        description = model.describe()
+        assert description["lookback"] == 5
+        assert description["parameters"] > 0
+        assert description["features"] > 0
+
+    def test_a_row_without_enough_history_gets_a_neutral_score(self, frame):
+        from tradebot.ai.ladder import SequenceModel
+
+        model = SequenceModel(lookback=6, hidden=4, epochs=20, names=frame.names)
+        folds = purged_folds(len(frame), n_folds=3, horizon=4)
+        model.fit(frame, folds[0].train, forward_returns(frame.close, 4))
+        scores = model.predict(frame, np.array([0, 1, len(frame) - 1]))
+        assert scores[0] == 0.0 and scores[1] == 0.0, "no window, no opinion"
+        assert scores[2] != 0.0
+
+    def test_an_unfitted_sequence_model_scores_zero_everywhere(self, frame):
+        from tradebot.ai.ladder import SequenceModel
+
+        model = SequenceModel(names=frame.names)
+        assert np.all(model.predict(frame) == 0.0)
+
+    def test_the_sequence_rung_is_deterministic(self, frame):
+        from tradebot.ai.ladder import SequenceModel
+
+        folds = purged_folds(len(frame), n_folds=3, horizon=4)
+        target = forward_returns(frame.close, 4)
+        rows = folds[0].test
+        first = SequenceModel(lookback=3, hidden=8, epochs=30).fit(frame, folds[0].train, target)
+        second = SequenceModel(lookback=3, hidden=8, epochs=30).fit(frame, folds[0].train, target)
+        assert np.allclose(first.predict(frame, rows), second.predict(frame, rows))
 
     def test_a_verdict_always_says_something_about_profitability(self, frame):
         result = run_ladder(frame, n_folds=3)

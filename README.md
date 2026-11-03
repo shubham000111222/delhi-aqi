@@ -86,7 +86,7 @@ no API key is needed.
 | Multiple-testing log and deflated Sharpe (with skew/kurtosis correction) | done | `robustness.py`, `core/store.py` (`experiments`) |
 | MLflow export of the experiment log (file store, verified by MLflow itself) | done | `ai/tracking.py` |
 | Signal library: 44 signals in 8 families, IC screening, correlation pruning, leakage tests | done | `ai/features.py`, `ai/signals.py`, `ai/ladder.py` |
-| Complexity ladder (baseline → ridge → gradient boosting) with a promotion rule | done, and it **promotes nothing** on this data | `ai/ladder.py` |
+| Complexity ladder (baseline → ridge → boosting → sequence) with a promotion rule | done, and it **promotes nothing** on this data | `ai/ladder.py` |
 | Model registry + model cards; S4 wired to an approved card | done, **no model is registered** | `ai/registry.py`, `strategies/ml_signal.py` |
 | Slippage recorder, calibrated model, budget-capped live entries | done (median 0.0, p95 +26 bps measured) | `execution/slippage.py`, `engine.py` |
 | Historical backfill: paginated REST candles, de-duplicated, gap-checked, archived | done (offline exchange; live endpoint unreachable here) | `data/backfill.py` |
@@ -168,7 +168,7 @@ reported here because a failing strategy that is *proved* to fail is the deliver
 | Robustness (4 days, 2× costs rerun) | Nominal +1.02%, at 2× costs **+0.03%** → survives by a rounding error, and the command says "thin margin" rather than PASS. 82% of gross P&L went to fees |
 | Benchmark | Strategy beat buy-and-hold by 1.4 points over 4 days — on a sample far too small to mean anything |
 | Signal screen (44 signals, 1 day, horizon 30 bars) | A handful survive; the IC noise band at 46 non-overlapping samples is ±0.29, so most survivors are labelled **thin**, not proven |
-| Complexity ladder | Baseline (IC-weighted) is retained; **ridge and boosting are rejected** — they lose money net of 10 bps a side where the baseline does not |
+| Complexity ladder (4 rungs) | Baseline (IC-weighted) is retained; **ridge, boosting and the window model are all rejected** — none is profitable net of 10 bps a side, and the window model trades 2-3x as often as the others (BTC: baseline −1.6, ridge −3.2, boosting −1.9, sequence −3.1 bps a bar over 4-5x the turnover) |
 | Slippage (2 days) | median 0.0 bps, p95 **+26 bps**, worst +36 bps — the number the backtester had been silently assuming was zero |
 
 That is what "the AI layer" looks like when it is not allowed to lie: forty-four

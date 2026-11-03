@@ -526,6 +526,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="register a promoted ridge model as a card at this path (refused "
                           "unless the ladder promoted it)")
     sig.add_argument("--json", action="store_true")
+    sig.add_argument(
+        "--no-sequence", action="store_true",
+        help="skip rung 4 (the window model); it is the slowest rung to fit",
+    )
 
     rb = sub.add_parser("robustness", help="bootstrap, cost stress, benchmark and attribution")
     rb.add_argument("--days", type=int, default=10)
@@ -873,7 +877,9 @@ def cmd_signals(args: argparse.Namespace) -> int:
     per_symbol: dict[str, Any] = {}
     for symbol, frame in frames.items():
         result = screen(frame, primary_horizon=args.horizon, min_ic=args.min_ic)
-        ladder = run_ladder(frame, horizon=args.horizon, n_folds=args.folds)
+        ladder = run_ladder(
+            frame, horizon=args.horizon, n_folds=args.folds, include_sequence=not args.no_sequence
+        )
         per_symbol[symbol] = {
             "bars": len(frame),
             "features": len(frame.features),
