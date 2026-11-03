@@ -33,7 +33,7 @@ from decimal import Decimal
 from typing import Any
 
 from ..core.money import D
-from .metrics import TradeRecord, _daily_returns, deflated_sharpe
+from .metrics import TradeRecord, _daily_returns, deflated_sharpe, psr_probability, return_moments
 
 # ---------------------------------------------------------------------------
 # bootstrap
@@ -205,8 +205,18 @@ def expected_max_sharpe(trials: int) -> float:
     return math.sqrt(2.0 * math.log(trials))
 
 
-def multiple_testing_report(trials: Sequence[Trial], observations: int) -> dict[str, Any]:
-    """Deflate the best trial for the number of attempts that produced it."""
+def multiple_testing_report(
+    trials: Sequence[Trial],
+    observations: int,
+    *,
+    skew: float = 0.0,
+    kurtosis: float = 3.0,
+) -> dict[str, Any]:
+    """Deflate the best trial for the number of attempts that produced it.
+
+    ``skew``/``kurtosis`` come from the same return series as the Sharpe; passing them
+    applies the non-normality correction. With the defaults the correction is neutral.
+    """
     if not trials:
         return {
             "trials": 0,
@@ -217,7 +227,13 @@ def multiple_testing_report(trials: Sequence[Trial], observations: int) -> dict[
         }
     best = max(trials, key=lambda t: t.sharpe)
     luck = expected_max_sharpe(len(trials))
-    deflated = deflated_sharpe(best.sharpe, trials=len(trials), observations=max(observations, 1))
+    deflated = deflated_sharpe(
+        best.sharpe,
+        trials=len(trials),
+        observations=max(observations, 1),
+        skew=skew,
+        kurtosis=kurtosis,
+    )
     if best.sharpe <= 0:
         verdict = "no edge - the best trial lost money"
     elif best.sharpe <= luck:
@@ -234,6 +250,9 @@ def multiple_testing_report(trials: Sequence[Trial], observations: int) -> dict[
         "best": best.as_dict(),
         "expected_max_sharpe_by_luck": luck,
         "deflated_sharpe": deflated,
+        "probability": round(psr_probability(deflated), 4),
+        "skew": round(skew, 3),
+        "kurtosis": round(kurtosis, 3),
         "verdict": verdict,
     }
 
@@ -494,7 +513,10 @@ def robustness_report(
         out["benchmark_comparison"] = excess_over_benchmark(strategy_return_pct, bench["return_pct"])
     out["attribution"] = attribution(trades)
     if trials:
-        out["multiple_testing"] = multiple_testing_report(trials, observations=max(len(returns), 1))
+        skew, kurtosis = return_moments(returns)
+        out["multiple_testing"] = multiple_testing_report(
+            trials, observations=max(len(returns), 1), skew=skew, kurtosis=kurtosis
+        )
     out["verdict"] = _verdict(checks)
     return out
 

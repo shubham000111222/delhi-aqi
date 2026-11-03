@@ -89,7 +89,8 @@ execution:
   health_check_seconds: 5.0
   equity_snapshot_bars: 1
   order_status_poll_seconds: 5.0
-  auto_resume_min_healthy_seconds: 600   # L1 lifts only after 10 min of sustained health
+  auto_resume_min_healthy_seconds: 600  # L1 lifts only after 10 min of sustained health
+  max_slippage_bps: 25            # cap an entry at the size the model expects to fill inside 25 bps (0 = off)
 
 # --- circuit / watchdog ---
 watchdog:

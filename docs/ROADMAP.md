@@ -17,16 +17,16 @@ a capability that exists but has not cleared its gates is marked as such.
 | 4 / 18.1 Archive | partitioned Parquet candles and order books, DuckDB views, idempotent rewrites, retention job, `spread_stats()` from recorded books |
 | 5 Strategies | S1 EMA trend (ADX), S2 mean reversion (BB+RSI), S3 Donchian breakout, regime detector |
 | 6 Execution & paper exchange | idempotent ids, safe retries, rate limiter, book-walk fills, latency, rejects, injected failures |
-| 6 Slippage | per-fill measurement against the *decision* price, size-vs-depth buckets, calibrated model, budget-constrained sizing |
+| 6 Slippage | per-fill measurement against the *decision* price, size-vs-depth buckets, calibrated model, budget-constrained sizing, and a live entry cap at `execution.max_slippage_bps` once 30 fills have calibrated the model |
 | 7 Risk, kill switch, loss/profit handling | 16 checks, L0–L3, cooldowns, streaks, partials, trailing, locks, tax reserve |
 | 8 Backtesting (engine + metrics + gates) | same-engine replay, Sharpe/Sortino/Calmar/DD/PF/expectancy, Monte Carlo, acceptance gates, post-tax view |
 | 8 Walk-forward | rolling train/test windows with purged, embargoed folds; per-window and pooled OOS results |
 | 8 Sensitivity | parameter grids, plateau share, neighbour isolation, and a sign check so a wide plateau of losses is not "approved" |
 | 8 Robustness | block bootstrap of returns, trade-order bootstrap, **full rerun at 2× costs**, buy-and-hold benchmark, attribution by strategy/symbol/exit/hour, "does profit survive removing the best trade" |
-| 8 Multiple testing | every grid cell logged as an experiment; best Sharpe deflated by the number of attempts |
+| 8 Multiple testing | every grid cell logged as an experiment; best Sharpe deflated by the number of attempts, with the skew/kurtosis correction and a probability alongside the z-score |
 | 8 Parity | record the tape, replay it, diff decisions and fills (`MATCH`, 22/22 and 8/8) |
 | 10 Reporting | daily report (11 sections) → markdown/HTML/JSON/Telegram/trades CSV/tax CSV |
-| 11 Dashboard | live equity, positions, risk usage, signals with reasons, trades, event log, controls, PNG export |
+| 11 Dashboard | live equity, positions, risk usage, signals with reasons, trades, execution-cost panel (median/mean/p95 vs budget), event log, controls, PNG export |
 | 12 Reliability & security | crash recovery, reconciliation, structured logs with redaction, heartbeats, disk guards, scoped auto-resume |
 | 12 Inbound commands | Telegram router: chat-id whitelist, confirm step with TTL and single use, audit line per command, transport-agnostic |
 | 12 Telegram transport | `getUpdates` long polling with persisted offset, `sendMessage`, backoff on failure, injected HTTP client, started by `run` when a token and chat id exist, `tradebot telegram` readiness check |
@@ -48,7 +48,7 @@ a capability that exists but has not cleared its gates is marked as such.
 | Missing | Why it is not here | Next step |
 | --- | --- | --- |
 | **Any strategy that passes the gates** | The strategies are reference implementations, the data is synthetic, and costs eat an untuned 15-minute signal. Three independent validation methods agree | real recorded data first; then lower turnover or maker-only entries; rerun the whole suite |
-| **Sentiment overlay S5 (FinBERT)** | Needs a model download and a news feed, and is the easiest place to import prompt-injection or garbage data | offline FinBERT scoring job, headline source with dedupe, score as a size modifier only |
+| **A live news feed and FinBERT weights** | The lexicon scorer, the optional FinBERT scorer, the RSS parser, the dedupe/decay store and the reduce-only sizing overlay all exist and are tested (28 tests), but nothing here fetches headlines and the FinBERT weights were never downloaded | point `overlay_from_provider` at a real feed, score offline with FinBERT, and keep the multiplier capped at 1.0 |
 | **Neural / sequence models (ladder rung 4)** | The plan allows rung 4 only if it beats rung 3 net of costs; rung 3 has not earned promotion, so rung 4 has nothing to beat | not before rung 3 wins |
 | **Live exchange connectivity** | This sandbox has no exchange access; untestable code on money paths is a liability | run `ccxt_live` against testnet with keys, then a 2-week paper soak |
 | **A WebSocket session against a real exchange** | The feed, its decoders and its reconnect/gap-fill logic are written and tested, but this sandbox blocks the socket (it was tried: `ConnectionResetError`, three reconnects, no frames) | run `python -m tradebot stream --live` from a networked host and watch `describe()` |

@@ -123,6 +123,11 @@
   </section>
 
   <section class="card half">
+    <h2>Execution cost <span class="muted">(slippage vs decision price)</span></h2>
+    <div id="slippage"><p class="empty">no fills with a decision price yet</p></div>
+  </section>
+
+  <section class="card half">
     <h2>Event log</h2>
     <div class="feed" id="feed"></div>
   </section>
@@ -243,6 +248,24 @@ function renderSignals(rows) {
     </tr>`).join("");
 }
 
+function renderSlippage(slip) {
+  const box = el("slippage");
+  if (!box) return;
+  if (!slip || !slip.available) {
+    box.innerHTML = `<p class="empty">${(slip && slip.note) || "no fills with a decision price yet"}</p>`;
+    return;
+  }
+  const over = Number(slip.p95_bps) > Number(slip.budget_bps);
+  box.innerHTML =
+    `<div class="kv"><span>Fills measured</span><span>${slip.fills}</span></div>` +
+    `<div class="kv"><span>Median</span><span>${Number(slip.median_bps).toFixed(2)} bps</span></div>` +
+    `<div class="kv"><span>Mean</span><span>${Number(slip.mean_bps).toFixed(2)} bps</span></div>` +
+    `<div class="kv"><span>p95 ${over ? "⚠ over budget" : "(inside budget)"}</span>` +
+    `<span style="color:${over ? "var(--red)" : "inherit"}">${Number(slip.p95_bps).toFixed(2)} bps / ${Number(slip.budget_bps).toFixed(0)}</span></div>` +
+    `<div class="kv"><span>Worst</span><span>${Number(slip.worst_bps).toFixed(2)} bps</span></div>` +
+    `<div class="kv"><span>Size cap model</span><span>${slip.sizing_model ? slip.sizing_model.samples + " fills" : "not fitted yet"}</span></div>`;
+}
+
 function renderRisk(data) {
   const limits = data.limits, status = data.status, positions = data.positions || [];
   const equity = Number(data.equity) || 1;
@@ -313,6 +336,7 @@ async function tick() {
     renderTrades(data.trades);
     renderSignals(data.signals);
     renderRisk(data);
+    renderSlippage(data.slippage);
     renderFeed(data.events);
     const disabled = !data.controls_enabled;
     document.querySelectorAll("#controls button").forEach(b => { b.disabled = disabled; });

@@ -45,7 +45,7 @@ from .data.feed import BaseFeed, make_feed
 from .data.hub import MarketData
 from .execution.adapters.base import ExchangeAdapter
 from .execution.order_manager import OrderManager
-from .execution.slippage import SlippageRecorder
+from .execution.slippage import SlippageRecorder, size_for_budget
 from .portfolio.ledger import ClosedTrade, EntryPlan, Ledger
 from .reporting.daily import build_daily_report, tax_ledger_rows, write_reports
 from .risk.engine import RiskContext, RiskEngine
@@ -145,6 +145,9 @@ class Engine:
         #: A veto-only entry filter (a meta-label gate, for example). It may refuse a
         #: trade; it may never resize one - sizing belongs to the risk engine.
         self.entry_filter: Any = None
+        #: A calibrated `SlippageModel`. When set, entries are capped at the largest size
+        #: whose predicted slippage stays inside `execution.max_slippage_bps`.
+        self.slippage_model: Any = None
         self._squareoff_done_for: str | None = None
         # fills the venue has booked but this process has not applied yet
         self.unapplied_fills = 0
@@ -457,6 +460,11 @@ class Engine:
         qty = decision.qty
         if self.sentiment is not None:
             qty = self._apply_sentiment(signal, qty, rules)
+        qty = self._apply_slippage_budget(signal, qty, rules)
+        if qty <= 0:
+            self.stats.vetoes += 1
+            self.store.save_verdict(signal.id, self._veto("slippage_budget", "no size fills inside the budget"))
+            return
 
         plan = EntryPlan(
             symbol=signal.symbol,
@@ -468,6 +476,79 @@ class Engine:
         )
         await self.om.submit_entry(signal, qty, price=decision.entry_price, plan=plan)
         self.stats.orders += 1
+
+    def _maybe_calibrate_slippage(self, minimum_fills: int = 30) -> None:
+        """Learn the venue's slippage from our own fills, once there are enough of them.
+
+        Thirty fills is a low bar deliberately: the model's job here is only to refuse the
+        order that is far too big for the book, and its fallback for an unseen bucket is
+        the worst observed value. Until then no cap applies, and the fills are the
+        evidence that will justify one.
+        """
+        if self.slippage_model is not None or len(self.slippage.records) < minimum_fills:
+            return
+        try:
+            self.slippage_model = self.slippage.model()
+        except Exception as exc:  # noqa: BLE001 - calibration must never stop trading
+            self._log("slippage_model_failed", {"error": type(exc).__name__}, level="WARN", actor="execution")
+            return
+        self._log(
+            "slippage_model_fitted",
+            {
+                "fills": self.slippage_model.samples,
+                "symbols": len(self.slippage_model.buckets),
+                "fallback_bps": round(self.slippage_model.fallback_bps, 2),
+                "budget_bps": float(self.cfg.settings.execution.max_slippage_bps),
+            },
+            actor="execution",
+        )
+
+    def _apply_slippage_budget(self, signal: Signal, qty: Decimal, rules: Any) -> Decimal:
+        """Cap the size at what the calibrated slippage model says the book can absorb.
+
+        A 0.4 BTC order into a book with 0.1 BTC at the touch is not the same trade as a
+        0.01 BTC order, and the backtest's book walk is the only place that difference
+        currently appears. With a calibrated model the engine refuses the oversized
+        version up front instead of discovering it in the fills. No model, no cap: an
+        uncalibrated guess would just be a smaller order with no evidence behind it.
+        """
+        from .core.money import round_qty as _round_qty
+
+        budget = float(getattr(self.cfg.settings.execution, "max_slippage_bps", 0.0) or 0.0)
+        if self.slippage_model is None or budget <= 0:
+            return qty
+        book = self.market.book(signal.symbol)
+        if book is None:
+            return qty
+        try:
+            affordable = size_for_budget(
+                self.slippage_model, signal.symbol, book, signal.side, budget_bps=budget, max_qty=qty
+            )
+        except Exception as exc:  # noqa: BLE001 - a broken model must not stop trading
+            self._log(
+                "slippage_sizing_error",
+                {"symbol": signal.symbol, "error": type(exc).__name__},
+                level="WARN",
+                actor="execution",
+            )
+            return qty
+        capped = _round_qty(affordable, rules.lot_step)
+        if capped >= qty:
+            return qty
+        self._log(
+            "slippage_sizing",
+            {
+                "symbol": signal.symbol,
+                "from_qty": str(qty),
+                "to_qty": str(capped),
+                "budget_bps": budget,
+                "best_level_qty": str(book.bids[0].qty if signal.side is Side.BUY and book.bids else (
+                    book.asks[0].qty if book.asks else ZERO
+                )),
+            },
+            actor="execution",
+        )
+        return capped
 
     def _entry_allowed(self, signal: Signal, ctx: StrategyContext) -> bool:
         """Consult the veto-only filter. A failing filter lets the trade through.
@@ -584,6 +665,7 @@ class Engine:
         self.stats.fills += 1
         try:
             self.slippage.observe(fill, book=self.market.book(fill.symbol))
+            self._maybe_calibrate_slippage()
         except Exception as exc:  # noqa: BLE001 - measurement must never stop trading
             self._log("slippage_record_failed", {"error": str(exc)}, level="WARN", actor="execution")
         self.unapplied_fills = max(self.unapplied_fills - 1, 0)

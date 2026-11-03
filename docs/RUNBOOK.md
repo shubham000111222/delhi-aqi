@@ -107,6 +107,20 @@ A strategy is promotable only if **all** of the following hold:
 
 If any check fails, the honest action is to change the strategy, not the gate.
 
+## Execution cost and the size cap
+
+The dashboard's execution panel and `tradebot slippage` read the same recorder: every fill
+is measured against the price the decision was made at, bucketed by size-versus-depth.
+
+After 30 fills the engine fits a slippage model from its own fills and caps each entry at
+the largest size whose *predicted* p95 stays inside `execution.max_slippage_bps` (25 bps by
+default; `0` disables the cap). On the synthetic book this cap never binds - the orders are
+tiny next to the book - so a change in results after enabling it would mean something else
+changed.
+
+Read the p95, not the mean: a median of 0 bps with a long tail is a strategy that looks
+fine until it is not.
+
 ## Meta-label gate (optional)
 
 A meta-model decides *whether to take* a setup the strategies already produced. It cannot

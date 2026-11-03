@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -246,12 +247,24 @@ def monte_carlo_drawdown(
     }
 
 
-def deflated_sharpe(sharpe: float, trials: int, observations: int) -> float:
-    """Rough deflated Sharpe: penalise the best of many attempted variants.
+def deflated_sharpe(
+    sharpe: float,
+    trials: int,
+    observations: int,
+    *,
+    skew: float = 0.0,
+    kurtosis: float = 3.0,
+) -> float:
+    """Deflated Sharpe as a z-score: penalise the best of many attempted variants.
 
-    Uses the expected maximum of N standard normals (Bailey & Lopez de Prado) and a
-    normal CDF approximation. This is a screening tool, not a substitute for the
-    holdout: it only makes luck less convincing.
+    Bailey & López de Prado / Bailey et al. (2014). The benchmark is the Sharpe you would
+    expect to see *by luck* from ``trials`` attempts, and the divisor is the non-normality
+    correction ``sqrt(1 - skew*SR + ((kurtosis - 1)/4)*SR^2)``. Pass the skew and
+    (non-excess) kurtosis of the same returns and the correction is applied; with the
+    defaults (0 and 3) it reduces to the normal case.
+
+    This is a screening tool, not a substitute for the holdout: it only makes luck less
+    convincing. Use `psr_probability` when you want the probability rather than a z-score.
     """
     if observations <= 0 or trials <= 0:
         return 0.0
@@ -259,8 +272,30 @@ def deflated_sharpe(sharpe: float, trials: int, observations: int) -> float:
     gamma = 0.5772156649
     e_max = (1 - gamma) * _norm_ppf(1 - 1.0 / trials) + gamma * _norm_ppf(1 - 1.0 / (trials * math.e))
     sr = sharpe
-    denom = math.sqrt(max(1e-9, 1 - 0.0))  # skew/kurtosis correction omitted (flagged in docs)
-    return float((sr - e_max / math.sqrt(observations)) / denom)
+    benchmark = e_max / math.sqrt(observations)
+    denom = math.sqrt(max(1e-9, 1.0 - skew * sr + ((kurtosis - 1.0) / 4.0) * sr * sr))
+    return float((sr - benchmark) / denom)
+
+
+def return_moments(returns: Sequence[float]) -> tuple[float, float]:
+    """Skew and (non-excess) kurtosis of a return series; (0, 3) when there is too little data."""
+    values = [float(v) for v in returns]
+    n = len(values)
+    if n < 4:
+        return 0.0, 3.0
+    mean = sum(values) / n
+    var = sum((v - mean) ** 2 for v in values) / n
+    if var <= 0:
+        return 0.0, 3.0
+    sd = math.sqrt(var)
+    skew = sum(((v - mean) / sd) ** 3 for v in values) / n
+    kurt = sum(((v - mean) / sd) ** 4 for v in values) / n
+    return float(skew), float(kurt)
+
+
+def psr_probability(z: float) -> float:
+    """Turn a deflated-Sharpe z-score into a probability using the normal CDF."""
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 
 def _norm_ppf(p: float) -> float:
@@ -384,6 +419,8 @@ __all__ = [
     "compute_metrics",
     "monte_carlo_drawdown",
     "deflated_sharpe",
+    "psr_probability",
+    "return_moments",
     "acceptance_gates",
     "all_gates_passed",
     "format_gates",

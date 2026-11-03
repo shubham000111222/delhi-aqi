@@ -83,12 +83,12 @@ no API key is needed.
 | Parameter sensitivity grid with plateau / isolated-peak verdicts | done | `backtest/sensitivity.py` |
 | Backtest-vs-paper parity test on a recorded tape | done (`MATCH`, 22/22 decisions, 8/8 fills) | `backtest/parity.py`, `data/tape.py` |
 | Robustness suite: block bootstrap, full cost-stress rerun, buy-and-hold benchmark, attribution | done | `backtest/robustness.py` |
-| Multiple-testing log and deflated Sharpe | done | `robustness.py`, `core/store.py` (`experiments`) |
+| Multiple-testing log and deflated Sharpe (with skew/kurtosis correction) | done | `robustness.py`, `core/store.py` (`experiments`) |
 | MLflow export of the experiment log (file store, verified by MLflow itself) | done | `ai/tracking.py` |
 | Signal library: 44 signals in 8 families, IC screening, correlation pruning, leakage tests | done | `ai/features.py`, `ai/signals.py`, `ai/ladder.py` |
 | Complexity ladder (baseline → ridge → gradient boosting) with a promotion rule | done, and it **promotes nothing** on this data | `ai/ladder.py` |
 | Model registry + model cards; S4 wired to an approved card | done, **no model is registered** | `ai/registry.py`, `strategies/ml_signal.py` |
-| Slippage recorder and calibrated slippage model | done (median 0.0, p95 +26 bps measured) | `execution/slippage.py` |
+| Slippage recorder, calibrated model, budget-capped live entries | done (median 0.0, p95 +26 bps measured) | `execution/slippage.py`, `engine.py` |
 | Historical backfill: paginated REST candles, de-duplicated, gap-checked, archived | done (offline exchange; live endpoint unreachable here) | `data/backfill.py` |
 | WebSocket streaming feed: injected transport, Binance decoders, backoff, REST gap fill | done (`stream` replay verdict, live socket blocked here) | `data/stream.py` |
 | Meta-labelling: triple-barrier labels, logistic gate, promote/skip rule | done, and it **rejects every gate** on this data (|edge| ≈ 1–3 bps vs 20 bps costs) | `ai/meta.py` |

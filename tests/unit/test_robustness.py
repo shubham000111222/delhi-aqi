@@ -100,6 +100,47 @@ class TestCostStress:
         assert stressed_trade_pnls(trades, 1.0) == pytest.approx([10.0])
 
 
+class TestDeflatedSharpeCorrection:
+    """The Sharpe correction has to react to fat tails, not just to the trial count."""
+
+    def test_a_normal_series_leaves_the_score_alone(self):
+        from tradebot.backtest.metrics import deflated_sharpe
+
+        plain = deflated_sharpe(1.5, trials=10, observations=250)
+        normal = deflated_sharpe(1.5, trials=10, observations=250, skew=0.0, kurtosis=3.0)
+        assert plain == pytest.approx(normal, abs=1e-4)
+
+    def test_fat_tails_and_negative_skew_shrink_the_score(self):
+        from tradebot.backtest.metrics import deflated_sharpe
+
+        normal = deflated_sharpe(1.5, trials=10, observations=250)
+        fat = deflated_sharpe(1.5, trials=10, observations=250, skew=-1.2, kurtosis=9.0)
+        assert fat < normal, "a strategy with a crash-shaped tail must not look safer"
+
+    def test_moments_of_a_known_series(self):
+        from tradebot.backtest.metrics import return_moments
+
+        skew, kurt = return_moments([0.01, 0.01, 0.01, 0.01])
+        assert (skew, kurt) == (0.0, 3.0), "a flat series has no shape to measure"
+
+        skewed = [-0.05, 0.001, 0.001, 0.001, 0.001]
+        skew, kurt = return_moments(skewed)
+        assert skew < 0 and kurt > 3
+
+    def test_the_probability_matches_the_z_score(self):
+        from tradebot.backtest.metrics import psr_probability
+
+        assert psr_probability(0.0) == pytest.approx(0.5)
+        assert psr_probability(1.96) == pytest.approx(0.975, abs=1e-3)
+
+    def test_the_report_carries_skew_kurtosis_and_a_probability(self):
+        trials = [Trial(f"t{i}", sharpe=1.6) for i in range(5)]
+        report = multiple_testing_report(trials, observations=300, skew=-0.8, kurtosis=7.0)
+        assert report["skew"] == pytest.approx(-0.8)
+        assert report["kurtosis"] == pytest.approx(7.0)
+        assert 0.0 <= report["probability"] <= 1.0
+
+
 class TestMultipleTesting:
     def test_expected_max_sharpe_grows_with_trials(self):
         assert expected_max_sharpe(1) == 0.0

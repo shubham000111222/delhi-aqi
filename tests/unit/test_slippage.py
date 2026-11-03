@@ -197,3 +197,84 @@ class TestEngineIntegration:
         )
         assert summary["fills"] == 2
         assert "BTC/USDT" in model.buckets
+
+
+class TestEngineSizingCap:
+    """The engine caps entries at what the calibrated model says the book can absorb."""
+
+    def _engine(self):
+        import asyncio
+        from datetime import UTC, datetime
+
+        from tradebot.config import load_config
+        from tradebot.core.clock import SimClock
+        from tradebot.core.models import OrderType, Side, Signal
+        from tradebot.core.money import D
+        from tradebot.core.store import Store
+        from tradebot.engine import Engine
+
+        now = datetime(2024, 1, 1, tzinfo=UTC)
+        cfg = load_config()
+
+        async def build():
+            return await Engine.build(cfg, clock=SimClock(now), store=Store(":memory:"))
+
+        engine = asyncio.run(build())
+        signal = Signal(
+            id="sig1", strategy="S1_ema_trend", symbol="BTC/USDT", timeframe="1h", side=Side.BUY,
+            entry_type=OrderType.LIMIT, ts=now, stop=D("1900"), target=D("2200"), limit_price=D("2000"),
+        )
+        return engine, signal, D
+
+    def _model(self):
+        recorder = SlippageRecorder()
+        for _ in range(5):
+            recorder.observe(fill("100.1", "100.0", qty="1"), book=book(ask_depth="10"))
+            recorder.observe(fill("100.9", "100.0", qty="9"), book=book(ask_depth="10"))
+        return recorder.model()
+
+    def test_without_a_model_nothing_is_capped(self):
+        engine, signal, D = self._engine()
+        try:
+            rules = engine.adapter.get_market_rules("BTC/USDT")
+            assert engine._apply_slippage_budget(signal, D("5"), rules) == D("5")
+        finally:
+            engine.close()
+
+    def test_a_model_caps_the_size_to_the_affordable_bucket(self):
+        engine, signal, D = self._engine()
+        try:
+            engine.slippage_model = self._model()
+            engine.market.books["BTC/USDT"] = book(ask_depth="10")
+            rules = engine.adapter.get_market_rules("BTC/USDT")
+            capped = engine._apply_slippage_budget(signal, D("9"), rules)
+            assert capped == D("1")
+        finally:
+            engine.close()
+
+    def test_a_cap_never_grows_an_order(self):
+        engine, signal, D = self._engine()
+        try:
+            engine.slippage_model = self._model()
+            engine.market.books["BTC/USDT"] = book(ask_depth="10")
+            rules = engine.adapter.get_market_rules("BTC/USDT")
+            assert engine._apply_slippage_budget(signal, D("0.5"), rules) <= D("0.5")
+        finally:
+            engine.close()
+
+    def test_a_broken_model_does_not_block_the_order(self):
+        engine, signal, D = self._engine()
+        try:
+            class Broken:
+                buckets: dict = {}
+                samples = 0
+
+                def predict_bps(self, *args, **kwargs):
+                    raise RuntimeError("model on fire")
+
+            engine.slippage_model = Broken()
+            engine.market.books["BTC/USDT"] = book(ask_depth="10")
+            rules = engine.adapter.get_market_rules("BTC/USDT")
+            assert engine._apply_slippage_budget(signal, D("2"), rules) == D("2")
+        finally:
+            engine.close()

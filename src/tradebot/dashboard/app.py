@@ -254,10 +254,34 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
                         "max_open_positions": config.risk.max_open_positions,
                     },
                     "marks": {k: to_str(v) for k, v in marks.items()},
+                    "slippage": _slippage_view(engine),
                     "server_time": iso(datetime.now(UTC)),
                 }
             )
         )
+
+    def _slippage_view(engine: Any) -> dict[str, Any]:
+        """What execution actually cost, against the price the decision was made at.
+
+        The number that matters is p95, not the mean: a median of zero with a fat tail is
+        a strategy that looks fine until it does not.
+        """
+        if engine is None or not getattr(engine.slippage, "records", None):
+            return {"available": False, "note": "no fills with a decision price yet"}
+        summary = engine.slippage.summary()
+        model = getattr(engine, "slippage_model", None)
+        return {
+            "available": True,
+            "fills": summary["fills"],
+            "median_bps": summary["median_bps"],
+            "mean_bps": summary["mean_bps"],
+            "p95_bps": summary["p95_bps"],
+            "worst_bps": summary["worst_bps"],
+            "budget_bps": float(config.settings.execution.max_slippage_bps),
+            "sizing_model": None
+            if model is None
+            else {"samples": model.samples, "fallback_bps": round(model.fallback_bps, 2)},
+        }
 
     @app.get("/api/report/latest", response_class=PlainTextResponse)
     async def latest_report() -> str:

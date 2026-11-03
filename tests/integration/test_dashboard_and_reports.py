@@ -34,9 +34,12 @@ def test_dashboard_serves_page_and_snapshot(client):
     snapshot = client.get("/api/snapshot")
     assert snapshot.status_code == 200
     data = snapshot.json()
-    for key in ("status", "equity", "equity_curve", "positions", "signals", "events", "kill", "limits"):
+    for key in (
+        "status", "equity", "equity_curve", "positions", "signals", "events", "kill", "limits", "slippage"
+    ):
         assert key in data
     assert data["kill"]["level"] in ("L0", "L1", "L2", "L3")
+    assert "available" in data["slippage"], "the cost panel must say whether it has any fills"
 
 
 def test_dashboard_health_and_reports_listing(client):
