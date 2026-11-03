@@ -25,7 +25,7 @@ cost: 27.69 USDT of fees on a 1,000 USDT account over ten simulated days is 2.8%
 | Walk-forward, 3 out-of-sample windows | `walk-forward --train-days 3 --test-days 1 --windows 3 --seed 5` | Windows +0.43%, −2.04%, +0.21% → compound **−1.42%**, "inconsistent"; OOS PF 0.20, Sharpe −11.4, 19 trades → **NOT PROMOTABLE** |
 | Parameter sensitivity | `sensitivity --strategy S1_ema_trend --param ema_fast=12,20,30 --days 3` | Best cell +2.39%, neighbour median +2.35%, plateau share 1.0 → "broad plateau" — and then the multiple-testing line kills it: best Sharpe 0.02 is no better than the 1.48 expected from 3 attempts |
 | Parity against a recorded tape | `parity --minutes 1200` | **MATCH**: 22/22 decisions, 8/8 fills, 24,984 tape events |
-| Robustness | `robustness --days 4` | Nominal **−1.29%** (PF 0.79, 27 trades); at 2× costs **−2.25%** (PF 0.68, 26 trades). Cost stress **FAILS** |
+| Robustness | `robustness --days 4` | Nominal **−1.29%** (PF 0.79, 27 trades); at 2× costs **−2.25%** (PF 0.68, 26 trades). Cost stress **FAILS**; attribution: net −10.12 after 7.76 fees (77% of gross), buy-and-hold −0.36% |
 | Benchmark | inside `robustness` | Buy-and-hold −0.36% over the same bars; the strategy trailed it by **1.13 points** — fees and work for less return |
 | Signal screen | `signals --days 1` | 44 signals in 8 families; kept BTC 0/44, ETH 1/44, SOL 3/44, BNB 0/44, XRP 3/44. The rest are dropped as thin or unstable |
 | Complexity ladder, 4 rungs | inside `signals` | Baseline retained everywhere. Net expectancy per bar: BTC base −2.5 / ridge −2.3 / boost −0.6 / seq −7.2; SOL +5.6 / +0.2 / −2.7 / −5.4 — the window model is the worst of the four and trades 2–3× as often |

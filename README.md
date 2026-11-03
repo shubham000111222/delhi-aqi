@@ -167,7 +167,7 @@ numbers are from **2026-11-03, commit `8486021`**, on the seeded synthetic marke
 | Walk-forward (3 windows × 1 day, seed 5) | Windows +0.43%, −2.04%, +0.21% → compound **−1.42%**, "inconsistent"; OOS PF 0.20, Sharpe −11.4, 19 trades → **NOT PROMOTABLE** |
 | Parameter sensitivity (S1 × `ema_fast` 12/20/30, 3 days) | Best cell +2.39%, neighbour median +2.35%, plateau share 1.0 → "broad plateau" — then the deflation kills it: best Sharpe 0.02 against the 1.48 expected from 3 attempts |
 | Parity (recorded tape, 1 200 minutes) | **MATCH**: 22/22 decisions, 8/8 fills, 24 984 tape events |
-| Robustness (4 days, 2× costs rerun) | Nominal **−1.29%** (PF 0.79, 27 trades), at 2× costs −2.25% (PF 0.68) → cost stress **FAILS**, "the edge is the fee" |
+| Robustness (4 days, 2× costs rerun) | Nominal **−1.29%** (PF 0.79, 27 trades), at 2× costs −2.25% (PF 0.68) → cost stress **FAILS**, "the edge is the fee"; 77% of gross P&L went to fees, and it trailed buy-and-hold by 0.93 points |
 | Benchmark | Buy-and-hold −0.36% over the same bars; the strategy **trailed it by 1.13 points** |
 | Signal screen (44 signals, 1 day) | Kept BTC 0/44, ETH 1/44, SOL 3/44, BNB 0/44, XRP 3/44; the IC noise band at ~46 non-overlapping samples is ±0.29, so most survivors are "thin", not proven |
 | Complexity ladder (4 rungs) | Baseline retained everywhere; **ridge, boosting and the window model are all rejected** — and the window model is the worst (BTC: −2.5 / −2.3 / −0.6 / **−7.2** bps a bar at 2-3× the turnover) |
