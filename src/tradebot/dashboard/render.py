@@ -115,7 +115,9 @@ def render_png(snapshot: dict[str, Any], out_path: str | Path) -> Path:
     draw.rectangle([0, 0, width, 62], fill=(14, 19, 26))
     draw.line([0, 62, width, 62], fill=LINE)
     draw.text((24, 20), "tradebot", font=f_title, fill=TEXT)
-    draw.text((108, 25), "paper trading dashboard", font=f_body, fill=MUTED)
+    # below the wordmark, not beside it: "tradebot" at 20pt bold is wider than 84px and
+    # the subtitle used to overlap it
+    draw.text((130, 25), "paper trading dashboard", font=f_body, fill=MUTED)
 
     equity = float(snapshot.get("equity") or 0)
     day_pnl = float(snapshot.get("day_pnl") or 0)
@@ -166,7 +168,7 @@ def render_png(snapshot: dict[str, Any], out_path: str | Path) -> Path:
 
     # ---- equity curve -------------------------------------------------------
     curve_top = 178
-    card((24, curve_top, width - 24, curve_top + 300))
+    card((24, curve_top, width - 24, curve_top + 268))
     draw.text((44, curve_top + 18), "EQUITY CURVE", font=f_head, fill=TEXT)
     points = _curve_points(snapshot.get("equity_curve"))
     draw.text(
@@ -196,13 +198,41 @@ def render_png(snapshot: dict[str, Any], out_path: str | Path) -> Path:
             draw.line([(px0, yk), (px1, yk)], fill=(23, 31, 42), width=1)
         draw.polygon([*coords, (px1, py1), (px0, py1)], fill=(17, 46, 36))
         draw.line(coords, fill=GREEN, width=2)
-        draw.text((44, curve_top + 44), f"high {_money(hi)}", font=f_small, fill=MUTED)
-        draw.text((44, py1 + 6), f"low  {_money(lo)}", font=f_small, fill=MUTED)
+        draw.text((44, curve_top + 40), f"high {_money(hi)}", font=f_small, fill=MUTED)
+        draw.text((44, py1 - 14), f"low  {_money(lo)}", font=f_small, fill=MUTED)
     else:
         draw.text((44, curve_top + 70), "warming up", font=f_body, fill=MUTED)
 
+    # ---- execution cost -----------------------------------------------------
+    cost_top = 458
+    card((24, cost_top, width - 24, cost_top + 44))
+    draw.text((44, cost_top + 15), "EXECUTION COST", font=f_head, fill=TEXT)
+    draw.text((186, cost_top + 17), "slippage per fill vs the price the decision was made at",
+              font=f_small, fill=MUTED)
+    slip = snapshot.get("slippage") or {}
+    if not slip.get("available"):
+        draw.text((600, cost_top + 17), str(slip.get("note") or "no fills with a decision price yet"),
+                  font=f_small, fill=MUTED)
+    else:
+        budget = float(slip.get("budget_bps") or 0)
+        p95 = float(slip.get("p95_bps") or 0)
+        model = slip.get("sizing_model") or {}
+        cells = [
+            ("FILLS", str(slip.get("fills", 0)), TEXT),
+            ("MEDIAN", f"{float(slip.get('median_bps') or 0):+.2f} bps", TEXT),
+            ("MEAN", f"{float(slip.get('mean_bps') or 0):+.2f} bps", TEXT),
+            ("P95", f"{p95:+.2f} / {budget:.0f} bps", RED if p95 > budget else GREEN),
+            ("WORST", f"{float(slip.get('worst_bps') or 0):+.2f} bps", TEXT),
+            ("SIZE CAP", f"{model.get('samples')} fills fitted" if model else "not fitted", MUTED),
+        ]
+        x0 = 600
+        for label, value, colour in cells:
+            draw.text((x0, cost_top + 8), label, font=f_lbl, fill=MUTED)
+            draw.text((x0, cost_top + 24), value, font=f_small, fill=colour)
+            x0 += 150
+
     # ---- positions ----------------------------------------------------------
-    table_top = 496
+    table_top = 516
     card((24, table_top, 730, height - 24))
     draw.text((44, table_top + 16), "OPEN POSITIONS", font=f_head, fill=TEXT)
     for name, xcol in (
