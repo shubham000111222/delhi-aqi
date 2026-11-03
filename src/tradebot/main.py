@@ -846,6 +846,28 @@ def build_parser() -> argparse.ArgumentParser:
     bfl.add_argument("--seed", type=int, default=7)
     bfl.add_argument("--json", action="store_true")
 
+    bfh = sub.add_parser(
+        "backfill-history",
+        help="fill the archive month by month, resuming where the last run stopped",
+    )
+    bfh.add_argument("--months", type=int, default=6, help="how many months back from --to")
+    bfh.add_argument("--symbols", default=None, help="comma-separated; default: config symbols")
+    bfh.add_argument("--timeframe", default="1m")
+    bfh.add_argument("--from", dest="from_dt", default=None, help="ISO start (overrides --months)")
+    bfh.add_argument("--to", dest="to_dt", default=None, help="ISO end (default: now)")
+    bfh.add_argument("--source", choices=["ccxt", "demo"], default="ccxt")
+    bfh.add_argument("--page-limit", type=int, default=1000)
+    bfh.add_argument("--max-pages", type=int, default=1000)
+    bfh.add_argument("--root", default=None, help="archive directory")
+    bfh.add_argument(
+        "--state",
+        default=None,
+        help="resume file (default: <data_dir>/backfill-history.json)",
+    )
+    bfh.add_argument("--retry-incomplete", action="store_true", help="re-fetch chunks that were not complete")
+    bfh.add_argument("--seed", type=int, default=7, help="offline demo exchange only")
+    bfh.add_argument("--json", action="store_true")
+
     tlg = sub.add_parser("telegram", help="inbound Telegram command listener (bounded run)")
     tlg.add_argument("--polls", type=int, default=1, help="how many long polls to perform")
     tlg.add_argument("--poll-timeout", type=int, default=1, help="long-poll timeout in seconds")
@@ -1597,6 +1619,137 @@ def cmd_backfill(args: argparse.Namespace) -> int:
         elif not ok:
             print("  the real exchange refused or was unreachable; nothing was invented to fill the gap")
     return 0 if ok else 4
+
+
+def _month_chunks(start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+    """Split a window on UTC month boundaries, so each chunk is one resume unit."""
+    out: list[tuple[datetime, datetime]] = []
+    cursor = start
+    while cursor < end:
+        year, month = cursor.year, cursor.month
+        next_month = datetime(year + (month == 12), 1 if month == 12 else month + 1, 1, tzinfo=UTC)
+        stop = min(next_month, end)
+        out.append((cursor, stop))
+        cursor = stop
+    return out
+
+
+def cmd_backfill_history(args: argparse.Namespace) -> int:
+    """Record months of history in one go, and be honest about what did not land.
+
+    A six-month backfill is six chances to lose a page and one long wait to find out.
+    This splits the window on month boundaries, writes each chunk to the archive as it
+    arrives, and keeps a resume file so a failed night costs one chunk rather than all of
+    them. It never fills a hole with invented bars: an incomplete chunk stays incomplete
+    in the state file, is printed as such, and makes the command exit non-zero.
+    """
+    from .data.archive import Archive
+    from .data.backfill import Backfill, rest_fetcher, synthetic_fetcher
+
+    cfg = _config(args)
+    symbols = [s.strip() for s in (args.symbols or ",".join(cfg.symbol_names())).split(",") if s.strip()]
+    end = parse_iso(args.to_dt) if args.to_dt else utcnow()
+    start = (
+        parse_iso(args.from_dt)
+        if args.from_dt
+        else datetime(end.year - (end.month <= args.months), ((end.month - args.months - 1) % 12) + 1, 1, tzinfo=UTC)
+    )
+    if end <= start:
+        print("error: the window must end after it starts", file=sys.stderr)
+        return 2
+    root = args.root or cfg.settings.archive_dir or (cfg.settings.data_dir / "archive")
+    state_path = Path(args.state) if args.state else cfg.settings.data_dir / "backfill-history.json"
+    state: dict[str, Any] = {}
+    if state_path.exists():
+        with contextlib.suppress(json.JSONDecodeError, OSError):
+            state = json.loads(state_path.read_text() or "{}")
+    chunks = state.setdefault("chunks", {})
+    fetcher = (
+        synthetic_fetcher(seed=args.seed, page_size=args.page_limit)
+        if args.source == "demo"
+        else rest_fetcher(cfg)
+    )
+    backfill = Backfill(fetcher, page_limit=args.page_limit, max_pages=args.max_pages)
+    archive = Archive(str(root))
+    plan = _month_chunks(start, end)
+
+    async def _main() -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        try:
+            for chunk_start, chunk_end in plan:
+                for symbol in symbols:
+                    key = f"{symbol}|{args.timeframe}|{chunk_start.date()}|{chunk_end.date()}"
+                    done = chunks.get(key)
+                    if done and done.get("complete") and not args.retry_incomplete:
+                        rows.append({**done, "skipped": True})
+                        continue
+                    candles, report = await backfill.run(symbol, args.timeframe, chunk_start, chunk_end)
+                    entry = report.as_dict()
+                    entry["chunk"] = [chunk_start.isoformat(), chunk_end.isoformat()]
+                    entry["skipped"] = False
+                    if candles:
+                        entry["archived_files"] = [str(path) for path in archive.write_candles(candles)]
+                    chunks[key] = {k: v for k, v in entry.items() if k != "archived_files"}
+                    rows.append(entry)
+                    state["updated_at"] = utcnow().isoformat()
+                    state_path.parent.mkdir(parents=True, exist_ok=True)
+                    state_path.write_text(json.dumps(state, indent=2, default=str))
+        finally:
+            closer = getattr(fetcher, "aclose", None)
+            if closer is not None:
+                await closer()
+        return rows
+
+    rows = asyncio.run(_main())
+    bad = [row for row in rows if row.get("error") or not row.get("kept") or not row.get("complete")]
+    summary = {
+        "source": args.source,
+        "window": [start.isoformat(), end.isoformat()],
+        "symbols": symbols,
+        "chunks": [{"start": a.isoformat(), "end": b.isoformat()} for a, b in plan],
+        "archive_root": str(root),
+        "state_file": str(state_path),
+        "rows": rows,
+        "kept_total": sum(int(row.get("kept") or 0) for row in rows),
+        "gap_total": sum(len(row.get("gaps") or []) for row in rows),
+        "incomplete": [row["symbol"] for row in bad],
+        "complete": not bad,
+    }
+    if args.json:
+        _print(summary)
+        return 0 if not bad else 4
+
+    print(
+        f"history backfill: {len(plan)} chunk(s) x {len(symbols)} symbol(s), "
+        f"{start.date()} .. {end.date()} ({args.timeframe})"
+    )
+    if args.source == "demo":
+        print("  (demo: the pagination is real, the prices are not)")
+    for row in rows:
+        verdict = "skipped" if row.get("skipped") else (
+            "complete" if row.get("complete") else ("STUCK" if row.get("stuck") else "incomplete")
+        )
+        chunk = row.get("chunk") or ["?", "?"]
+        print(
+            f"  {str(chunk[0])[:10]}  {row['symbol']:10s} pages {row.get('pages', 0):4d}"
+            f"  kept {int(row.get('kept') or 0):6d}  expected {int(row.get('expected_bars') or 0):6d}"
+            f"  coverage {float(row.get('coverage') or 0) * 100:5.1f}%"
+            f"  gaps {len(row.get('gaps') or []):2d}  {verdict}"
+        )
+    stats = archive.coverage()["candles"]
+    print()
+    print(
+        f"archive: {stats['files']} file(s) | {len(stats['symbols'])} symbol(s) | "
+        f"{stats['days']} day(s) ({stats['first_day']} .. {stats['last_day']}) | "
+        f"{stats['bytes'] / 1024 / 1024:.1f} MiB"
+    )
+    print(f"resume file: {state_path} (rerun the same command to continue)")
+    if bad:
+        print(f"incomplete: {len(bad)} chunk(s) - rerun, or add --retry-incomplete")
+        return 4
+    print(f"all {len(plan) * len(symbols)} chunk(s) complete | {summary['kept_total']:,} bars | gaps {summary['gap_total']}")
+    return 0
+
 
 
 def cmd_learn(args: argparse.Namespace) -> int:
@@ -2437,6 +2590,7 @@ def main(argv: list[str] | None = None) -> int:
         "stream": cmd_stream,
         "telegram": cmd_telegram,
         "backfill": cmd_backfill,
+        "backfill-history": cmd_backfill_history,
         "experiments": cmd_experiments,
         "news": cmd_news,
         "research": cmd_research,
