@@ -20,6 +20,12 @@ days old** (`tradebot live-check` regenerates it).
 - [ ] Signal screen: any model used reports its IC noise band, and no signal is treated as proven when its IC sits below that band
 - [ ] Leakage checks pass: shuffled labels collapse, far-shift IC is inside the noise band, and no single feature carries > 40% of the model's weight
 - [ ] Slippage model calibrated on real recorded books, and its calibration is not optimistic for more than 60% of fills
+- [ ] The live entry cap (`execution.max_slippage_bps`) is fitted on real fills, not synthetic ones, and the
+      dashboard's execution panel shows p95 inside the budget
+- [ ] The research loop's recommendation (if any) has been re-tested by walk-forward and robustness -
+      a search result is a hypothesis, never a promotion
+- [ ] Sentiment, if enabled, is fed by a feed you trust, and its size multiplier has never exceeded 1.0 in
+      a day's event log (`event = sentiment_sizing`)
 
 ## Paper soak
 
