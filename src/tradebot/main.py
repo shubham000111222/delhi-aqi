@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config, Mode, load_config
-from .core.clock import Clock, SimClock, parse_iso, utcnow
+from .core.clock import Clock, SimClock, iso, parse_iso, utcnow
 from .core.logging import get_logger, setup_logging
 from .core.models import KillLevel
 from .core.money import D, to_str
@@ -38,6 +38,47 @@ log = get_logger("tradebot.main")
 # ----------------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------------
+#: Where a synthetic backtest starts. Fixed so results are reproducible across machines.
+SIM_ORIGIN = datetime(2024, 1, 1, tzinfo=UTC)
+_ARCHIVE_BOUNDS: dict[str, tuple[datetime, datetime]] = {}
+
+
+def _archive_bounds(cfg: Config) -> tuple[datetime, datetime] | None:
+    """First and last archived bar, or None when this run is not replaying the archive."""
+    if cfg.settings.feed.value != "archive":
+        return None
+    key = str(cfg.settings.archive_dir or "")
+    cached = _ARCHIVE_BOUNDS.get(key)
+    if cached is not None:
+        return cached
+    from .data.archive import read_candles
+
+    bars = read_candles(cfg)  # cached by the loader: one read per process
+    first = min(candle.ts for candles in bars.values() for candle in candles)
+    last = max(candle.ts for candles in bars.values() for candle in candles)
+    _ARCHIVE_BOUNDS[key] = (first, last)
+    return (first, last)
+
+
+def _sim_start(cfg: Config) -> datetime:
+    """A replay starts where its data starts; everything else starts at the fixed origin."""
+    bounds = _archive_bounds(cfg)
+    return bounds[0] if bounds else SIM_ORIGIN
+
+
+def _sim_end(cfg: Config, start: datetime, days: float) -> datetime:
+    """The end of a simulated run: the requested window, clipped to the data that exists.
+
+    Without the clip an archived run stops in the 2024 origin and finishes with zero trades,
+    which is exactly the silent wrong answer this helper exists to prevent.
+    """
+    requested = start + timedelta(days=days)
+    bounds = _archive_bounds(cfg)
+    if bounds is None:
+        return requested
+    return min(requested, bounds[1] + timedelta(minutes=1))
+
+
 def _config(args: argparse.Namespace) -> Config:
     overrides: dict[str, object] = {}
     risk_overrides: dict[str, object] = {}
@@ -45,6 +86,8 @@ def _config(args: argparse.Namespace) -> Config:
         overrides["mode"] = args.mode
     if getattr(args, "feed", None):
         overrides["feed"] = args.feed
+    if getattr(args, "archive_root", None):
+        overrides["archive_dir"] = args.archive_root
     if getattr(args, "speed", None):
         overrides["synthetic"] = {"speed": args.speed}
         # Order-rate limits are wall-clock on purpose. A synthetic feed running faster
@@ -137,7 +180,7 @@ async def _run_backtest(
 ) -> dict:
     from .engine import Engine
 
-    start = datetime(2024, 1, 1, tzinfo=UTC)
+    start = _sim_start(cfg)
     clock = SimClock(start)
     store = Store(persist) if persist else Store(":memory:")
     engine = await Engine.build(cfg, clock=clock, store=store)
@@ -148,13 +191,18 @@ async def _run_backtest(
         store.kv_set("day_start_equity", to_str(capital))
         store.kv_set("week_start_equity", to_str(capital))
         store.kv_set("peak_equity", to_str(capital))
-    if seed is not None:
-        engine.feed.rng.seed(seed)  # type: ignore[attr-defined]
-    await engine.run(stop_at=start + timedelta(days=days))
+    if seed is not None and hasattr(engine.feed, "rng"):
+        engine.feed.rng.seed(seed)  # a replay has no rng: its prices are already fixed
+    await engine.run(stop_at=_sim_end(cfg, start, days))
     marks = engine.marks
-    result = {
-        "mode": "backtest(synthetic)",
+    feed_info: dict[str, Any] = engine.feed.describe() if hasattr(engine.feed, "describe") else {}
+    result: dict[str, Any] = {
+        "mode": f"backtest({cfg.settings.feed.value})",
+        "feed": cfg.settings.feed.value,
+        "feed_detail": feed_info,
         "days": days,
+        "sim_start": iso(start),
+        "sim_end": iso(_sim_end(cfg, start, days)),
         "start_equity": to_str(engine.starting_capital, 2),
         "end_equity": to_str(engine.ledger.equity(marks), 2),
         "realized": to_str(engine.ledger.realized_pnl, 2),
@@ -202,6 +250,11 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         print(f"closed trades: {result['closed_trades']} | win rate {result['win_rate']} | "
               f"fees {result['fees']} | end equity {result['end_equity']}")
         print("reports:", ", ".join(result["report_paths"].values()))
+        if result.get("feed") == "archive":
+            print(
+                "data: recorded prices from the archive; depth is modelled from each bar's "
+                "close, so slippage here is an assumption - calibrate it against a live run"
+            )
     if result.get("gates"):
         from .backtest.metrics import format_gates
 
@@ -577,7 +630,13 @@ def _add_shared(parser: argparse.ArgumentParser) -> None:
     """The same flags are accepted before or after the sub-command."""
     parser.add_argument("--config-dir", default=argparse.SUPPRESS, help="config directory (default: config)")
     parser.add_argument("--mode", choices=[m.value for m in Mode], default=argparse.SUPPRESS)
-    parser.add_argument("--feed", choices=["synthetic", "ccxt", "stream"], default=argparse.SUPPRESS)
+    parser.add_argument(
+        "--feed", choices=["synthetic", "ccxt", "stream", "archive"], default=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--archive-root", default=argparse.SUPPRESS, metavar="PATH",
+        help="archive directory for `--feed archive` (default: <data_dir>/archive)",
+    )
     parser.add_argument(
         "--speed", type=float, default=argparse.SUPPRESS,
         help="synthetic feed speed (simulated seconds per real second)",
@@ -825,11 +884,11 @@ def cmd_walk_forward(args: argparse.Namespace) -> int:
     from .backtest.walkforward import format_walk_forward, rolling_windows, run_walk_forward
 
     cfg = _config(args)
-    start = datetime(2024, 1, 1, tzinfo=UTC)
+    start = _sim_start(cfg)
     total = args.train_days + args.test_days * max(1, args.windows)
     windows = rolling_windows(
         start,
-        start + timedelta(days=total),
+        _sim_end(cfg, start, total),
         train_days=args.train_days,
         test_days=args.test_days,
     )[: max(1, args.windows)]
@@ -868,14 +927,14 @@ def cmd_sensitivity(args: argparse.Namespace) -> int:
     if not axes:
         print("no parameters to sweep", file=sys.stderr)
         return 2
-    start = datetime(2024, 1, 1, tzinfo=UTC)
+    start = _sim_start(cfg)
     report = asyncio.run(
         run_grid(
             cfg,
             strategy=args.strategy,
             axes=axes,
             start=start,
-            end=start + timedelta(days=args.days),
+            end=_sim_end(cfg, start, args.days),
             seed=args.seed,
             metric=args.metric,
         )
@@ -964,13 +1023,13 @@ async def _run_robustness(cfg: Config, days: int, seed: int | None, multiplier: 
     from .engine import Engine
 
     async def _session(this_cfg: Config) -> tuple[Any, Any, Any]:
-        start = datetime(2024, 1, 1, tzinfo=UTC)
+        start = _sim_start(this_cfg)
         clock = SimClock(start)
         store = Store(":memory:")
         engine = await Engine.build(this_cfg, clock=clock, store=store)
-        if seed is not None:
-            engine.feed.rng.seed(seed)  # type: ignore[attr-defined]
-        await engine.run(stop_at=start + timedelta(days=days))
+        if seed is not None and hasattr(engine.feed, "rng"):
+            engine.feed.rng.seed(seed)
+        await engine.run(stop_at=_sim_end(this_cfg, start, days))
         # not closed here: evaluate() reads the store, and closing it first is how this
         # command failed the first time ("Cannot operate on a closed database")
         return store, engine, start
@@ -1187,13 +1246,13 @@ async def _run_slippage(cfg: Config, days: int, seed: int | None) -> dict[str, A
     from .core.store import Store
     from .engine import Engine
 
-    start = datetime(2024, 1, 1, tzinfo=UTC)
+    start = _sim_start(cfg)
     clock = SimClock(start)
     store = Store(":memory:")
     engine = await Engine.build(cfg, clock=clock, store=store)
-    if seed is not None:
-        engine.feed.rng.seed(seed)  # type: ignore[attr-defined]
-    await engine.run(stop_at=start + timedelta(days=days))
+    if seed is not None and hasattr(engine.feed, "rng"):
+        engine.feed.rng.seed(seed)  # a replay has no rng: its prices are already fixed
+    await engine.run(stop_at=_sim_end(cfg, start, days))
     recorder = engine.slippage
     summary = recorder.summary()
     model = recorder.model()
@@ -1499,7 +1558,8 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     start = parse_iso(args.from_dt) if args.from_dt else (end - timedelta(days=max(1, args.days)))
     fetcher = synthetic_fetcher(seed=args.seed, page_size=args.page_limit) if args.source == "demo" else rest_fetcher(cfg)
     backfill = Backfill(fetcher, page_limit=args.page_limit, max_pages=args.max_pages)
-    archive = Archive(args.root or (cfg.settings.data_dir / "archive")) if args.write else None
+    root = args.root or cfg.settings.archive_dir or (cfg.settings.data_dir / "archive")
+    archive = Archive(str(root)) if args.write else None
 
     async def _main() -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -1791,8 +1851,8 @@ def cmd_research(args: argparse.Namespace) -> int:
         print(f"{strategy} has no numeric parameters to search", file=sys.stderr)
         return 2
 
-    start = datetime(2024, 1, 1, tzinfo=UTC)
-    end = start + timedelta(days=args.days)
+    start = _sim_start(cfg)
+    end = _sim_end(cfg, start, args.days)
     report = asyncio.run(
         search(
             cfg,

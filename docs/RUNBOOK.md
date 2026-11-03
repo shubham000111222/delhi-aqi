@@ -264,6 +264,37 @@ bars: a backfill with holes is a backfill with holes.
 The current bar is always dropped. A bar that has not closed yet is a future leak, and the
 archive is the one place that must never contain one.
 
+### Replaying what was recorded
+
+Once the archive has bars, every research command can run on them instead of on the
+seeded simulation. Add `--feed archive` (and `--archive-root PATH` if the archive is not
+under `data/archive`):
+
+```powershell
+python -m tradebot backtest     --feed archive --days 30
+python -m tradebot walk-forward --feed archive --train-days 10 --test-days 5 --windows 4
+python -m tradebot robustness   --feed archive --days 30 --cost-multiplier 2
+python -m tradebot sensitivity  --feed archive --strategy S3_breakout --param lookback=10,20,30 --days 20
+python -m tradebot signals      --feed archive --days 30 --horizon 4
+```
+
+What to expect, and what the output means:
+
+- The window is the data's, not the calendar's. A replay starts on the archive's first bar
+  and stops on its last; asking for 30 days from a 3-day archive runs 3 days. The run
+  prints `sim_start`/`sim_end` in `--json`.
+- Depth is **modelled**. The archive stores candles only, so a top-of-book is built around
+  each bar close with the same half-spread the paper feed uses. Limit orders can fill, but
+  the spread is an assumption - the backtest prints that line under `reports:` and
+  `describe()` reports `depth: modelled from bar close`. Measure the real spread with
+  `tradebot slippage --days N` after a live paper session and compare.
+- A 1m archive replayed through 15m strategies still needs ≥ 200 closed trades before the
+  gates say anything. Thirty days of 1m bars is 43,200 bars per symbol and produced
+  single-digit trade counts on the demo tape: expect the trade-count gate to fail until
+  the archive is months deep, and read that as "not enough data yet", not as a verdict.
+- `--feed ccxt` or `--feed stream` together with the simulated clock is refused. That
+  combination opened a real exchange socket inside a backtest.
+
 ## Streaming feed
 
 `--feed stream` runs the bot off a WebSocket instead of REST polling. Two commands matter:

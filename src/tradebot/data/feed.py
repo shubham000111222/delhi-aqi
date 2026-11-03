@@ -29,7 +29,7 @@ from decimal import Decimal
 from typing import Any
 
 from ..config import Config
-from ..core.clock import Clock, floor_ts, parse_iso, timeframe_seconds, utc
+from ..core.clock import Clock, SimClock, floor_ts, parse_iso, timeframe_seconds, utc
 from ..core.logging import get_logger
 from ..core.models import BookLevel, Candle, MarketRules, OrderBook, Side, Trade
 from ..core.money import D, round_price, round_qty
@@ -320,8 +320,12 @@ class SyntheticFeed(BaseFeed):
 class ReplayFeed(BaseFeed):
     """Replays recorded candles through the same code path, as fast as possible.
 
-    Only ``bar`` events are emitted: a candle carries its own OHLCV, so a strategy
-    that needs ticks is telling you it is not replayable.
+    ``bar`` events are always emitted from the tape. A book is *modelled* from each
+    bar's close when ``books=True`` (the default): an archive holds candles, not the
+    tape, so a limit order would otherwise never see a counterparty and a replay would
+    finish with zero fills and look like a broken strategy. The modelled book is the same
+    thin top-of-depth the paper feed uses, so the spread in a replay is an assumption,
+    not a measurement - ``describe()`` says so, and the backtest prints it.
     """
 
     name = "replay"
@@ -333,11 +337,51 @@ class ReplayFeed(BaseFeed):
         clock: Clock | None = None,
         *,
         pace: float = 0.0,
+        books: bool = True,
     ) -> None:
         super().__init__(config, clock)
         self.bars = {symbol: list(candles) for symbol, candles in bars.items()}
         self.pace = pace
+        self.books = books
+        self.book_levels = max(2, min(int(config.settings.paper.book_levels), 20))
         self.emitted = 0
+        self.books_emitted = 0
+
+    def describe(self) -> dict[str, Any]:
+        info = super().describe()
+        info["prices"] = "recorded"
+        info["depth"] = "modelled from bar close" if self.books else "absent"
+        return info
+
+    def _book(self, bar: Candle) -> OrderBook:
+        """A deterministic top-of-book around the bar close, sized like the paper feed."""
+        rules = self._rules[bar.symbol]
+        mid = float(bar.close)
+        tick = float(rules.tick_size)
+        half_spread = max(mid * 0.00015, tick)
+        depth_usdt = float(self.cfg.settings.paper.book_depth_usdt)
+        per_level = max(depth_usdt / self.book_levels, 1.0)
+        size = round_qty(D(repr(per_level / max(mid, 1e-9))), rules.lot_step)
+        bids: list[BookLevel] = []
+        asks: list[BookLevel] = []
+        for level in range(1, self.book_levels + 1):
+            step = half_spread + (level - 1) * max(half_spread, mid * 0.00008)
+            bid_px = mid - step
+            if bid_px <= 0:
+                break
+            bids.append(
+                BookLevel(
+                    price=round_price(D(repr(bid_px)), rules.tick_size, "buy"),
+                    qty=size,
+                )
+            )
+            asks.append(
+                BookLevel(
+                    price=round_price(D(repr(mid + step)), rules.tick_size, "sell"),
+                    qty=size,
+                )
+            )
+        return OrderBook(symbol=bar.symbol, ts=utc(bar.ts), bids=tuple(bids), asks=tuple(asks))
 
     def _ordered(self) -> Iterable[Candle]:
         order = {symbol: index for index, symbol in enumerate(self.bars)}
@@ -356,6 +400,9 @@ class ReplayFeed(BaseFeed):
                     gap = (utc(bar.ts) - previous).total_seconds() / self.pace
                     if gap > 0:
                         await asyncio.sleep(min(gap, 30.0))
+                if self.books:
+                    await emit("book", self._book(bar))
+                    self.books_emitted += 1
                 await emit("bar", bar)
                 self.emitted += 1
                 previous = utc(bar.ts)
@@ -584,8 +631,21 @@ def _precision_to_step(precision: Any, default: Decimal) -> Decimal:
 
 
 def make_feed(config: Config, clock: Clock | None = None) -> BaseFeed:
-    """Build the feed the configuration asks for."""
+    """Build the feed the configuration asks for.
+
+    A simulated clock may never drive a live feed. `backtest --feed ccxt` used to build a
+    real exchange session against a fake clock, which is not a backtest, a paper run, or
+    anything else worth having - it is a footgun that silently opened sockets. The guard
+    is here rather than in each command because this is the one place that knows both the
+    clock and the intent.
+    """
     kind = config.settings.feed.value
+    if kind in ("ccxt", "stream") and isinstance(clock, SimClock):
+        raise ValueError(
+            f"a simulated clock cannot drive the {kind} feed: that would open a live "
+            "exchange session during a backtest. Use --feed archive for recorded candles, "
+            "or --feed synthetic."
+        )
     if kind == "ccxt":
         return CcxtFeed(config, clock)
     if kind == "stream":
@@ -593,6 +653,11 @@ def make_feed(config: Config, clock: Clock | None = None) -> BaseFeed:
         from .stream import live_feed
 
         return live_feed(config, clock)
+    if kind == "archive":
+        from .archive import read_candles
+
+        bars: dict[str, Sequence[Candle]] = dict(read_candles(config))
+        return ReplayFeed(config, bars, clock)
     return SyntheticFeed(config, clock)
 
 

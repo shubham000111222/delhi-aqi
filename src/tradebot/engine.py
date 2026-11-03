@@ -55,6 +55,12 @@ from .strategies.base import Strategy, StrategyContext
 from .strategies.regime import atr_value, detect_regime
 
 log = get_logger(__name__)
+def _finite_decimal(value: Any) -> bool:
+    """True when a Decimal (or something Decimal can take) is a real, finite number."""
+    try:
+        return D(value).is_finite()
+    except (ArithmeticError, TypeError, ValueError):
+        return False
 
 
 @dataclass
@@ -409,6 +415,8 @@ class Engine:
             # like the session it describes and a replay reproduces it exactly.
             if signal.ts is None or utc(signal.ts) > self.clock.now():
                 signal = replace(signal, ts=bar.close_time)
+            if not self._signal_is_sane(signal):
+                continue
             self.store.save_signal(signal)
             self._log(
                 "signal",
@@ -417,6 +425,30 @@ class Engine:
                 ts=self.clock.now(),
             )
             await self._try_enter(signal, ctx)
+
+    def _signal_is_sane(self, signal: Signal) -> bool:
+        """Refuse a signal whose prices are not usable numbers.
+
+        A NaN or infinite stop reaches `save_signal` as a `decimal.InvalidOperation` and
+        takes the whole session down - which is not a data problem the operator can see,
+        it is a crash. A quarantined signal with a logged reason is the honest version.
+        """
+        for field_name in ("stop", "target"):
+            value = getattr(signal, field_name, None)
+            if value is None or not _finite_decimal(value) or value <= 0:
+                self._log(
+                    "signal_rejected",
+                    {
+                        "strategy": signal.strategy,
+                        "symbol": signal.symbol,
+                        "field": field_name,
+                        "value": str(value),
+                    },
+                    level="WARN",
+                    actor="strategy",
+                )
+                return False
+        return True
 
     # ------------------------------------------------------------------
     # entry path

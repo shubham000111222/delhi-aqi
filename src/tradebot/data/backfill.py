@@ -248,9 +248,16 @@ def synthetic_fetcher(
     import math
     import random
 
+    #: One slow cycle, so a demo backfill run in 2031 looks like one run in 2024. Using
+    #: the absolute epoch minute instead put prices at exp(598) ~ 1e259 for any modern
+    #: date - the pagination was still honest, but the prices were unusable.
+    CYCLE = 43_200  # 30 days of 1m bars
+
     def price_at(index: int) -> float:
-        rng = random.Random(seed * 1_000_003 + index // 13)
-        return 100.0 * math.exp(0.00002 * index + 0.004 * rng.gauss(0.0, 1.0))
+        phase = 2 * math.pi * (index % CYCLE) / CYCLE
+        rng = random.Random(seed * 1_000_003 + (index % CYCLE) // 13)
+        drift = 0.15 * math.sin(phase)  # continuous across the wrap, unlike `index * k`
+        return 100.0 * math.exp(drift + 0.004 * rng.gauss(0.0, 1.0))
 
     async def fetch(
         symbol: str, timeframe: str, since: datetime, until: datetime, limit: int
