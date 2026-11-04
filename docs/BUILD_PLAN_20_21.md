@@ -57,7 +57,7 @@ report. A state change writes a `health_change` event - the audit trail §20.4 a
 | Model failure/drift → roll back, then rules, then flat | 🟡 `MlSignal` returns nothing without an approved card (fails closed); no registry rollback |
 | Feature NaN spike → quarantine the signal | 🟡 NaN stops are rejected at the signal boundary; per-feature quarantine is not built |
 | Strategy decay → auto-disable + candidate for review | ⬜ (needs §21.4 lifecycle) |
-| Alert/report delivery failure → retry queue, alternate channel, disk always | 🟡 reports always written to disk; no retry queue or second channel |
+| Alert/report delivery failure → retry queue, alternate channel, disk always | ✅ C: `alerts/router.py`. The file floor is written *before* any network call; Telegram and an independent webhook are both attempted; an alert no remote channel took is queued to JSONL and retried by `flush()` (a minute apart, ceiling on attempts and age). `tradebot alerts --test` proves the path end to end |
 | Invalid config on reload → keep last known good | ⬜ |
 | Failed deployment → roll back if health checks fail in 5 min | 🔒 Docker/compose concern, needs a deployment to test |
 | Exchange outage → pause, poll status, resume after health + reconciliation | 🟡 stale-feed L1 + auto-resume after sustained health; no status-page poll |
@@ -67,7 +67,7 @@ report. A state change writes a `health_change` event - the audit trail §20.4 a
 | Rule | Today |
 | --- | --- |
 | Ladder: retry → restart → fallback → degraded → L1 → L2 → L3 | ✅ L0–L3 with triggers, incidents and auto-resume for infrastructure causes |
-| Restart limits: 3 per component per hour | ✅ `RestartBudget`, enforced for strategies (PR A) |
+| Restart limits: 3 per component per hour | ✅ `RestartBudget` for strategies (PR A) and for process restarts (C); the supervisor refuses the fourth and escalates rather than retrying |
 | Every heal action is verified, unverified counts as failure | ✅ B: `Playbook` runs detect → act → verify; a false verify writes `heal_failed` and counts toward escalation |
 | Escalation is once per burst, never per attempt | ✅ B: 3 failures inside 10 min escalate once, then the window clears |
 | Bounded retries: cooldown per row | ✅ B: 30 s-30 min per row, so a broken repair cannot become a busy loop |
@@ -75,17 +75,17 @@ report. A state change writes a `health_change` event - the audit trail §20.4 a
 | Flapping detector: >5 state changes in 10 min holds at L1 | ✅ detected and reported by `HealthModel.flapping`; **not yet wired to force L1** |
 | Post-heal checklist before returning to L0 | 🟡 auto-resume requires reconciliation `ok` + 10 min sustained health; the full checklist is not a gate |
 | Auto-resume only from L1, infrastructure causes only | ✅ (`AUTO_RESUME_TRIGGERS`) |
-| Audit: every heal action logged | ✅ `health_change`, `strategy_paused`, `strategy_disabled`, `kill_switch`, incidents |
+| Audit: every heal action logged | ✅ `health_change`, `strategy_paused`, `strategy_disabled`, `kill_switch`, incidents, `heal*`, `watchdog_supervisor`, `alert_delivery` |
 
-### 20.5 Supervision layers — 🟡
+### 20.5 Supervision layers — 🟡 (C: restart, dead man's switch, second channel)
 
 | Layer | Today |
 | --- | --- |
-| In-process supervisor tree | 🟡 components report health; per-component restart policy is not built |
-| External watchdog process | ✅ heartbeat, kill-file, L2 escalation, optional flatten |
+| In-process supervisor tree | ✅ C: `watchdog/supervisor.py`. A lost heartbeat stops the wedged process (two processes on one account is worse than one wedged one), runs the preflight, starts a new one, and waits for the pulse before calling it a success |
+| External watchdog process | ✅ heartbeat, kill-file, L2 escalation, flatten, and now restart + alerting |
 | Container restart policy + health checks | ✅ `docker-compose.yml` + `/healthz` |
-| Dead man's switch (live) | ⬜ |
-| Independent alert channel | ⬜ (Telegram only) |
+| Dead man's switch (live) | ✅ C: `watchdog/deadman.py`. Reads a heartbeat *file* the engine touches every tick, armed only in testnet/live, latches after one trip, and refuses a reset while the pulse is still missing |
+| Independent alert channel | ✅ C: file floor + Telegram + a generic webhook (`ALERT_WEBHOOK_URL`). `router.independent` is False until two remote transports are configured, and `tradebot health` says which ones are |
 
 ### 20.6 Testing and measuring — 🟡
 
@@ -94,7 +94,7 @@ report. A state change writes a `health_change` event - the audit trail §20.4 a
 | One test per playbook row | 🟡 B covers all six wired rows (`tests/integration/test_heal_engine.py`) and the machinery (`tests/unit/test_heal.py`); the unwired rows in the table above cannot be tested because they do not exist yet |
 | Injection tests fail first, then get repaired | ✅ B: the stale-feed test asserts the repair *cannot* verify in replay and that escalation follows; the reconcile and stuck-exit tests assert the repair verifies |
 | MTTR targets (feed <10 s, worker <5 s, restart+reconcile <60 s) | ✅ per-row `mttr_seconds` recorded on every outcome, compared with the row's target and printed by `tradebot health` |
-| Monthly game day in paper mode | ⬜ |
+| Monthly game day in paper mode | ⬜ (the pieces it would exercise now exist: `tradebot watchdog --once`, `tradebot alerts --test`, `tradebot drill`) |
 | Reported metrics: uptime, MTTR, heals, escalations, flapping | 🟡 `Playbook.metrics()` gives attempts/verified/p50/p95/target per row; uptime and flapping reporting are still event-only |
 
 ### 20.7 What self-healing cannot fix — ✅ documented
@@ -132,8 +132,8 @@ shadow form; **fund** does not exist.
 | --- | --- | --- |
 | **A** | Health model, component checks, `tradebot health`, `/api/health`, report section, restart budget for strategies, audit events | ✅ merged |
 | **B** | Heal playbook table + circuit breaker (60 s, half-open probe) + stuck-**exit** sweep + verification, cooldowns, escalation + MTTR + one injection test per wired row | ✅ this PR |
-| **C** | Watchdog v2: restart on lost heartbeat, flatten-if-unprotected first, dead man's switch + second alert channel | ⬜ |
-| **D** | Autonomy ledger + approval flow + forbidden-action tests (§21.7) + flapping forces L1 | ⬜ |
+| **C** | Watchdog v2: restart on lost heartbeat with a 3/hour budget and post-restart verification, flatten-if-unprotected preflight, dead man's switch, alert router (file floor + webhook + retry queue) | ✅ this PR |
+| **D** | Autonomy ledger + approval flow + forbidden-action tests (§21.7) + flapping forces L1 | ▶ next |
 | **E** | Market graph (§21.2) and the contagion exposure cut | ⬜ |
 | **F** | Allocator (§21.3) with the equal-weight backtest comparison as its gate | ⬜ |
 | **G** | Lifecycle manager (§21.4) with decay auto-disable | ⬜ |
@@ -155,6 +155,18 @@ shadow form; **fund** does not exist.
   `killswitch.trigger`, which is the same lever a human pulls; it cannot raise limits,
   resize positions upward, or re-enable a disabled strategy.
 - **Unwired rows stay unwired.** Candle repair, memory restart, clock resync, config
-  keep-last-good, alert retry queue and exchange status polling are listed as ⬜ above
-  rather than being claimed by a table entry.
+  keep-last-good and exchange status polling are listed as ⬜ above rather than being
+  claimed by a table entry. (The alert retry queue was one of them, and C built it.)
+
+### What PR C deliberately did not do
+
+- **Be the outer supervisor.** `ProcessSpawner` starts a child of the watchdog; it cannot
+  outlive its own parent. Surviving a reboot needs systemd or a Docker restart policy, and
+  the module says so instead of implying otherwise.
+- **Give the watchdog a venue client in the CLI.** `tradebot watchdog --supervise` reports
+  `venue_client: none`, because building a ccxt client from the CLI is not wired yet. It can
+  escalate, alert and restart; it cannot sell. Claiming the flatten path works from the CLI
+  would be a lie, so the output says which one it is.
+- **Touch risk limits.** The watchdog still only raises kill levels, never lowers them, and
+  the dead man's switch only closes positions.
 - If a mechanism cannot be verified here, it is marked 🔒 rather than claimed.

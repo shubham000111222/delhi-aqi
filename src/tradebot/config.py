@@ -147,6 +147,19 @@ class ExecutionConfig(_Strict):
 class WatchdogConfig(_Strict):
     heartbeat_seconds: float = 2.0
     heartbeat_lost_seconds: float = 10.0
+    #: A file the engine touches on every tick. The dead man's switch reads this instead of
+    #: the database, because the failure that matters is the one where the database is also
+    #: unwritable. A bare name is resolved inside the state directory.
+    heartbeat_file: str = "heartbeat"
+    #: How stale the file must be before the switch trips (live/testnet only).
+    deadman_seconds: float = 30.0
+    #: Restarts the supervisor may perform per component per hour (§20.4).
+    restart_max_per_hour: int = 3
+    #: How long a restarted process gets to prove itself by heartbeating.
+    restart_verify_seconds: float = 60.0
+    #: The alert floor (always written) and the retry queue for undelivered alerts.
+    alert_log: str = "alerts.jsonl"
+    alert_queue: str = "alerts-queue.jsonl"
 
 
 class LoggingConfig(_Strict):
@@ -326,6 +339,10 @@ class Secrets:
     testnet_api_secret: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    #: A second, independent alert transport: any endpoint that accepts {"text":...}.
+    #: Slack/Discord/ntfy/Gotify all do. It exists so "Telegram is down" is not the same
+    #: event as "nobody was told" (§20.5).
+    alert_webhook_url: str = ""
     #: Zerodha Kite Connect, for the NSE adapter. Absent by default; the adapter refuses
     #: to construct without both, rather than failing on the first order.
     kite_api_key: str = ""
@@ -342,6 +359,7 @@ class Secrets:
             "exchange_id": self.exchange_id,
             "api_key": "set" if self.api_key else "missing",
             "telegram": "set" if self.telegram_bot_token else "missing",
+            "alert_webhook": "set" if self.alert_webhook_url else "missing",
             "llm": "set" if self.llm_api_key else "missing",
             "kite": "set" if (self.kite_api_key and self.kite_access_token) else "missing",
         }
@@ -383,6 +401,7 @@ def load_secrets(env: dict[str, str]) -> Secrets:
         testnet_api_secret=env.get("TESTNET_API_SECRET", ""),
         telegram_bot_token=env.get("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=env.get("TELEGRAM_CHAT_ID", ""),
+        alert_webhook_url=env.get("ALERT_WEBHOOK_URL", ""),
         kite_api_key=env.get("KITE_API_KEY", ""),
         kite_access_token=env.get("KITE_ACCESS_TOKEN", ""),
         llm_provider=env.get("LLM_PROVIDER", ""),
