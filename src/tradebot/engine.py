@@ -15,6 +15,7 @@ Event flow (all sequential, so behaviour is deterministic and replayable):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shutil
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -46,6 +47,7 @@ from .data.hub import MarketData
 from .execution.adapters.base import ExchangeAdapter
 from .execution.order_manager import OrderManager
 from .execution.slippage import SlippageRecorder, size_for_budget
+from .heal import Playbook, Row
 from .health import Check, HealthModel, RestartBudget
 from .portfolio.ledger import ClosedTrade, EntryPlan, Ledger
 from .reporting.daily import build_daily_report, tax_ledger_rows, write_reports
@@ -137,6 +139,13 @@ class Engine:
         self.strategy_faults = RestartBudget(max_per_hour=3)
         self._disabled_strategies: dict[str, str] = {}
         self._logged_changes = 0
+        # when an exit was submitted, so a stuck exit is a fact rather than an inference
+        self._exit_attempts: dict[tuple[str, str], datetime] = {}
+        # how many times the playbook has re-submitted an exit for a position that will
+        # not close: two are a retry, the third is an escalation, never a loop
+        self._exit_resubmits: dict[tuple[str, str], int] = {}
+        # §20.3: the playbook is built once and ticked from the health loop
+        self.playbook = self._build_playbook()
         # measured, not assumed: every fill with an expected price is recorded here
         self.slippage = SlippageRecorder()
         self.queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=1_000)
@@ -946,6 +955,7 @@ class Engine:
         if order is None:
             self._exiting.pop(key, None)
             return
+        self._exit_attempts[key] = self.clock.now()
         self._log(
             "exit_submitted",
             {
@@ -1171,9 +1181,12 @@ class Engine:
         self._report_component_health(
             now=now, disk_used=disk_used, error_rate=error_rate, all_stale=all_stale
         )
+        healed = await self.playbook.tick(self) if self.running else []
         health = {
             "ts": iso(now),
             "components": self.health.snapshot(now=now, restart_budget=self.strategy_faults),
+            "playbook": self.playbook.as_dict(now=now),
+            "healed": [outcome.as_dict() for outcome in healed],
             "stale_symbols": stale,
             "all_stale": all_stale,
             "disk_used_pct": round(disk_used, 3),
@@ -1186,6 +1199,251 @@ class Engine:
             "pending_orders": len(self.om.pending),
         }
         return health
+
+    def _build_playbook(self) -> Playbook:
+        """§20.3's rows, as detect / act / verify triples.
+
+        Six rows are wired here; the rest of the table needs a venue to test against
+        (dead man's switch, deployment rollback, exchange status page) or an adapter
+        method that does not exist yet (server time for clock drift). The unwired rows
+        are listed in `docs/BUILD_PLAN_20_21.md` as missing rather than pretended.
+        """
+
+        async def _feed_stale(_: Any) -> bool:
+            now = self.clock.now()
+            return self.market.all_stale(now, self.cfg.settings.data_quality.stale_all_seconds)
+
+        async def _reconnect_feed(_: Any) -> str:
+            connect = getattr(self.feed, "connect", None)
+            close = getattr(self.feed, "close", None)
+            if connect is None:
+                return "no reconnect available on this feed"
+            if close is not None:
+                with contextlib.suppress(Exception):
+                    await close()
+            await connect()
+            self.stats.reconnects += 1
+            return "reconnected the feed"
+
+        async def _feed_verified(_: Any) -> bool:
+            return bool(getattr(self.feed, "connected", False)) or not self.market.all_stale(
+                self.clock.now(), self.cfg.settings.data_quality.stale_all_seconds
+            )
+
+        async def _api_pressure(_: Any) -> bool:
+            window = timedelta(seconds=self.cfg.risk.exchange_error_rate_window_seconds)
+            errors = self.store.count_events("order_error", since=self.clock.now() - window)
+            attempts = errors + self.store.count_events("order_submitted", since=self.clock.now() - window)
+            if attempts < self.cfg.risk.exchange_error_rate_min_samples:
+                return False
+            return errors / attempts >= float(self.cfg.risk.exchange_error_rate_limit)
+
+        async def _throttle(_: Any) -> str:
+            self.playbook.breaker.open(self.clock.now())
+            bucket = getattr(self.om, "bucket", None)
+            halved = ""
+            if bucket is not None and hasattr(bucket, "rate"):
+                bucket.rate = max(1.0, float(bucket.rate) / 2)
+                halved = f", request rate halved to {bucket.rate:.1f}/s"
+            return f"breaker opened for {self.playbook.breaker.open_seconds:.0f}s{halved}"
+
+        async def _api_verified(_: Any) -> bool:
+            """§20.3: verify with a real call, not with the fact that we did something."""
+            try:
+                await self.adapter.get_open_orders()
+            except Exception:  # noqa: BLE001
+                return False
+            self.playbook.breaker.record_success(self.clock.now())
+            return True
+
+        async def _exit_stuck(_: Any) -> bool:
+            now = self.clock.now()
+            for (symbol, strategy), submitted_at in list(self._exit_attempts.items()):
+                if self.ledger.get(symbol, strategy) is None:
+                    self._exit_attempts.pop((symbol, strategy), None)
+                    self._exit_resubmits.pop((symbol, strategy), None)
+                    continue
+                if now - submitted_at >= timedelta(seconds=self.cfg.settings.execution.exit_stuck_seconds):
+                    return True
+            return False
+
+        async def _resubmit_exit(_: Any) -> str:
+            now = self.clock.now()
+            retried = 0
+            for (symbol, strategy), submitted_at in list(self._exit_attempts.items()):
+                pos = self.ledger.get(symbol, strategy)
+                if pos is None or now - submitted_at < timedelta(
+                    seconds=self.cfg.settings.execution.exit_stuck_seconds
+                ):
+                    continue
+                self._exiting.pop((symbol, strategy), None)  # the guard is what blocked the retry
+                self._exit_resubmits[(symbol, strategy)] = self._exit_resubmits.get((symbol, strategy), 0) + 1
+                await self._exit_position(pos, "heal:stuck_exit")
+                retried += 1
+            return f"re-submitted {retried} stuck exit(s) at market"
+
+        async def _exit_gone(_: Any) -> bool:
+            """Verified when nothing is still stuck.
+
+            Position closed counts. A *fresh* re-submission also counts, because a market
+            exit fills through our own fill queue and is not closed at the instant it is
+            sent. What does not count is the third re-submission of the same position: at
+            that point the venue is not honouring exits we can see, and the row must fail
+            so the ladder takes it to L2 instead of retrying until the heat death of the
+            universe.
+            """
+            now = self.clock.now()
+            ttl = timedelta(seconds=self.cfg.settings.execution.exit_stuck_seconds)
+            for (symbol, strategy), submitted_at in list(self._exit_attempts.items()):
+                if self.ledger.get(symbol, strategy) is None:
+                    continue
+                if now - submitted_at >= ttl:
+                    return False
+                if self._exit_resubmits.get((symbol, strategy), 0) > 2:
+                    return False
+            return True
+
+        async def _unprotected(_: Any) -> bool:
+            if self.cfg.mode is Mode.PAPER:
+                return False  # paper has no venue-side stop; the local monitor is the protection
+            now = self.clock.now()
+            return any(
+                pos.stop_order_id is None and self._exiting.get((pos.symbol, pos.strategy), now) <= now
+                for pos in self.ledger.open_positions
+            )
+
+        async def _protect(_: Any) -> str:
+            protected = 0
+            for pos in list(self.ledger.open_positions):
+                if pos.stop_order_id is not None:
+                    continue
+                await self._ensure_protection(pos)
+                protected += int(pos.stop_order_id is not None)
+            return f"placed {protected} protective stop(s)"
+
+        async def _protection_verified(_: Any) -> bool:
+            return all(pos.stop_order_id is not None for pos in self.ledger.open_positions)
+
+        async def _disk_pressure(_: Any) -> bool:
+            usage = shutil.disk_usage(str(self.cfg.settings.data_dir))
+            return usage.used / usage.total >= self.cfg.risk.disk_warn_pct
+
+        async def _purge(_: Any) -> str:
+            from .data.archive import Archive
+
+            keep = int(self.cfg.settings.archive.keep_days) if hasattr(self.cfg.settings, "archive") else 30
+            archive = Archive(str(self.cfg.settings.archive_dir or self.cfg.settings.data_dir / "archive"))
+            removed = archive.apply_retention(keep_days=keep, kind="books")
+            return f"purged {len(removed)} book partition(s) older than {keep} days"
+
+        async def _disk_verified(_: Any) -> bool:
+            usage = shutil.disk_usage(str(self.cfg.settings.data_dir))
+            return usage.used / usage.total < self.cfg.risk.disk_warn_pct
+
+        async def _reconcile_broken(_: Any) -> bool:
+            return self._reconcile_state not in ("ok", None, "")
+
+        async def _reconcile(_: Any) -> str:
+            """Re-reconcile, and if the venue holds an order we do not know, cancel it.
+
+            Re-running the comparison alone is not a repair - it reports the same
+            disagreement again. `reconcile()` already excludes resting protective stops and
+            reduce-only exits from "unknown", so what is left is an entry order we lost
+            track of, and cancelling is both allowed by §20.1 and the safe direction.
+            """
+            state = await self.reconcile()
+            cancelled = 0
+            if state.startswith("unknown open orders:"):
+                for chunk in state.split(":", 1)[1].split(","):
+                    symbol, _, client_id = chunk.strip().rpartition(":")
+                    if not client_id:
+                        continue
+                    try:
+                        await self.adapter.cancel_order(client_id, symbol)
+                        cancelled += 1
+                    except Exception as exc:  # noqa: BLE001 - the second reconcile decides
+                        self._log(
+                            "heal_cancel_failed",
+                            {"order": client_id, "symbol": symbol, "error": str(exc)},
+                            level="WARN",
+                            actor="heal",
+                        )
+                state = await self.reconcile()
+            self._reconcile_state = state
+            suffix = f" after cancelling {cancelled} unknown order(s)" if cancelled else ""
+            return f"reconciled: {state}{suffix}"
+
+        async def _reconcile_verified(_: Any) -> bool:
+            return self._reconcile_state == "ok"
+
+        return Playbook(
+            [
+                Row(
+                    name="feed_stale",
+                    detect=_feed_stale,
+                    action=_reconnect_feed,
+                    verify=_feed_verified,
+                    escalate=KillLevel.L1,
+                    cooldown=timedelta(seconds=30),
+                    mttr_target=10.0,
+                ),
+                Row(
+                    name="api_pressure",
+                    detect=_api_pressure,
+                    action=_throttle,
+                    verify=_api_verified,
+                    escalate=KillLevel.L1,
+                    cooldown=timedelta(minutes=1),
+                    mttr_target=60.0,
+                ),
+                Row(
+                    name="exit_stuck",
+                    detect=_exit_stuck,
+                    action=_resubmit_exit,
+                    verify=_exit_gone,
+                    escalate=KillLevel.L2,
+                    cooldown=timedelta(seconds=30),
+                    mttr_target=5.0,
+                ),
+                Row(
+                    name="position_unprotected",
+                    detect=_unprotected,
+                    action=_protect,
+                    verify=_protection_verified,
+                    escalate=KillLevel.L2,
+                    cooldown=timedelta(seconds=30),
+                    mttr_target=5.0,
+                ),
+                Row(
+                    name="disk_pressure",
+                    detect=_disk_pressure,
+                    action=_purge,
+                    verify=_disk_verified,
+                    escalate=KillLevel.L1,
+                    cooldown=timedelta(minutes=30),
+                    mttr_target=30.0,
+                ),
+                Row(
+                    name="reconcile_mismatch",
+                    detect=_reconcile_broken,
+                    action=_reconcile,
+                    verify=_reconcile_verified,
+                    escalate=KillLevel.L1,
+                    cooldown=timedelta(minutes=2),
+                    mttr_target=10.0,
+                ),
+            ],
+            clock=self.clock,
+            on_event=self._heal_event,
+            escalate=self._escalate_heal,
+        )
+
+    def _escalate_heal(self, level: KillLevel, trigger: str, reason: str) -> None:
+        self.killswitch.trigger(level, trigger=trigger, reason=reason, actor="heal")
+
+    def _heal_event(self, kind: str, payload: dict[str, Any]) -> None:
+        level = str(payload.pop("level", "INFO"))
+        self._log(kind, payload, level=level, actor="heal", ts=self.clock.now())
 
     def _report_component_health(
         self,
@@ -1524,7 +1782,10 @@ class Engine:
             reconciliation=str(self._reconcile_state),
             feed_gaps=self.stats.gaps,
             reconnects=self.stats.reconnects,
-            system_health=self.health.snapshot(now=now, restart_budget=self.strategy_faults),
+            system_health={
+                **self.health.snapshot(now=now, restart_budget=self.strategy_faults),
+                "playbook": self.playbook.metrics(),
+            },
         )
         self._attach_ai_notes(report)
         paths = write_reports(

@@ -565,6 +565,20 @@ def cmd_health(args: argparse.Namespace) -> int:
         f"{health.get('reconciliation')} | disk {health.get('disk_used_pct', 0):.0%} | "
         f"error rate {health.get('error_rate', 0):.0%} | kill {health.get('kill_level')}"
     )
+    playbook = health.get("playbook") or {}
+    if playbook:
+        print()
+        print(f"heal playbook: {len(playbook.get('rows') or [])} row(s) wired, "
+              f"breaker {playbook.get('breaker', {}).get('state', '?')}")
+        for name, row in (playbook.get("metrics") or {}).items():
+            p50 = row.get("p50_seconds")
+            print(
+                f"  {name:20s} attempts {row['attempts']:3d}  verified {row['verified']:3d}"
+                f"  p50 {'n/a' if p50 is None else f'{p50:.1f}s'}"
+                f"  target {row.get('target_seconds', '?')}s"
+            )
+        for name in playbook.get("unwired") or []:
+            print(f"  {name:20s} declared, not wired (see docs/BUILD_PLAN_20_21.md)")
     return 0 if components.get("overall") != "FAILED" else 1
 
 
