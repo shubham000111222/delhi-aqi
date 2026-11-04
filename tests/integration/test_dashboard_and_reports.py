@@ -46,6 +46,12 @@ def test_dashboard_serves_page_and_snapshot(client):
 
 def test_dashboard_health_and_reports_listing(client):
     assert client.get("/healthz").text == "ok"
+    health = client.get("/api/health")
+    assert health.status_code == 200
+    payload = health.json()
+    # no engine attached in this process: the endpoint must say so rather than 500
+    assert payload["available"] is False
+    assert "note" in payload
     assert client.get("/api/reports").status_code == 200
     assert client.get("/api/report/latest").status_code in (200, 404)
 

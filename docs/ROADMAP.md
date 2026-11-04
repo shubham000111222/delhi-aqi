@@ -31,7 +31,7 @@ a capability that exists but has not cleared its gates is marked as such.
 | 12 Reliability & security | crash recovery, reconciliation, structured logs with redaction, heartbeats, disk guards, scoped auto-resume |
 | 12 Inbound commands | Telegram router: chat-id whitelist, confirm step with TTL and single use, audit line per command, transport-agnostic |
 | 12 Telegram transport | `getUpdates` long polling with persisted offset, `sendMessage`, backoff on failure, injected HTTP client, started by `run` when a token and chat id exist, `tradebot telegram` readiness check |
-| 13 Testing | 607 passing, 2 skipped (MLflow is a dev dependency, so CI exercises the tracking paths): unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity, ledger) |
+| 13 Testing | 628 passing, 2 skipped (MLflow is a dev dependency, so CI exercises the tracking paths): unit (core, data, execution, risk, venues, ai, streaming) + integration (engine, dashboard, reports, parity, ledger) |
 | 18.1 Book recording | recorded on every session (`RecordingFeed`), archived to Parquet, summarised as spread statistics |
 | 18.6 Experiment tracking | `experiments` table, deterministic run ids, trial log used by the multiple-testing report |
 | 18.6 MLflow export | `experiments --export DIR` writes MLflow's file-store layout, `run --mlflow DIR` writes each session as it ends, and `experiments --read DIR` reads a store back into the bot; non-numeric metrics move to tags; verified by reading all three back with real MLflow 3.17 |
@@ -44,6 +44,8 @@ a capability that exists but has not cleared its gates is marked as such.
 | 19.7 Explainability / leakage | ridge weight shares with a >40% warning, multi-permutation shuffled-label test, far-shift test, Platt calibration with Brier score |
 | 19.3 Ledger learning | `tradebot learn` labels the bot's own closed trades (net R, fees included), runs a purged walk-forward over them, and writes a card only on repeated, cost-stressed evidence; `run --ledger-gate` installs it as a veto-only entry filter. On this data the honest answer is "not yet" (92 trades) or "no edge" |
 | 19.3 Meta-label runtime gate | `MetaEntryFilter` installed as the engine's veto-only entry filter (`run --meta-gate card.json`): a saved card is loaded, features are rebuilt from the live bar window and cached per bar close, and anything unexpected lets the trade through with a logged reason |
+| 20.2 Health model | three questions per component (liveness / readiness / correctness) → `HEALTHY`/`DEGRADED`/`FAILED`, visible in `tradebot health`, `/api/health` and section 6 of the daily report, with a `health_change` audit event on every transition and a flapping detector (§20.4). Status sheet: `docs/BUILD_PLAN_20_21.md` |
+| 20.4 Restart budget | at most three restarts per component per hour; a strategy that keeps raising is disabled for the session and escalated instead of being restarted forever |
 | 19.8 Guardrails | risk package imports nothing from `ai`; the AI layer imports no execution/engine code (both enforced by tests); unapproved or stale models produce no trade |
 | 19.9 What stays private | no model card is committed and `models/*.json` is gitignored |
 

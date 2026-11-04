@@ -107,8 +107,33 @@ class DailyReport:
     open_positions: list[dict[str, Any]] = field(default_factory=list)
     closed_trades: list[dict[str, Any]] = field(default_factory=list)
     next_day: list[str] = field(default_factory=list)
+    system_health: dict[str, Any] = field(default_factory=dict)
     ai_notes: list[str] = field(default_factory=list)
     ai_source: str = "template"
+
+    def _health_line(self) -> str:
+        """§20.2: the report says which component is unhealthy, not just that it is.
+
+        An overall verdict with no component detail is the least useful line a health
+        system can produce: it tells the reader something is wrong and nothing else.
+        """
+        health = self.system_health or {}
+        if not health:
+            return "not sampled (no health check has run in this session)"
+        overall = str(health.get("overall", "UNKNOWN"))
+        components = health.get("components") or {}
+        bad = [
+            f"{name} {info.get('state')}"
+            for name, info in sorted(components.items())
+            if info.get("state") != "HEALTHY"
+        ]
+        line = f"{overall} ({health.get('score', '?')})"
+        if bad:
+            line += " - " + ", ".join(bad)
+        flapping = health.get("flapping") or []
+        if flapping:
+            line += f" | flapping: {', '.join(flapping)}"
+        return line
 
     @property
     def net_pnl(self) -> Decimal:
@@ -243,6 +268,7 @@ class DailyReport:
             f"- Feed gaps: {self.events.get('gaps', 0)}, reconnects: {self.events.get('reconnects', 0)}",
             f"- API errors: {self.events.get('api_errors', 0)}, rejects: {self.events.get('rejects', 0)}",
             f"- Reconciliation: {self.events.get('reconciliation', 'ok')}",
+            f"- Component health: {self._health_line()}",
             "",
             "## 7. Kill switch and incidents",
             "",
@@ -323,6 +349,7 @@ def build_daily_report(
     reconciliation: str = "ok",
     feed_gaps: int = 0,
     reconnects: int = 0,
+    system_health: dict[str, Any] | None = None,
 ) -> DailyReport:
     closed = store.closed_positions(since=day_start, limit=5000)
     report = DailyReport(
@@ -448,6 +475,7 @@ def build_daily_report(
         for ev in events
         if ev["kind"] == "size_reduction"
     ]
+    report.system_health = dict(system_health or {})
     report.next_day = _next_day_state(store, config)
     return report
 

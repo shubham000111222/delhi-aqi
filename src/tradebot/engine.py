@@ -46,6 +46,7 @@ from .data.hub import MarketData
 from .execution.adapters.base import ExchangeAdapter
 from .execution.order_manager import OrderManager
 from .execution.slippage import SlippageRecorder, size_for_budget
+from .health import Check, HealthModel, RestartBudget
 from .portfolio.ledger import ClosedTrade, EntryPlan, Ledger
 from .reporting.daily import build_daily_report, tax_ledger_rows, write_reports
 from .risk.engine import RiskContext, RiskEngine
@@ -124,6 +125,18 @@ class Engine:
         self.strategies = strategies
         self.notifier = notifier
         self.stats = EngineStats()
+        # §20.2: every component answers liveness / readiness / correctness, and the
+        # model remembers only what changed. It holds no policy - the playbook does.
+        self.health = HealthModel()
+        for component in ("feed", "candles", "strategies", "orders", "store", "adapter"):
+            self.health.register(component)
+        # optional: an unconfigured notifier or model must not hold the system
+        self.health.register("alerting", critical=False)
+        self.health.register("ai", critical=False)
+        # §20.4: a deterministic bug restarts cleanly forever; three an hour, then stop.
+        self.strategy_faults = RestartBudget(max_per_hour=3)
+        self._disabled_strategies: dict[str, str] = {}
+        self._logged_changes = 0
         # measured, not assumed: every fill with an expected price is recorded here
         self.slippage = SlippageRecorder()
         self.queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=1_000)
@@ -405,7 +418,7 @@ class Engine:
                     level="CRIT",
                     actor="strategy",
                 )
-                self._pause_strategy(name, hours=1, reason=f"exception: {exc}")
+                self._handle_strategy_fault(name, reason=f"exception: {exc}")
                 continue
             if signal is None:
                 continue
@@ -964,6 +977,8 @@ class Engine:
     # strategy pausing / decay
     # ------------------------------------------------------------------
     def _strategy_blocked(self, name: str) -> bool:
+        if name in self._disabled_strategies:
+            return True
         paused = self.store.kv_get("paused_strategies", {}) or {}
         info = paused.get(name)
         if not info:
@@ -972,6 +987,34 @@ class Engine:
         if until is None:
             return True
         return self.clock.now() < _parse(until)
+
+    def _handle_strategy_fault(self, name: str, *, reason: str) -> None:
+        """Pause a faulty strategy, and after three faults in an hour, disable it (§20.3).
+
+        Restarting a strategy that raises deterministically looks like recovery from the
+        outside: it comes back, trades nothing, and raises again. The budget is what makes
+        the third failure the last one for the session, and the disable is what a human
+        reads later. Open positions are untouched - their stops live in the ledger, not in
+        the strategy.
+        """
+        now = self.clock.now()
+        if self.strategy_faults.allow(name, now=now):
+            self.strategy_faults.record(name, now=now)
+            self._pause_strategy(name, hours=1, reason=reason)
+            return
+        self._disabled_strategies[name] = reason
+        self._pause_strategy(name, hours=24 * 365, reason=f"disabled after 3 faults: {reason}")
+        self._log(
+            "strategy_disabled",
+            {
+                "strategy": name,
+                "reason": reason,
+                "faults_last_hour": self.strategy_faults.used(name, now=now),
+            },
+            level="CRIT",
+            actor="supervisor",
+            ts=now,
+        )
 
     def _pause_strategy(self, name: str, *, hours: int, reason: str) -> None:
         paused = self.store.kv_get("paused_strategies", {}) or {}
@@ -1125,8 +1168,12 @@ class Engine:
         self.killswitch.check_kill_file()
         if self.killswitch.must_flatten() and (self.ledger.open_positions or self.om.pending):
             await self.flatten_all(f"kill switch {self.killswitch.level.value}")
+        self._report_component_health(
+            now=now, disk_used=disk_used, error_rate=error_rate, all_stale=all_stale
+        )
         health = {
             "ts": iso(now),
+            "components": self.health.snapshot(now=now, restart_budget=self.strategy_faults),
             "stale_symbols": stale,
             "all_stale": all_stale,
             "disk_used_pct": round(disk_used, 3),
@@ -1139,6 +1186,132 @@ class Engine:
             "pending_orders": len(self.om.pending),
         }
         return health
+
+    def _report_component_health(
+        self,
+        *,
+        now: datetime,
+        disk_used: float,
+        error_rate: float,
+        all_stale: bool,
+    ) -> None:
+        """Fill in §20.2's three questions for every component, once per health check.
+
+        The thresholds are deliberately blunt. A health check that needs tuning before it
+        can tell you the feed is dead is worse than no health check: these are the values
+        that separate "working" from "not working", not a quality score.
+        """
+        dq = self.cfg.settings.data_quality
+        limit = float(self.cfg.risk.exchange_error_rate_limit)
+        stale = self.market.stale_symbols(now, dq.stale_symbol_seconds)
+        # A process that has not started receiving yet is not a sick feed. Without this a
+        # one-shot `tradebot health` on a cold engine reports every symbol stale and calls
+        # the system DEGRADED, which trains the reader to ignore the word.
+        not_sampled = not self.running and self.stats.ticks == 0 and self.stats.bars == 0
+        sample_note = "not sampled: the engine is not running" if not_sampled else ""
+        faults = self.store.count_events("strategy_error", since=now - timedelta(minutes=10))
+        paused = self.store.kv_get("paused_strategies", {}) or {}
+        pending = len(self.om.pending)
+        overdue = sum(1 for entry in self.om.pending.values() if entry.deadline < now)
+
+        self.health.report(
+            "feed",
+            now=now,
+            stream=Check(
+                liveness=True if not_sampled else (bool(self.feed.running) or not self.running),
+                readiness=True if not_sampled else not all_stale,
+                correctness=True if not_sampled else not stale,
+                detail=sample_note or (f"{len(stale)} stale symbol(s)" if stale else ""),
+            ),
+        )
+        self.health.report(
+            "candles",
+            now=now,
+            builder=Check(
+                liveness=True if not_sampled else (self.stats.bars > 0 or not self.running),
+                readiness=True
+                if not_sampled
+                else bool(self.cfg.symbol_names()) and self.market.price(self.cfg.symbol_names()[0]) is not None,
+                correctness=True if not_sampled else not all_stale,
+                detail=sample_note,
+            ),
+        )
+        self.health.report(
+            "strategies",
+            now=now,
+            workers=Check(
+                liveness=not self._disabled_strategies,
+                readiness=not paused,
+                correctness=faults == 0,
+                detail="; ".join(
+                    part
+                    for part in (
+                        f"disabled {sorted(self._disabled_strategies)}" if self._disabled_strategies else "",
+                        f"paused {sorted(paused)}" if paused else "",
+                        f"{faults} fault(s) in 10 min" if faults else "",
+                    )
+                    if part
+                ),
+            ),
+        )
+        self.health.report(
+            "orders",
+            now=now,
+            queue=Check(
+                liveness=getattr(self.adapter, "connected", True),
+                readiness=overdue == 0,
+                correctness=self.om.stats.fills <= self.om.stats.submitted,
+                detail=f"{overdue} of {pending} entry(ies) past their deadline" if overdue else "",
+            ),
+        )
+        self.health.report(
+            "store",
+            now=now,
+            write=Check(
+                readiness=disk_used < self.cfg.risk.disk_pause_pct,
+                correctness=self._reconcile_state == "ok",
+                detail=f"disk {disk_used:.0%}" if disk_used >= self.cfg.risk.disk_warn_pct else "",
+            ),
+        )
+        self.health.report(
+            "adapter",
+            now=now,
+            api=Check(
+                liveness=getattr(self.adapter, "connected", True),
+                readiness=error_rate < limit,
+                correctness=self._reconcile_state == "ok",
+                detail=f"error rate {error_rate:.0%}" if error_rate >= limit else "",
+            ),
+        )
+        self.health.report(
+            "alerting",
+            now=now,
+            transport=Check(readiness=self.notifier is not None, detail="" if self.notifier else "not configured"),
+        )
+        self.health.report(
+            "ai",
+            now=now,
+            model=Check(
+                readiness=True,
+                correctness=len(self._disabled_strategies) == 0,
+                detail="",
+            ),
+        )
+        # the audit trail (§20.4): a state change is an event, not a field nobody reads
+        for change in self.health.changes[self._logged_changes :]:
+            self._log(
+                "health_change",
+                {
+                    "component": change["component"],
+                    "from": change["from"],
+                    "to": change["to"],
+                    "detail": change["detail"],
+                },
+                level="WARN" if change["to"] != "HEALTHY" else "INFO",
+                actor="health",
+                ts=now,
+            )
+        self._logged_changes = len(self.health.changes)
 
     #: L1 causes that may lift on their own once the condition has been gone for
     #: `auto_resume_min_healthy_seconds` (plan §: infrastructure only). A risk breach is
@@ -1351,6 +1524,7 @@ class Engine:
             reconciliation=str(self._reconcile_state),
             feed_gaps=self.stats.gaps,
             reconnects=self.stats.reconnects,
+            system_health=self.health.snapshot(now=now, restart_budget=self.strategy_faults),
         )
         self._attach_ai_notes(report)
         paths = write_reports(
