@@ -519,6 +519,55 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_health(args: argparse.Namespace) -> int:
+    """One health check, printed: what each component answered and what the model made of it.
+
+    Same code path as the dashboard's Health page and the daily report, so the three can
+    never disagree about whether the feed is alive.
+    """
+    cfg = _config(args)
+
+    async def _go() -> dict[str, Any]:
+        engine = await _build_engine(cfg)
+        try:
+            health = await engine.health_check()
+        finally:
+            engine.close()
+        return health
+
+    health = asyncio.run(_go())
+    if args.json:
+        _print(health)
+        return 0
+
+    components: dict[str, Any] = health.get("components", {})
+    print(f"overall: {components.get('overall', 'UNKNOWN')} | score {components.get('score', '?')}")
+    if components.get("flapping"):
+        print(f"flapping: {', '.join(components['flapping'])}")
+    for name, info in (components.get("components") or {}).items():
+        print(f"  {info['state']:8s} {name:11s} score {info['score']:.2f}")
+        for check_name, check in (info.get("checks") or {}).items():
+            failed = [
+                label
+                for label, ok in (
+                    ("liveness", check["liveness"]),
+                    ("readiness", check["readiness"]),
+                    ("correctness", check["correctness"]),
+                )
+                if not ok
+            ]
+            suffix = f"  failed: {', '.join(failed)}" if failed else ""
+            detail = f"  ({check['detail']})" if check.get("detail") else ""
+            print(f"      {check_name}: {'ok' if not failed else 'no'}{suffix}{detail}")
+    print()
+    print(
+        f"feed stale: {health.get('stale_symbols') or 'none'} | reconciliation "
+        f"{health.get('reconciliation')} | disk {health.get('disk_used_pct', 0):.0%} | "
+        f"error rate {health.get('error_rate', 0):.0%} | kill {health.get('kill_level')}"
+    )
+    return 0 if components.get("overall") != "FAILED" else 1
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     cfg = _config(args)
     store = Store(cfg.settings.db_path)
@@ -845,6 +894,9 @@ def build_parser() -> argparse.ArgumentParser:
     bfl.add_argument("--write", action="store_true", help="write the candles to the archive")
     bfl.add_argument("--seed", type=int, default=7)
     bfl.add_argument("--json", action="store_true")
+
+    hlth = sub.add_parser("health", help="run one health check and print component state")
+    hlth.add_argument("--json", action="store_true")
 
     bfh = sub.add_parser(
         "backfill-history",
@@ -2591,6 +2643,7 @@ def main(argv: list[str] | None = None) -> int:
         "telegram": cmd_telegram,
         "backfill": cmd_backfill,
         "backfill-history": cmd_backfill_history,
+        "health": cmd_health,
         "experiments": cmd_experiments,
         "news": cmd_news,
         "research": cmd_research,

@@ -209,6 +209,7 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
                 for sym in config.symbol_names()
             },
             "db": store.stats(),
+            "components": engine.health.snapshot(now=engine.clock.now()) if engine is not None else {},
         }
         return JSONResponse(
             headers={"cache-control": "no-store, max-age=0"},
@@ -283,6 +284,23 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
             if model is None
             else {"samples": model.samples, "fallback_bps": round(model.fallback_bps, 2)},
         }
+
+    @app.get("/api/health")
+    async def component_health() -> JSONResponse:
+        """§20.2: the Health page reads this. A blank payload is a fact, not an error."""
+        engine = state.engine
+        if engine is None:
+            return JSONResponse(
+                {"available": False, "note": "no bot attached; start `tradebot run` or the hosted dashboard"},
+                headers={"cache-control": "no-store, max-age=0"},
+            )
+        snapshot = engine.health.snapshot(
+            now=engine.clock.now(), restart_budget=getattr(engine, "strategy_faults", None)
+        )
+        return JSONResponse(
+            _json_safe({"available": True, **snapshot}),
+            headers={"cache-control": "no-store, max-age=0"},
+        )
 
     @app.get("/api/report/latest", response_class=PlainTextResponse)
     async def latest_report() -> str:

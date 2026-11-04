@@ -137,7 +137,21 @@ Only after Phase 2 and Phase 3 pass. Live mode is refused unless every guard in
 
 ---
 
-## Phase 6 — housekeeping (monthly)
+## Phase 6 — self-healing and self-sustaining (build plan §20–21)
+
+Tracked in detail in [`BUILD_PLAN_20_21.md`](BUILD_PLAN_20_21.md); this is the reading order.
+
+- [x] **Health model** — every component reports liveness / readiness / correctness;
+      `tradebot health`, `/api/health`, and the daily report all read the same snapshot.
+- [x] **Restart budget** — three faults an hour, then the strategy is disabled and escalated.
+- [ ] **Heal playbook** — 17 rows, one injection test each, circuit breaker, stuck-order query.
+- [ ] **Watchdog v2** — restart on lost heartbeat, flatten-if-unprotected, dead man's switch.
+- [ ] **Autonomy ledger + approvals + forbidden-action tests** (§21.7).
+- [ ] **Market graph, allocator, lifecycle manager, fund loop** (§21.2–21.5).
+  The allocator ships **only** if it beats equal weighting after costs in backtest.
+- [ ] **Operator-absent ladder** (§21.8) — 7 days warn, 14 days half size, 21 days L1.
+
+## Phase 7 — housekeeping (monthly)
 
 - [ ] `python -m tradebot experiments --export mlruns-export` — the multi-testing audit trail.
 - [ ] `python -m tradebot archive --keep-days 90` — prune book partitions, keep candles.

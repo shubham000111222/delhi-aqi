@@ -41,7 +41,9 @@ are reported as failures (see [Results](#results-so-far)).
 ```
 
 **Where the project stands and what is left:** [`docs/CHECKLIST.md`](docs/CHECKLIST.md) —
-phase by phase, with the command and the pass criterion for each.
+phase by phase, with the command and the pass criterion for each. The self-healing and
+self-sustaining sections (§20–21) have their own status sheet:
+[`docs/BUILD_PLAN_20_21.md`](docs/BUILD_PLAN_20_21.md).
 
 ## Quick start (no keys, no network, no real money)
 
@@ -226,6 +228,7 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | `tradebot metrics` | metrics, Monte Carlo and acceptance gates for the paper database |
 | `tradebot run` | paper trading on the configured feed until Ctrl-C or `--minutes N` (`--mlflow DIR` logs the session on exit, `--mlflow-server URI` streams it live, `--news-url` adds the reduce-only sentiment overlay, `--meta-gate` adds the meta veto filter, `--ledger-gate` adds one trained on the bot's own trades) |
 | `tradebot status` | positions, kill level, recent events |
+| `tradebot health` | one health check: per-component `HEALTHY`/`DEGRADED`/`FAILED` with the failing question (exit 1 if any critical component is `FAILED`) |
 | `tradebot report` | build today's report now |
 | `tradebot pause` / `resume` / `kill` / `lockdown` | manual kill-switch controls |
 | `tradebot drill` | fire drill: flatten and measure time-to-flat |
