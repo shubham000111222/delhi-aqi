@@ -36,20 +36,22 @@ Where it is visible: `tradebot health` (CLI), `GET /api/health` and the snapshot
 `health.components` (dashboard), and **"Component health"** inside section 6 of the daily
 report. A state change writes a `health_change` event - the audit trail §20.4 asks for.
 
-### 20.3 Heal playbook — 🟡
+### 20.3 Heal playbook — 🟡 (B: six rows wired, verified, audited)
 
 | Playbook row | Today |
 | --- | --- |
-| WebSocket drop / stale feed → reconnect with backoff, REST gap fill | ✅ (`WebSocketFeed`: backoff, resubscribe, gap fill) |
+| WebSocket drop / stale feed → reconnect with backoff, REST gap fill | ✅ `WebSocketFeed` backoff + gap fill, and B: `feed_stale` row reconnects and verifies against a fresh tick |
 | 5 failures in 10 min → fall back to REST polling → L1 | 🟡 backoff and L1 exist, the explicit 5-in-10 fallback is not wired |
-| API errors / 429 → back off, lower rate, open a 60 s circuit breaker | 🟡 backoff + rate limiter + error-rate L1; **no circuit breaker object** |
-| Stuck order → query by client id, cancel, reconcile | 🟡 `expire_stale_entries` cancels on deadline; no query-by-id pass |
+| API errors / 429 → back off, lower rate, open a 60 s circuit breaker | ✅ B: `CircuitBreaker` (open 60 s, one half-open probe) + `api_pressure` row halves the rate bucket and verifies with a real `get_open_orders()` |
+| Stuck order → query by client id, cancel, reconcile | ✅ in two halves. **Entries** were already covered by `expire_stale_entries` (query by client id → cancel → reconcile). **Exits** were the real gap: `_exiting` was only a 120 s re-entrancy guard, so a market exit the venue ignored left the position open with no query, no cancel and no retry. B's `exit_stuck` row clears the guard and re-submits at market, and fails after three re-submissions so the ladder takes it to L2 instead of looping |
 | Strategy exception → restart, re-warm, 3 restarts/hour, then disable | ✅ PR A: `strategy_faults` (3/hour) then `strategy_disabled` + CRIT event |
 | Candle mismatch → repair from REST, mark the window | ⬜ |
 | Process crash → restart, reconcile before trading | ✅ (startup recovery + reconciliation gate) |
+| Position open with no protective order → place the stop | ✅ B: `position_unprotected` row calls `_ensure_protection` and verifies `stop_order_id`; paper mode is skipped because the local monitor is the stop there |
 | Hung process → watchdog restarts; flatten first if a position is unprotected | 🟡 watchdog escalates to L2 and can flatten; no restart |
 | Database lock / corruption → retry, checkpoint, restore + replay | 🟡 WAL + retry; restore/replay is a runbook step, not code |
-| Disk filling → purge per retention, then L1 | ✅ (`apply_retention`, disk warn/pause thresholds) |
+| Disk filling → purge per retention, then L1 | ✅ `apply_retention` + thresholds, and B: `disk_pressure` row purges, then verifies the fill actually dropped |
+| Ledger/adapter disagree → reconcile, and if it still disagrees, stop | ✅ B: `reconcile_mismatch` row cancels an order the venue holds and we do not, re-reconciles, and verifies the result is `ok`. Found by running a real five-minute session, where the first version "reconciled" and reported the identical mismatch |
 | Memory growth → controlled restart at a safe moment | ⬜ |
 | Clock drift → NTP resync, then L1 | 🟡 drift measured in `live-check`; no forced resync |
 | Model failure/drift → roll back, then rules, then flat | 🟡 `MlSignal` returns nothing without an approved card (fails closed); no registry rollback |
@@ -66,6 +68,10 @@ report. A state change writes a `health_change` event - the audit trail §20.4 a
 | --- | --- |
 | Ladder: retry → restart → fallback → degraded → L1 → L2 → L3 | ✅ L0–L3 with triggers, incidents and auto-resume for infrastructure causes |
 | Restart limits: 3 per component per hour | ✅ `RestartBudget`, enforced for strategies (PR A) |
+| Every heal action is verified, unverified counts as failure | ✅ B: `Playbook` runs detect → act → verify; a false verify writes `heal_failed` and counts toward escalation |
+| Escalation is once per burst, never per attempt | ✅ B: 3 failures inside 10 min escalate once, then the window clears |
+| Bounded retries: cooldown per row | ✅ B: 30 s-30 min per row, so a broken repair cannot become a busy loop |
+| Healing may only cancel, reduce, close, protect | ✅ B: `SAFE_ACTIONS` is an allowlist and every wired row uses one of them |
 | Flapping detector: >5 state changes in 10 min holds at L1 | ✅ detected and reported by `HealthModel.flapping`; **not yet wired to force L1** |
 | Post-heal checklist before returning to L0 | 🟡 auto-resume requires reconciliation `ok` + 10 min sustained health; the full checklist is not a gate |
 | Auto-resume only from L1, infrastructure causes only | ✅ (`AUTO_RESUME_TRIGGERS`) |
@@ -85,10 +91,11 @@ report. A state change writes a `health_change` event - the audit trail §20.4 a
 
 | Requirement | Today |
 | --- | --- |
-| One test per playbook row | 🟡 5 health wiring tests + 16 model tests; the rest of the table is not covered |
-| MTTR targets (feed <10 s, worker <5 s, restart+reconcile <60 s) | ⬜ nothing measures MTTR yet |
+| One test per playbook row | 🟡 B covers all six wired rows (`tests/integration/test_heal_engine.py`) and the machinery (`tests/unit/test_heal.py`); the unwired rows in the table above cannot be tested because they do not exist yet |
+| Injection tests fail first, then get repaired | ✅ B: the stale-feed test asserts the repair *cannot* verify in replay and that escalation follows; the reconcile and stuck-exit tests assert the repair verifies |
+| MTTR targets (feed <10 s, worker <5 s, restart+reconcile <60 s) | ✅ per-row `mttr_seconds` recorded on every outcome, compared with the row's target and printed by `tradebot health` |
 | Monthly game day in paper mode | ⬜ |
-| Reported metrics: uptime, MTTR, heals, escalations, flapping | 🟡 events are recorded; no aggregate report |
+| Reported metrics: uptime, MTTR, heals, escalations, flapping | 🟡 `Playbook.metrics()` gives attempts/verified/p50/p95/target per row; uptime and flapping reporting are still event-only |
 
 ### 20.7 What self-healing cannot fix — ✅ documented
 
@@ -124,7 +131,7 @@ shadow form; **fund** does not exist.
 | PR | Scope | State |
 | --- | --- | --- |
 | **A** | Health model, component checks, `tradebot health`, `/api/health`, report section, restart budget for strategies, audit events | ✅ merged |
-| **B** | Heal playbook table + circuit breaker (60 s, 429-aware) + stuck-order query-by-id + one injection test per row | ▶ next |
+| **B** | Heal playbook table + circuit breaker (60 s, half-open probe) + stuck-**exit** sweep + verification, cooldowns, escalation + MTTR + one injection test per wired row | ✅ this PR |
 | **C** | Watchdog v2: restart on lost heartbeat, flatten-if-unprotected first, dead man's switch + second alert channel | ⬜ |
 | **D** | Autonomy ledger + approval flow + forbidden-action tests (§21.7) + flapping forces L1 | ⬜ |
 | **E** | Market graph (§21.2) and the contagion exposure cut | ⬜ |
@@ -139,4 +146,15 @@ shadow form; **fund** does not exist.
 - Risk and kill-switch limits stay read-only to the trading process; a model may never
   change them.
 - Every autonomous action is logged; approval requests carry numbers and expire.
+
+### What PR B deliberately did not do
+
+- **Dead man's switch and the second alert channel** (PR C). Both need a process that
+  outlives the bot, so they belong with watchdog v2.
+- **Nothing that touches risk limits.** The playbook's only escalation path is
+  `killswitch.trigger`, which is the same lever a human pulls; it cannot raise limits,
+  resize positions upward, or re-enable a disabled strategy.
+- **Unwired rows stay unwired.** Candle repair, memory restart, clock resync, config
+  keep-last-good, alert retry queue and exchange status polling are listed as ⬜ above
+  rather than being claimed by a table entry.
 - If a mechanism cannot be verified here, it is marked 🔒 rather than claimed.

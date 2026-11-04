@@ -144,7 +144,13 @@ Tracked in detail in [`BUILD_PLAN_20_21.md`](BUILD_PLAN_20_21.md); this is the r
 - [x] **Health model** — every component reports liveness / readiness / correctness;
       `tradebot health`, `/api/health`, and the daily report all read the same snapshot.
 - [x] **Restart budget** — three faults an hour, then the strategy is disabled and escalated.
-- [ ] **Heal playbook** — 17 rows, one injection test each, circuit breaker, stuck-order query.
+- [x] **Heal playbook core** — six rows wired end to end (stale feed, API pressure + 60 s
+      circuit breaker, stuck *exit* re-submitted at market, unprotected position gets its
+      stop, disk purge, ledger/adapter reconciliation). Every action is verified; an
+      unverified repair counts as a failure; three failures in ten minutes escalate once.
+      MTTR per row is compared with the §20.6 target and printed by `tradebot health`.
+- [ ] **Heal playbook, remaining rows** — candle repair, memory restart, clock resync,
+      config keep-last-good, alert retry queue, exchange status polling, model rollback.
 - [ ] **Watchdog v2** — restart on lost heartbeat, flatten-if-unprotected, dead man's switch.
 - [ ] **Autonomy ledger + approvals + forbidden-action tests** (§21.7).
 - [ ] **Market graph, allocator, lifecycle manager, fund loop** (§21.2–21.5).

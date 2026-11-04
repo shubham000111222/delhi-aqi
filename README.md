@@ -82,6 +82,7 @@ no API key is needed.
 | Profit handling: 50% at 1.5R, break-even, 3-ATR chandelier trail, daily profit locks | done | `engine.py` |
 | Decimal ledger with average entry, fees, realized/unrealized PnL and invariants | done | `portfolio/ledger.py` |
 | Reconciliation against the venue every health tick | done | `engine.reconcile` |
+| Self-healing playbook: six verified repair rows (stale feed, API pressure + 60 s breaker, stuck exit, unprotected position, disk, reconcile), cooldowns, one escalation per burst, MTTR vs target | done | `heal.py`, `engine._build_playbook` |
 | Daily report (11 sections) → markdown, HTML, JSON, Telegram text, trades CSV, tax CSV | done | `reporting/daily.py` |
 | Tax reserve (30%) and TDS tracking for Schedule VDA records | done | `portfolio/ledger.py`, `reporting/` |
 | Dashboard: equity curve, positions, risk usage, signals with reasons, trades, execution cost, veto breakdown by risk check, event log, controls, live connection bar | done | `dashboard/` |
@@ -228,7 +229,7 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | `tradebot metrics` | metrics, Monte Carlo and acceptance gates for the paper database |
 | `tradebot run` | paper trading on the configured feed until Ctrl-C or `--minutes N` (`--mlflow DIR` logs the session on exit, `--mlflow-server URI` streams it live, `--news-url` adds the reduce-only sentiment overlay, `--meta-gate` adds the meta veto filter, `--ledger-gate` adds one trained on the bot's own trades) |
 | `tradebot status` | positions, kill level, recent events |
-| `tradebot health` | one health check: per-component `HEALTHY`/`DEGRADED`/`FAILED` with the failing question (exit 1 if any critical component is `FAILED`) |
+| `tradebot health` | one health check: per-component `HEALTHY`/`DEGRADED`/`FAILED` with the failing question (exit 1 if any critical component is `FAILED`), plus the heal playbook's attempts, verified count, p50 MTTR and target per row |
 | `tradebot report` | build today's report now |
 | `tradebot pause` / `resume` / `kill` / `lockdown` | manual kill-switch controls |
 | `tradebot drill` | fire drill: flatten and measure time-to-flat |

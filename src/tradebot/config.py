@@ -139,6 +139,9 @@ class ExecutionConfig(_Strict):
     #: inside this many basis points. 0 disables the cap (the paper book is then the only
     #: limit, which is what an uncalibrated model would amount to anyway).
     max_slippage_bps: float = 25.0
+    #: §20.3 stuck-order row: an exit that has not closed its position after this long is
+    #: treated as stuck and re-submitted at market. Getting out matters more than the price.
+    exit_stuck_seconds: float = 60.0
 
 
 class WatchdogConfig(_Strict):
