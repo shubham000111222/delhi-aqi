@@ -136,13 +136,19 @@ def _print(obj: object) -> None:
 
 
 async def _build_engine(cfg: Config, *, store_path: str | None = None, sim: bool = False, start: datetime | None = None):
+    from .alerts.notifier import Notifier
+    from .alerts.router import router_from_config
     from .data.feed import SyntheticFeed
     from .engine import Engine
 
     clock = SimClock(start or utcnow()) if sim else Clock()
     store = Store(store_path or cfg.settings.db_path)
     feed = SyntheticFeed(cfg, clock) if cfg.settings.feed.value == "synthetic" else None
-    engine = await Engine.build(cfg, clock=clock, store=store, feed=feed)
+    # Every engine gets a delivery path now: disk first, then Telegram and the independent
+    # webhook, with a retry queue. Before this, no CLI-built engine had a notifier at all,
+    # so `alerting` was permanently DEGRADED and alerts went nowhere.
+    notifier = Notifier(cfg, store, router=router_from_config(cfg, store))
+    engine = await Engine.build(cfg, clock=clock, store=store, feed=feed, notifier=notifier)
     return engine
 
 
@@ -582,6 +588,105 @@ def cmd_health(args: argparse.Namespace) -> int:
     return 0 if components.get("overall") != "FAILED" else 1
 
 
+def cmd_alerts(args: argparse.Namespace) -> int:
+    """Prove the alert path, or drain the retry queue.
+
+    `--test` is the operator's answer to "would I actually be told?" - it writes the file,
+    attempts every configured remote channel, and prints which one took it. If nothing did,
+    the alert is queued, which is also the honest answer.
+    """
+    from .alerts.notifier import Notifier
+    from .alerts.router import router_from_config
+
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    router = router_from_config(cfg, store)
+    notifier = Notifier(cfg, store, router=router)
+
+    async def _go() -> dict[str, Any]:
+        if args.flush:
+            delivered = await notifier.flush()
+            return {"flushed": delivered, **router.as_dict()}
+        text = args.text or (
+            "tradebot alert test: if you can read this, the alert path works. "
+            f"mode {cfg.mode.value}, {len(router.remote_channels)} remote channel(s)."
+        )
+        delivered = await notifier.send(text, level="WARN", key="alert-test")
+        return {"delivered_remotely": delivered, **router.as_dict()}
+
+    result = asyncio.run(_go())
+    _print(result)
+    if args.flush:
+        return 0
+    return 0 if result.get("delivered_remotely") else 3
+
+
+def _supervisor_event(store: Store) -> Any:
+    """Write supervisor decisions into the event log; return None (log_event returns int)."""
+
+    def record(kind: str, payload: dict[str, Any]) -> None:
+        store.log_event(
+            "watchdog_supervisor", {"kind": kind, **payload}, level="WARN", actor="watchdog"
+        )
+
+    return record
+
+
+def cmd_watchdog(args: argparse.Namespace) -> int:
+    """Supervision: one pass, the loop, or a supervised restart of the bot.
+
+    `--once` is for cron and for the game-day drill; `--supervise` is the long-running form
+    that can actually restart the bot. In paper mode the preflight is a no-op (there is no
+    venue to flatten), which is why the mode is printed with every result.
+    """
+    from .alerts.router import router_from_config
+    from .watchdog.supervisor import ProcessSpawner, RestartBudget, Supervisor
+    from .watchdog.watchdog import Watchdog
+
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    router = router_from_config(cfg, store)
+    supervisor = None
+    # The watchdog can only flatten what it can reach. Without a venue client it still
+    # escalates, alerts and restarts - it just cannot sell, and it says so in its output
+    # rather than implying protection it does not have.
+    actions = None
+    if args.supervise:
+        supervisor = Supervisor(
+            spawner=ProcessSpawner(cwd=Path.cwd()),
+            budget=RestartBudget(max_per_hour=cfg.settings.watchdog.restart_max_per_hour),
+            verify_seconds=cfg.settings.watchdog.restart_verify_seconds,
+            on_event=_supervisor_event(store),
+        )
+    watch = Watchdog(cfg, store, router=router, supervisor=supervisor, actions=actions)
+    if args.interval:
+        watch.interval = max(0.5, args.interval)
+
+    async def _go() -> dict[str, Any]:
+        if args.once:
+            return await watch.act_async()
+        stop = asyncio.Event()
+        task = asyncio.create_task(watch.run(stop))
+        try:
+            while not task.done():
+                await asyncio.sleep(1.0)
+        finally:
+            stop.set()
+            await task
+        return {"stopped": True}
+
+    result = asyncio.run(_go())
+    result["mode"] = cfg.mode.value
+    result["deadman"] = watch.deadman.state()
+    result["venue_client"] = (
+        "none: this process cannot flatten, only escalate/alert/restart"
+        if actions is None
+        else "attached"
+    )
+    _print(result)
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     cfg = _config(args)
     store = Store(cfg.settings.db_path)
@@ -911,6 +1016,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     hlth = sub.add_parser("health", help="run one health check and print component state")
     hlth.add_argument("--json", action="store_true")
+
+    alr = sub.add_parser("alerts", help="prove the alert path, or drain the retry queue")
+    alr.add_argument("--test", action="store_true", help="send one test alert (default action)")
+    alr.add_argument("--flush", action="store_true", help="retry queued alerts now")
+    alr.add_argument("--text", default=None, help="custom alert text")
+    alr.add_argument("--json", action="store_true")
+
+    wdp = sub.add_parser("watchdog", help="supervision: one pass or the supervised loop")
+    wdp.add_argument("--once", action="store_true", help="one pass, then exit")
+    wdp.add_argument(
+        "--supervise",
+        action="store_true",
+        help="restart the bot process when the heartbeat is lost (budget: 3/hour)",
+    )
+    wdp.add_argument("--interval", type=float, default=None, help="seconds between passes")
+    wdp.add_argument("--json", action="store_true")
 
     bfh = sub.add_parser(
         "backfill-history",
@@ -2658,6 +2779,8 @@ def main(argv: list[str] | None = None) -> int:
         "backfill": cmd_backfill,
         "backfill-history": cmd_backfill_history,
         "health": cmd_health,
+        "alerts": cmd_alerts,
+        "watchdog": cmd_watchdog,
         "experiments": cmd_experiments,
         "news": cmd_news,
         "research": cmd_research,

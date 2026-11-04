@@ -13,7 +13,7 @@ depends on.
 > data they already do. A project that reports its own failure is finished; one that
 > manufactures a pass is not.
 
-**Last updated:** 2026-11-04 · **Suite:** 607 passed, 2 skipped · **Archive as of this
+**Last updated:** 2026-11-04 · **Suite:** 708 passed, 2 skipped · **Archive as of this
 note:** 30 days × 5 symbols of real 1m Binance candles (216,198 bars).
 
 ---
@@ -151,7 +151,14 @@ Tracked in detail in [`BUILD_PLAN_20_21.md`](BUILD_PLAN_20_21.md); this is the r
       MTTR per row is compared with the §20.6 target and printed by `tradebot health`.
 - [ ] **Heal playbook, remaining rows** — candle repair, memory restart, clock resync,
       config keep-last-good, alert retry queue, exchange status polling, model rollback.
-- [ ] **Watchdog v2** — restart on lost heartbeat, flatten-if-unprotected, dead man's switch.
+- [x] **Watchdog v2** — restart on a lost heartbeat (3/hour, then refused and escalated),
+      flatten-if-unprotected *before* the new process starts, verification that the restarted
+      bot actually heartbeats, a latching dead man's switch armed only in testnet/live, and an
+      alert path with a file floor, an independent webhook and a retry queue.
+      `tradebot watchdog --once`, `tradebot alerts --test`.
+- [ ] **Watchdog v2, the part a host must do** — `ProcessSpawner` starts a child of the
+      watchdog, so surviving a reboot needs systemd/Docker. Until then, supervision dies with
+      its parent and says so.
 - [ ] **Autonomy ledger + approvals + forbidden-action tests** (§21.7).
 - [ ] **Market graph, allocator, lifecycle manager, fund loop** (§21.2–21.5).
   The allocator ships **only** if it beats equal weighting after costs in backtest.

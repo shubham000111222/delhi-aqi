@@ -96,6 +96,17 @@ execution:
 watchdog:
   heartbeat_seconds: 2
   heartbeat_lost_seconds: 10
+  # a file the engine touches on every tick; the dead man's switch reads it, not the db
+  heartbeat_file: heartbeat
+  # trip the switch after this long with no heartbeat (testnet/live only)
+  deadman_seconds: 30
+  # restarts the supervisor may perform per hour, then it refuses and escalates
+  restart_max_per_hour: 3
+  # how long a restarted process has to prove itself by heartbeating
+  restart_verify_seconds: 60
+  # alert floor (always written) and the retry queue for undelivered alerts
+  alert_log: alerts.jsonl
+  alert_queue: alerts-queue.jsonl
 
 logging:
   level: INFO

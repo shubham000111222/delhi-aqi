@@ -28,9 +28,19 @@ class SentAlert:
 
 
 class Notifier:
-    def __init__(self, config: Config, store: Any = None, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        store: Any = None,
+        client: httpx.AsyncClient | None = None,
+        router: Any = None,
+    ) -> None:
         self.cfg = config
         self.store = store
+        #: When a router is supplied, delivery is *its* job: the file floor, both remote
+        #: transports, and the retry queue. Direct Telegram below is the legacy path kept
+        #: for callers that pass no router.
+        self.router = router
         self.token = config.secrets.telegram_bot_token
         self.chat_id = config.secrets.telegram_chat_id
         self.min_level = config.settings.alerts.min_level.upper()
@@ -63,6 +73,8 @@ class Notifier:
             return False
         log.info('{"event":"alert","level":"%s","text":"%s"}', level, text.replace("\n", " | ")[:400])
         self.sent.append(SentAlert(time.monotonic(), level, text))
+        if self.router is not None:
+            return bool(await self.router.send(text, level=level, key=key))
         if not self.enabled:
             return False
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
@@ -85,6 +97,12 @@ class Notifier:
 
     async def warn(self, text: str, key: str | None = None) -> bool:
         return await self.send(text, level="WARN", key=key)
+
+    async def flush(self) -> int:
+        """Deliver whatever the router could not reach last time. 0 when there is nothing."""
+        if self.router is None:
+            return 0
+        return int(await self.router.flush())
 
 
 class ConsoleNotifier(Notifier):

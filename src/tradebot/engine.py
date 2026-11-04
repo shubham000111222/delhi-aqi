@@ -21,6 +21,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from .config import Config, Mode
@@ -182,6 +183,10 @@ class Engine:
         self._last_snapshot: datetime | None = None
         self._equity_points = 0
         self._reconcile_state = "ok"
+        beat = Path(config.settings.watchdog.heartbeat_file)
+        self._heartbeat_path = beat if beat.is_absolute() else Path(config.settings.state_dir) / beat
+        self._heartbeat_warns = 0
+        self._last_alert_flush: datetime | None = None
         self.starting_capital = config.settings.starting_capital_usdt
         self.ramp = RampController(config, store)
         self._load_state()
@@ -1132,13 +1137,28 @@ class Engine:
         )
 
     def _heartbeat(self) -> None:
-        """The watchdog watches this. Silence means the bot is wedged or dead."""
-        self.store.kv_set("heartbeat", iso(self.clock.now()))
+        """The watchdog watches this. Silence means the bot is wedged or dead.
+
+        It is written twice on purpose: the store row is what the watchdog reads when it
+        can read, and the file is what the dead man's switch reads when it cannot. A
+        database that is locked or on a full disk still leaves the file's mtime behind, so
+        "the bot is gone" is observable from outside the process either way.
+        """
+        now = self.clock.now()
+        self.store.kv_set("heartbeat", iso(now))
         self.store.kv_set("heartbeat_events", self.stats.events)
+        try:
+            self._heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+            self._heartbeat_path.write_text(iso(now), encoding="utf-8")
+        except OSError as exc:  # a full disk must not kill the loop, but it is a fault
+            if self._heartbeat_warns < 3:
+                self._heartbeat_warns += 1
+                self._log("heartbeat_file_failed", {"error": str(exc)}, level="WARN")
 
     async def health_check(self) -> dict[str, Any]:
         now = self.clock.now()
         self._heartbeat()
+        await self._flush_alerts(now)
         dq = self.cfg.settings.data_quality
         stale = self.market.stale_symbols(now, dq.stale_symbol_seconds)
         all_stale = self.market.all_stale(now, dq.stale_all_seconds)
@@ -1445,6 +1465,38 @@ class Engine:
         level = str(payload.pop("level", "INFO"))
         self._log(kind, payload, level=level, actor="heal", ts=self.clock.now())
 
+    async def _flush_alerts(self, now: datetime) -> None:
+        """Retry undelivered alerts, at most once a minute.
+
+        A queue that is retried on every tick hammers a transport that is already down; one
+        that is never retried is a queue nobody reads.
+        """
+        if self.notifier is None or not hasattr(self.notifier, "flush"):
+            return
+        if self._last_alert_flush is not None and (now - self._last_alert_flush).total_seconds() < 60:
+            return
+        self._last_alert_flush = now
+        with contextlib.suppress(Exception):
+            await self.notifier.flush()
+
+    def _alerts_independent(self) -> bool:
+        """One transport is a single point of failure for the alarm system (§20.5)."""
+        router = getattr(self.notifier, "router", None)
+        return bool(router is not None and router.independent)
+
+    def _alert_transport_detail(self) -> str:
+        if self.notifier is None:
+            return "no notifier: alerts go to the event log only"
+        router = getattr(self.notifier, "router", None)
+        if router is None:
+            return "single transport (telegram)"
+        names = [c.name for c in router.remote_channels if getattr(c, "configured", True)]
+        if not names:
+            return "file floor only: no remote transport configured"
+        if not self._alerts_independent():
+            return f"one remote transport ({', '.join(names)}): set ALERT_WEBHOOK_URL for a second"
+        return f"transports: {', '.join(names)}"
+
     def _report_component_health(
         self,
         *,
@@ -1544,7 +1596,11 @@ class Engine:
         self.health.report(
             "alerting",
             now=now,
-            transport=Check(readiness=self.notifier is not None, detail="" if self.notifier else "not configured"),
+            transport=Check(
+                readiness=self.notifier is not None,
+                correctness=self._alerts_independent(),
+                detail=self._alert_transport_detail(),
+            ),
         )
         self.health.report(
             "ai",
