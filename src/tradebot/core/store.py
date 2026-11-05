@@ -17,7 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from .clock import iso, utc, utcnow
+from .clock import iso, parse_iso, utc, utcnow
 from .models import (
     EquitySnapshot,
     Fill,
@@ -182,6 +182,30 @@ CREATE TABLE IF NOT EXISTS experiments (
     notes TEXT
 );
 
+CREATE TABLE IF NOT EXISTS autonomy (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    level INTEGER NOT NULL,
+    detail TEXT,
+    approved_by TEXT,
+    outcome TEXT NOT NULL DEFAULT 'ok'
+);
+
+CREATE TABLE IF NOT EXISTS approvals (
+    id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    detail TEXT,
+    numbers TEXT NOT NULL,
+    state TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    decided_at TEXT,
+    decided_by TEXT
+);
+
 CREATE TABLE IF NOT EXISTS holdout_uses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
@@ -299,6 +323,113 @@ class Store:
             }
             for r in rows
         ]
+
+    # --- autonomy ledger and approvals (§21.7) ----------------------------
+    def add_autonomy(
+        self,
+        *,
+        ts: str,
+        actor: str,
+        action: str,
+        level: int,
+        detail: str = "",
+        approved_by: str | None = None,
+        outcome: str = "ok",
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO autonomy (ts, actor, action, level, detail, approved_by, outcome)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (ts, actor, action, int(level), detail, approved_by, outcome),
+            )
+
+    def autonomy_actions(self, limit: int = 100, actor: str | None = None) -> list[dict[str, Any]]:
+        """Newest last, so a printed transcript reads in the order things happened."""
+        sql = "SELECT * FROM autonomy"
+        params: list[Any] = []
+        if actor:
+            sql += " WHERE actor=?"
+            params.append(actor)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(int(limit))
+        rows = self._query(sql, params)
+        labels = {0: "observe", 1: "alert", 2: "correct", 3: "protect", 4: "allocate", 5: "self-modify"}
+        return [
+            {
+                **dict(row),
+                "level_label": labels.get(int(row["level"]), str(row["level"])),
+            }
+            for row in reversed(rows)
+        ]
+
+    @staticmethod
+    def _approval_timestamp(value: datetime) -> str:
+        # Fixed width is essential: lexical SQLite comparisons of ISO strings with
+        # and without fractional seconds do not sort chronologically.
+        return utc(value).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+    def save_approval(self, record: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO approvals (id, ts, actor, action, detail, numbers, state, expires_at,"
+                " decided_at, decided_by) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    record["id"],
+                    self._approval_timestamp(parse_iso(record["created_at"])),
+                    record["actor"],
+                    record["action"],
+                    record.get("detail", ""),
+                    json.dumps(record.get("numbers") or {}),
+                    record["state"],
+                    self._approval_timestamp(parse_iso(record["expires_at"])),
+                    record.get("decided_at"),
+                    record.get("decided_by"),
+                ),
+            )
+
+    def transition_approval(
+        self, request_id: str, *, state: str, now: datetime, by: str | None = None,
+        detail: str | None = None,
+    ) -> bool:
+        """Atomically decide a pending request once; expired requests cannot be approved."""
+        if state not in {"approved", "rejected", "expired"}:
+            raise ValueError("invalid approval transition")
+        comparison = "<=" if state == "expired" else ">"
+        cursor = self._exec(
+            "UPDATE approvals SET state=?, decided_at=?, decided_by=?, detail=COALESCE(?, detail) "
+            f"WHERE id=? AND state='pending' AND expires_at {comparison} ?",
+            (state, self._approval_timestamp(now), by, detail, request_id, self._approval_timestamp(now)),
+        )
+        return cursor.rowcount == 1
+
+    def approval(self, request_id: str) -> dict[str, Any] | None:
+        rows = self._query("SELECT * FROM approvals WHERE id=?", (request_id,))
+        return self._approval_row(rows[0]) if rows else None
+
+    def approvals(self, state: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM approvals"
+        params: list[Any] = []
+        if state:
+            sql += " WHERE state=?"
+            params.append(state)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        params.append(int(limit))
+        return [self._approval_row(row) for row in self._query(sql, params)]
+
+    @staticmethod
+    def _approval_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "actor": row["actor"],
+            "action": row["action"],
+            "detail": row["detail"] or "",
+            "numbers": json.loads(row["numbers"] or "{}"),
+            "state": row["state"],
+            "created_at": parse_iso(row["ts"]),
+            "expires_at": parse_iso(row["expires_at"]),
+            "decided_at": parse_iso(row["decided_at"]) if row["decided_at"] else None,
+            "decided_by": row["decided_by"],
+        }
 
     def count_events(self, kind: str, since: datetime | None = None) -> int:
         if since:
@@ -627,10 +758,34 @@ class Store:
         actor: str = "system",
         cooldown_until: datetime | None = None,
         ts: datetime | None = None,
-    ) -> None:
+        only_escalate: bool = False,
+        only_if_missing: bool = False,
+        expected_state: dict[str, Any] | None = None,
+        require_no_flapping_hold: bool = False,
+    ) -> bool:
         now = ts or utcnow()
-        previous = self.kill_level()
         with self.transaction() as conn:
+            row = conn.execute("SELECT value FROM kv WHERE key='kill_state'").fetchone()
+            current = json.loads(row["value"]) if row else {"level": "L0"}
+            previous = str(current.get("level", "L0"))
+            if only_if_missing and row is not None:
+                return False
+            if expected_state is not None and current != expected_state:
+                return False
+            if only_escalate:
+                ranks = {"L0": 0, "L1": 1, "L2": 2, "L3": 3}
+                # Unknown/corrupt levels must never be downgraded.
+                if level not in ranks or previous not in ranks or ranks[level] <= ranks[previous]:
+                    return False
+            if require_no_flapping_hold:
+                hold_row = conn.execute("SELECT value FROM kv WHERE key='health_flapping_hold'").fetchone()
+                if hold_row is not None:
+                    try:
+                        hold = json.loads(hold_row["value"])
+                        if now <= parse_iso(hold["until"]):
+                            return False
+                    except (KeyError, TypeError, ValueError):
+                        return False
             conn.execute(
                 """INSERT INTO kill_events(ts,level,previous,trigger,reason,actor,cooldown_until)
                    VALUES(?,?,?,?,?,?,?)""",
@@ -670,6 +825,7 @@ class Store:
                     json.dumps({"level": level, "previous": previous, "trigger": trigger, "reason": reason}),
                 ),
             )
+        return True
 
     def kill_state(self) -> dict[str, Any]:
         state = self.kv_get("kill_state", {"level": "L0"}) or {"level": "L0"}

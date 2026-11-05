@@ -24,8 +24,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from .autonomy import AutonomyLedger, AutonomyLevel
 from .config import Config, Mode
-from .core.clock import Clock, SimClock, iso, timeframe_seconds, utc, utcnow
+from .core.clock import Clock, SimClock, iso, parse_iso, timeframe_seconds, utc, utcnow
 from .core.logging import JsonMessage, get_logger
 from .core.models import (
     Candle,
@@ -49,7 +50,7 @@ from .execution.adapters.base import ExchangeAdapter
 from .execution.order_manager import OrderManager
 from .execution.slippage import SlippageRecorder, size_for_budget
 from .heal import Playbook, Row
-from .health import Check, HealthModel, RestartBudget
+from .health import Check, HealthModel, RestartBudget, State
 from .portfolio.ledger import ClosedTrade, EntryPlan, Ledger
 from .reporting.daily import build_daily_report, tax_ledger_rows, write_reports
 from .risk.engine import RiskContext, RiskEngine
@@ -136,6 +137,7 @@ class Engine:
         # optional: an unconfigured notifier or model must not hold the system
         self.health.register("alerting", critical=False)
         self.health.register("ai", critical=False)
+        self._restore_health_transitions()
         # §20.4: a deterministic bug restarts cleanly forever; three an hour, then stop.
         self.strategy_faults = RestartBudget(max_per_hour=3)
         self._disabled_strategies: dict[str, str] = {}
@@ -183,6 +185,9 @@ class Engine:
         self._last_snapshot: datetime | None = None
         self._equity_points = 0
         self._reconcile_state = "ok"
+        # Partial audit coverage: this ledger does not intercept every action or enforce
+        # permissions at trading and configuration boundaries.
+        self.autonomy = AutonomyLedger(store=store, clock=clock)
         beat = Path(config.settings.watchdog.heartbeat_file)
         self._heartbeat_path = beat if beat.is_absolute() else Path(config.settings.state_dir) / beat
         self._heartbeat_warns = 0
@@ -190,6 +195,26 @@ class Engine:
         self.starting_capital = config.settings.starting_capital_usdt
         self.ramp = RampController(config, store)
         self._load_state()
+        # Close the crash window between persisting a sixth transition and setting L1.
+        self._hold_on_flapping(now=self.clock.now())
+
+    def _restore_health_transitions(self) -> None:
+        """Restore the recent health-change window so restarting does not erase flapping."""
+        now = self.clock.now()
+        rows = self.store.events(limit=-1, kinds=["health_change"], since=now - timedelta(minutes=10))
+        for row in reversed(rows):
+            payload = row["payload"]
+            component = self.health.components.get(payload.get("component"))
+            if component is None:
+                continue
+            try:
+                when = parse_iso(row["ts"])
+                state = State(payload["to"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if now - timedelta(minutes=10) <= when <= now:
+                component.transitions.append(when)
+                component.state = state
 
     # ------------------------------------------------------------------
     # construction
@@ -1201,9 +1226,12 @@ class Engine:
         self._report_component_health(
             now=now, disk_used=disk_used, error_rate=error_rate, all_stale=all_stale
         )
+        flapping = self._hold_on_flapping(now=now)
         healed = await self.playbook.tick(self) if self.running else []
         health = {
             "ts": iso(now),
+            "flapping_held": flapping,
+            "autonomy": self.autonomy.summary(),
             "components": self.health.snapshot(now=now, restart_budget=self.strategy_faults),
             "playbook": self.playbook.as_dict(now=now),
             "healed": [outcome.as_dict() for outcome in healed],
@@ -1219,6 +1247,42 @@ class Engine:
             "pending_orders": len(self.om.pending),
         }
         return health
+
+    def _hold_on_flapping(self, *, now: datetime) -> list[str]:
+        """§20.4: more than five state changes in ten minutes holds the system at L1.
+
+        A component that keeps collapsing is not healthy between collapses, and the
+        auto-resume ladder cannot tell the difference - it sees ten minutes of "fine" and
+        lifts the pause, then the component flaps again. So this trigger is deliberately
+        *not* in `AUTO_RESUME_TRIGGERS`: the hold is released by a human, not by the clock.
+        Optional components are ignored, for the same reason they cannot make the system
+        FAILED.
+        """
+        flapping = self.health.flapping(now=now)
+        critical = [name for name in flapping if self.health.components[name].critical]
+        if not critical:
+            return []
+        reason = f"flapping: {', '.join(critical)} changed state more than 5 times in 10 min"
+        # The sixth newest transition ages out last. Persist its deadline before
+        # returning so a restart or a separate CLI process cannot bypass the hold.
+        until: datetime | None = max(
+            sorted(self.health.components[name].transitions, reverse=True)[5] + timedelta(minutes=10)
+            for name in critical
+        )
+        existing = self.store.kv_get("health_flapping_hold")
+        if existing and until is not None:
+            try:
+                until = max(until, parse_iso(existing["until"]))
+            except (KeyError, TypeError, ValueError):
+                # Leave corrupt safety state in place: the kill switch fails closed.
+                until = None
+        if until is not None:
+            self.store.kv_set("health_flapping_hold", {"until": iso(until), "components": critical}, ts=now)
+        self._healthy_since = None
+        if self.killswitch.trigger(KillLevel.L1, trigger="flapping", reason=reason, actor="health"):
+            self.autonomy.record("health", "hold_for_flapping", AutonomyLevel.PROTECT, reason, ts=now)
+        self._log("health_flapping", {"components": critical}, level="WARN", actor="health")
+        return critical
 
     def _build_playbook(self) -> Playbook:
         """§20.3's rows, as detect / act / verify triples.
@@ -1459,9 +1523,26 @@ class Engine:
         )
 
     def _escalate_heal(self, level: KillLevel, trigger: str, reason: str) -> None:
-        self.killswitch.trigger(level, trigger=trigger, reason=reason, actor="heal")
+        # Raising a kill level only ever removes risk, which is a level-3 (protect) action.
+        if self.killswitch.trigger(level, trigger=trigger, reason=reason, actor="heal"):
+            self.autonomy.record(
+                "heal", f"kill_{level.value.lower()}", AutonomyLevel.PROTECT, f"{trigger}: {reason}",
+                ts=self.clock.now(),
+            )
+
+    #: Heal rows that can close or protect a position are level 3; the rest are repairs.
+    PROTECTIVE_ROWS = frozenset({"exit_stuck", "position_unprotected"})
 
     def _heal_event(self, kind: str, payload: dict[str, Any]) -> None:
+        row = str(payload.get("row", ""))
+        self.autonomy.record(
+            "heal",
+            f"{kind}:{row}" if row else kind,
+            AutonomyLevel.PROTECT if row in self.PROTECTIVE_ROWS else AutonomyLevel.CORRECT,
+            str(payload.get("action") or payload.get("detail") or "")[:500],
+            outcome="ok" if kind in ("heal", "heal_escalation") else "failed",
+            ts=self.clock.now(),
+        )
         level = str(payload.pop("level", "INFO"))
         self._log(kind, payload, level=level, actor="heal", ts=self.clock.now())
 
@@ -1706,7 +1787,16 @@ class Engine:
         self._resume(reason="new trading day; daily loss limit reset", now=now)
 
     def _resume(self, *, reason: str, now: datetime) -> None:
+        # A pre-existing L1 may have a different trigger; never lift it while a
+        # critical component is flapping, even at the daily-loss boundary.
+        if any(self.health.components[name].critical for name in self.health.flapping(now=now)):
+            self._healthy_since = None
+            return
+        trigger = str(self.killswitch.state.get("trigger", ""))
         if self.killswitch.auto_resume(reason=reason):
+            self.autonomy.record(
+                "engine", "auto_resume", AutonomyLevel.PROTECT, f"L1 {trigger} lifted: {reason}", ts=now
+            )
             self._reconcile_state = self._reconcile_state or "ok"
             self._log(
                 "kill_switch_auto_resume",

@@ -192,6 +192,7 @@ async def _run_backtest(
     engine = await Engine.build(cfg, clock=clock, store=store)
     if capital is not None:
         engine.ledger.starting_cash = capital
+        engine.ledger.cash = capital
         engine.adapter.cash = capital  # type: ignore[attr-defined]
         engine.starting_capital = capital
         store.kv_set("day_start_equity", to_str(capital))
@@ -525,6 +526,20 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_autonomy(args: argparse.Namespace) -> int:
+    """Show the partial autonomy audit ledger, without authorizing actions."""
+    from .autonomy import AutonomyLedger
+
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    try:
+        result = AutonomyLedger(store=store).summary()
+    finally:
+        store.close()
+    _print(result)
+    return 0
+
+
 def cmd_health(args: argparse.Namespace) -> int:
     """One health check, printed: what each component answered and what the model made of it.
 
@@ -648,8 +663,7 @@ def cmd_watchdog(args: argparse.Namespace) -> int:
     router = router_from_config(cfg, store)
     supervisor = None
     # The watchdog can only flatten what it can reach. Without a venue client it still
-    # escalates, alerts and restarts - it just cannot sell, and it says so in its output
-    # rather than implying protection it does not have.
+    # escalates and alerts. Live/testnet restart is blocked without verified preflight.
     actions = None
     if args.supervise:
         supervisor = Supervisor(
@@ -679,7 +693,7 @@ def cmd_watchdog(args: argparse.Namespace) -> int:
     result["mode"] = cfg.mode.value
     result["deadman"] = watch.deadman.state()
     result["venue_client"] = (
-        "none: this process cannot flatten, only escalate/alert/restart"
+        "none: cannot flatten; live/testnet restart blocked, paper restart only"
         if actions is None
         else "attached"
     )
@@ -1013,6 +1027,8 @@ def build_parser() -> argparse.ArgumentParser:
     bfl.add_argument("--write", action="store_true", help="write the candles to the archive")
     bfl.add_argument("--seed", type=int, default=7)
     bfl.add_argument("--json", action="store_true")
+
+    sub.add_parser("autonomy", help="show the partial autonomy audit ledger")
 
     hlth = sub.add_parser("health", help="run one health check and print component state")
     hlth.add_argument("--json", action="store_true")
@@ -1685,9 +1701,13 @@ def _start_command_listener(cfg: Config, engine: Any) -> asyncio.Task[Any] | Non
         allowed = frozenset({chat})
     else:  # pragma: no cover - guarded by the caller
         return None
+    def audit(kind: str, payload: dict[str, Any]) -> None:
+        engine.store.log_event(kind, payload, actor="telegram")
+
     router = CommandRouter(
         ops=build_ops(engine=engine, store=engine.store, clock=engine.clock),
         whitelist=allowed,
+        log=audit,
     )
     return asyncio.create_task(serve(router, transport))
 
@@ -2779,6 +2799,7 @@ def main(argv: list[str] | None = None) -> int:
         "backfill": cmd_backfill,
         "backfill-history": cmd_backfill_history,
         "health": cmd_health,
+        "autonomy": cmd_autonomy,
         "alerts": cmd_alerts,
         "watchdog": cmd_watchdog,
         "experiments": cmd_experiments,

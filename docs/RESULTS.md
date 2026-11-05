@@ -1,6 +1,6 @@
 # Results — measured, reproducible, and mostly negative
 
-Everything below was run on **2026-11-03** from commit `8486021` (plus the dashboard veto
+The historical results farther below were run on **2026-11-03** from commit `8486021` (plus the dashboard veto
 panel) in this repository, with the default config, on the **seeded synthetic market**.
 Nothing here is a claim about real crypto markets: the synthetic feed has regime shifts and
 correlated moves, which is enough to exercise the plumbing and nowhere near enough to
@@ -8,6 +8,55 @@ establish an edge.
 
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
+
+## 2026-11-04 — system recheck (working branch)
+
+- Automated suite after the repository audit: **758 passed, 2 skipped**; Ruff and mypy (88 source files) passed. See `REPO_AUDIT.md` for scope and limitations.
+- A 120-minute synthetic parity smoke test matched, but had **zero decisions and zero
+  fills**. It is only a transport smoke test, not meaningful trade parity evidence.
+- Corrected Telegram engine wiring: P&L uses the ledger's actual unrealized method;
+  report requests are scheduled and their completion/failure audited; remote resume cannot
+  clear L2/L3; lockdown now sets L3; flatten pauses entries before scheduling. These are
+  tested with a paper engine, not against the live Telegram service.
+- Live preflight now rejects large negative clock drift and future/malformed go/no-go
+  records. No live exchange execution was performed.
+- Paper dashboard on port 8000 responds inside the workspace and exposes read-only
+  component-health and partial-autonomy audit panels. The preview gateway was unreachable
+  from the user's browser; remote alert transports were not configured.
+- Major self-healing/self-sustaining components remain incomplete; see Phase 6 of
+  `CHECKLIST.md`. Passing automated tests is not proof of operational or trading readiness.
+
+## 2026-11-04 — synthetic backtest and walk-forward cash correction
+
+Run on the working tree based on `2c40d51`, with the existing default strategies and risk
+settings, paper execution, synthetic seed 7 and 1,000 USDT starting equity. The workspace
+had no historical-price archive; these are simulated prices, not real-market evidence.
+
+| Check | Result | Verdict |
+| --- | --- | --- |
+| 10-day backtest | equity 976.93 (−2.31%), 87 closed trades, win rate 35.6%, fees 23.28 USDT, PF 0.91, Sharpe −7.60, max DD −5.67%, MC p95 DD −7.09% | NOT PROMOTABLE: PF, Sharpe and trade count fail; this is not an out-of-sample PF |
+| Four-day cost stress | nominal −0.34% (38 trades); full rerun at 2× costs −0.99% (37 trades); same-period equal-weight buy-and-hold +1.35% | FAIL: both the 2×-fee estimate and the 2×-cost rerun lose money |
+| Three 1-day test windows | +2.13%, −1.00%, +0.72%; compounded +1.83%; 16 trades, PF 1.85, Sharpe −2.66, max DD −1.91%, MC p95 DD −1.91% | NOT PROMOTABLE: Sharpe and trade count fail; parameters were not refit and the sample is tiny |
+
+The walk-forward engine restarts with fresh positions for each segment and synthetic feeds
+are reseeded per window. These windows are not a continuous real-market out-of-sample test.
+A genuine multi-window test on recorded market data is still required.
+
+**Accounting correction:** while running this check, we found `run_segment` and the
+backtest `--capital` override changed the starting-capital label and adapter cash, but not
+the ledger's cash. Carried capital could therefore silently reset to the configured default
+in subsequent windows. Both paths now set ledger cash as well, with regression tests. The
+first walk-forward run from this session and all earlier walk-forward figures (including
+those below) are **unreliable and superseded**; the corrected figures above are from a rerun.
+The standard 10-day run used the default 1,000 USDT and did not use a capital override.
+
+Commands (PowerShell):
+
+```powershell
+python -m tradebot backtest --mode paper --feed synthetic --days 10 --seed 7
+python -m tradebot robustness --mode paper --feed synthetic --days 4 --seed 7 --cost-multiplier 2
+python -m tradebot walk-forward --mode paper --feed synthetic --train-days 3 --test-days 1 --windows 3 --seed 7
+```
 
 ## Headline
 
@@ -22,7 +71,7 @@ cost: 27.69 USDT of fees on a 1,000 USDT account over ten simulated days is 2.8%
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Walk-forward, 3 out-of-sample windows | `walk-forward --train-days 3 --test-days 1 --windows 3 --seed 5` | Windows +0.43%, −2.04%, +0.21% → compound **−1.42%**, "inconsistent"; OOS PF 0.20, Sharpe −11.4, 19 trades → **NOT PROMOTABLE** |
+| Walk-forward, 3 windows (**invalidated by the cash carry bug; see correction above**) | `walk-forward --train-days 3 --test-days 1 --windows 3 --seed 5` | Windows +0.43%, −2.04%, +0.21% → compound **−1.42%**, "inconsistent"; OOS PF 0.20, Sharpe −11.4, 19 trades → **NOT PROMOTABLE** |
 | Parameter sensitivity | `sensitivity --strategy S1_ema_trend --param ema_fast=12,20,30 --days 3` | Best cell +2.39%, neighbour median +2.35%, plateau share 1.0 → "broad plateau" — and then the multiple-testing line kills it: best Sharpe 0.02 is no better than the 1.48 expected from 3 attempts |
 | Parity against a recorded tape | `parity --minutes 1200` | **MATCH**: 22/22 decisions, 8/8 fills, 24,984 tape events |
 | Robustness | `robustness --days 4` | Nominal **−1.29%** (PF 0.79, 27 trades); at 2× costs **−2.25%** (PF 0.68, 26 trades). Cost stress **FAILS**; attribution: net −10.12 after 7.76 fees (77% of gross), buy-and-hold −0.36% |

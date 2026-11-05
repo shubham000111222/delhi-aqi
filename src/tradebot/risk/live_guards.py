@@ -191,7 +191,7 @@ class LiveGuardChecker:
         if clock_drift_seconds is None:
             results.append(GuardResult("preflight_clock", False, "clock drift unverified"))
         else:
-            drift_ok = clock_drift_seconds <= self.cfg.settings.data_quality.ntp_max_drift_seconds
+            drift_ok = abs(clock_drift_seconds) <= self.cfg.settings.data_quality.ntp_max_drift_seconds
             results.append(
                 GuardResult("preflight_clock", drift_ok, f"drift {clock_drift_seconds:.3f}s")
             )
@@ -259,9 +259,12 @@ class LiveGuardChecker:
             return GuardResult("go_nogo_record", False, "no go/no-go record in the database")
         if not record.get("passed"):
             return GuardResult("go_nogo_record", False, "last go/no-go record failed")
-        ts = utc(datetime.fromisoformat(str(record["ts"]).replace("Z", "+00:00")))
+        try:
+            ts = utc(datetime.fromisoformat(str(record["ts"]).replace("Z", "+00:00")))
+        except (KeyError, TypeError, ValueError):
+            return GuardResult("go_nogo_record", False, "go/no-go timestamp invalid or missing")
         age = now - ts
-        fresh = age <= timedelta(days=self.guards.go_nogo_max_age_days)
+        fresh = timedelta(0) <= age <= timedelta(days=self.guards.go_nogo_max_age_days)
         return GuardResult(
             "go_nogo_record",
             fresh,

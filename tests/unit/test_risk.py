@@ -192,6 +192,60 @@ class TestRiskChecks:
         assert any(level is KillLevel.L3 for _, level in drawdown)
 
 
+def test_cross_process_kill_escalation_is_visible_immediately(tmp_path):
+    path = tmp_path / "state.db"
+    one, two = Store(path), Store(path)
+    reader = KillSwitch(one, clock=SimClock(NOW))
+    watchdog = KillSwitch(two, clock=SimClock(NOW))
+    assert reader.can_open_entries()
+    watchdog.trigger(KillLevel.L3, trigger="test", reason="lockdown")
+    assert not reader.can_open_entries()
+    assert reader.level is KillLevel.L3
+    # A stale watchdog escalation or a racing initializer must not overwrite L3.
+    assert not one.set_kill_state("L2", only_escalate=True)
+    assert not one.set_kill_state("L0", only_if_missing=True)
+    assert two.kill_level() == "L3"
+    one.close()
+    two.close()
+
+
+def test_auto_resume_cannot_clear_a_concurrent_escalation(tmp_path, monkeypatch):
+    path = tmp_path / "state.db"
+    one, two = Store(path), Store(path)
+    switch = KillSwitch(one, clock=SimClock(NOW))
+    other = KillSwitch(two, clock=SimClock(NOW))
+    switch.trigger(KillLevel.L1, trigger="test", reason="pause")
+    original = one.set_kill_state
+
+    def race(*args, **kwargs):
+        other.trigger(KillLevel.L3, trigger="test", reason="concurrent lockdown")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(one, "set_kill_state", race)
+    assert not switch.auto_resume(reason="recovered")
+    assert two.kill_level() == "L3"
+    one.close()
+    two.close()
+
+
+def test_auto_resume_cannot_clear_a_new_flapping_hold(tmp_path, monkeypatch):
+    path = tmp_path / "state.db"
+    one, two = Store(path), Store(path)
+    switch = KillSwitch(one, clock=SimClock(NOW))
+    switch.trigger(KillLevel.L1, trigger="test", reason="pause")
+    original = one.set_kill_state
+
+    def race(*args, **kwargs):
+        two.kv_set("health_flapping_hold", {"until": (NOW + timedelta(minutes=10)).isoformat()})
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(one, "set_kill_state", race)
+    assert not switch.auto_resume(reason="recovered")
+    assert two.kill_level() == "L1"
+    one.close()
+    two.close()
+
+
 class TestKillSwitch:
     def test_escalates_but_never_auto_de_escalates(self):
         ks = KillSwitch(Store(), clock=SimClock(NOW))
@@ -285,6 +339,22 @@ class TestLiveGuards:
         fresh = checker._check_go_nogo(datetime(2024, 1, 5, tzinfo=UTC))
         stale = checker._check_go_nogo(datetime(2024, 3, 1, tzinfo=UTC))
         assert fresh.passed and not stale.passed
+
+    async def test_clock_guard_rejects_large_drift_in_either_direction(self, cfg):
+        for drift in (-100.0, 100.0, float("nan")):
+            checker = LiveGuardChecker(cfg, Store())
+            checks = await checker.check(clock_drift_seconds=drift)
+            assert not next(row for row in checks if row.name == "preflight_clock").passed
+
+    def test_go_nogo_future_and_corrupt_timestamps_fail_closed(self, cfg):
+        store = Store()
+        checker = LiveGuardChecker(cfg, store)
+        now = datetime(2024, 1, 5, tzinfo=UTC)
+        for raw in ("2099-01-01T00:00:00Z", "invalid", None):
+            store.kv_set("go_nogo", {"ts": raw, "passed": True})
+            assert not checker._check_go_nogo(now).passed
+        store.kv_set("go_nogo", {"passed": True})
+        assert not checker._check_go_nogo(now).passed
 
     def test_ramp_stages(self, cfg):
         store = Store()

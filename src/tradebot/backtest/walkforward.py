@@ -193,6 +193,7 @@ async def run_segment(
     engine = await Engine.build(cfg, clock=clock, store=store)
     if capital is not None:
         engine.ledger.starting_cash = capital
+        engine.ledger.cash = capital
         engine.adapter.cash = capital  # type: ignore[attr-defined]  # paper adapter exposes cash
         engine.starting_capital = capital
         store.kv_set("day_start_equity", _to_str(capital))

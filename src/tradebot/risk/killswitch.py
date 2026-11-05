@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from ..core.clock import Clock, iso, utcnow
+from ..core.clock import Clock, iso, parse_iso, utcnow
 from ..core.logging import get_logger
 from ..core.models import KillLevel
 from ..core.store import Store
@@ -33,13 +33,14 @@ class KillSwitch:
         self.store = store
         self.clock = clock
         self.kill_file = Path(kill_file) if kill_file is not None else None
-        self._cached: tuple[datetime, KillLevel] | None = None
         self._ensure_state()
 
     # --- state ------------------------------------------------------------
     def _ensure_state(self) -> None:
         if self.store.kv_get("kill_state") is None:
-            self.store.set_kill_state(KillLevel.L0.value, trigger="startup", reason="initial state")
+            self.store.set_kill_state(
+                KillLevel.L0.value, trigger="startup", reason="initial state", only_if_missing=True
+            )
 
     def now(self) -> datetime:
         return self.clock.now() if self.clock else utcnow()
@@ -50,12 +51,9 @@ class KillSwitch:
 
     @property
     def level(self) -> KillLevel:
-        if self._cached is not None and (self.now() - self._cached[0]).total_seconds() < 2:
-            return self._cached[1]
-        raw = self.state.get("level", "L0")
-        level = KillLevel(raw)
-        self._cached = (self.now(), level)
-        return level
+        # Other processes (notably the watchdog) can escalate at any time. A cached
+        # L0 would allow entries after their stop decision, so always read persisted state.
+        return KillLevel(self.state.get("level", "L0"))
 
     @property
     def cooldown_until(self) -> datetime | None:
@@ -82,6 +80,17 @@ class KillSwitch:
             return False, ""
         return until > self.now(), f"lockdown cooldown until {iso(until)}"
 
+    def flapping_hold_active(self) -> bool:
+        """A durable pause survives engine restarts and applies to every L0 reset path."""
+        hold = self.store.kv_get("health_flapping_hold")
+        if hold is None:
+            return False
+        try:
+            return self.now() <= parse_iso(hold["until"])
+        except (KeyError, TypeError, ValueError):
+            # Corrupt safety state must never quietly authorize trading.
+            return True
+
     # --- transitions ------------------------------------------------------
     def trigger(
         self,
@@ -97,15 +106,17 @@ class KillSwitch:
         if level.rank <= current.rank:
             return False
         cooldown = self.now() + LOCKDOWN_COOLDOWN if level is KillLevel.L3 else None
-        self.store.set_kill_state(
+        changed = self.store.set_kill_state(
             level.value,
+            only_escalate=True,
             trigger=trigger,
             reason=reason,
             actor=actor,
             cooldown_until=cooldown,
             ts=self.now(),
         )
-        self._cached = None
+        if not changed:
+            return False
         if incident:
             self.store.add_incident(
                 level.value,
@@ -132,36 +143,46 @@ class KillSwitch:
         recovered feed, a transient API storm) can lift once its condition is gone,
         with the transition recorded like any other.
         """
-        if self.level is not KillLevel.L1:
+        current = self.state
+        if current.get("level") != KillLevel.L1.value or self.flapping_hold_active():
             return False
-        self.store.set_kill_state(
+        changed = self.store.set_kill_state(
             KillLevel.L0.value,
+            expected_state=current,
+            require_no_flapping_hold=True,
             trigger="auto_resume",
             reason=reason,
             actor=actor,
             ts=self.now(),
         )
-        self._cached = None
+        if not changed:
+            return False
         log.warning('{"event":"kill_switch_auto_resume","reason":"%s","actor":"%s"}', reason, actor)
         return True
 
     def reset(self, *, reason: str, actor: str = "operator", level: KillLevel = KillLevel.L0) -> None:
         """Manual reset. L3 requires a written reason and the cooldown to have expired."""
-        if self.level is KillLevel.L3:
+        current = self.state
+        if level is KillLevel.L0 and self.flapping_hold_active():
+            raise PermissionError("cannot resume while a critical component is flapping")
+        if current.get("level") == KillLevel.L3.value:
             blocked, why = self.blocks_reset()
             if blocked:
                 raise PermissionError(f"cannot reset L3 yet: {why}")
             if not reason.strip():
                 raise PermissionError("L3 reset requires a written reason")
-        self.store.set_kill_state(
+        changed = self.store.set_kill_state(
             level.value,
+            expected_state=current,
+            require_no_flapping_hold=level is KillLevel.L0,
             trigger="manual_reset",
             reason=reason or "manual reset",
             actor=actor,
             ts=self.now(),
         )
+        if not changed:
+            raise PermissionError("kill state or flapping hold changed; recheck before reset")
         self.store.kv_set("last_reset", {"ts": iso(self.now()), "reason": reason, "actor": actor})
-        self._cached = None
         log.warning('{"event":"kill_switch_reset","to":"%s","actor":"%s"}', level.value, actor)
 
     # --- manual trigger: a KILL file in the project folder -----------------

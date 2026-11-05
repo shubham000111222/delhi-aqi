@@ -352,6 +352,7 @@ class Secrets:
     llm_monthly_budget_usd: Decimal = D("2")
     dashboard_user: str = "admin"
     dashboard_password: str = ""
+    dashboard_readonly: bool = True
 
     def redacted(self) -> dict[str, Any]:
         return {
@@ -409,6 +410,7 @@ def load_secrets(env: dict[str, str]) -> Secrets:
         llm_monthly_budget_usd=D(env.get("LLM_MONTHLY_BUDGET_USD", "2") or "2"),
         dashboard_user=env.get("DASHBOARD_USER", "admin"),
         dashboard_password=env.get("DASHBOARD_PASSWORD", ""),
+        dashboard_readonly=env.get("DASHBOARD_READONLY", "").strip().lower() not in ("0", "false"),
     )
 
 

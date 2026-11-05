@@ -71,8 +71,8 @@ report. A state change writes a `health_change` event - the audit trail §20.4 a
 | Every heal action is verified, unverified counts as failure | ✅ B: `Playbook` runs detect → act → verify; a false verify writes `heal_failed` and counts toward escalation |
 | Escalation is once per burst, never per attempt | ✅ B: 3 failures inside 10 min escalate once, then the window clears |
 | Bounded retries: cooldown per row | ✅ B: 30 s-30 min per row, so a broken repair cannot become a busy loop |
-| Healing may only cancel, reduce, close, protect | ✅ B: `SAFE_ACTIONS` is an allowlist and every wired row uses one of them |
-| Flapping detector: >5 state changes in 10 min holds at L1 | ✅ detected and reported by `HealthModel.flapping`; **not yet wired to force L1** |
+| Healing may only cancel, reduce, close, protect | 🟡 `SAFE_ACTIONS` documents allowed categories; it is not an enforcement boundary. Actual mutation paths need explicit enforcement and adversarial tests. |
+| Flapping detector: >5 state changes in 10 min holds at L1 | ✅ working branch: critical flapping forces L1, persists the hold and recent transitions, and blocks L0 reset until settled |
 | Post-heal checklist before returning to L0 | 🟡 auto-resume requires reconciliation `ok` + 10 min sustained health; the full checklist is not a gate |
 | Auto-resume only from L1, infrastructure causes only | ✅ (`AUTO_RESUME_TRIGGERS`) |
 | Audit: every heal action logged | ✅ `health_change`, `strategy_paused`, `strategy_disabled`, `kill_switch`, incidents, `heal*`, `watchdog_supervisor`, `alert_delivery` |
@@ -81,10 +81,10 @@ report. A state change writes a `health_change` event - the audit trail §20.4 a
 
 | Layer | Today |
 | --- | --- |
-| In-process supervisor tree | ✅ C: `watchdog/supervisor.py`. A lost heartbeat stops the wedged process (two processes on one account is worse than one wedged one), runs the preflight, starts a new one, and waits for the pulse before calling it a success |
-| External watchdog process | ✅ heartbeat, kill-file, L2 escalation, flatten, and now restart + alerting |
+| In-process supervisor tree | 🟡 Stops a known managed process and checks for a new heartbeat. Live/testnet restart is blocked: independently proving venue state and stopping an unmanaged process remain unresolved. |
+| External watchdog process | 🟡 heartbeat, kill-file, L2 escalation and alerting exist. No CLI venue client; live/testnet restart is blocked until independent venue state and a safe preflight are verified. |
 | Container restart policy + health checks | ✅ `docker-compose.yml` + `/healthz` |
-| Dead man's switch (live) | ✅ C: `watchdog/deadman.py`. Reads a heartbeat *file* the engine touches every tick, armed only in testnet/live, latches after one trip, and refuses a reset while the pulse is still missing |
+| Dead man's switch (live) | 🟡 File heartbeat and latch exist. The CLI has no venue client, and existing adapters do not provide an independently verified complete venue snapshot, so automatic flattening is not established. |
 | Independent alert channel | ✅ C: file floor + Telegram + a generic webhook (`ALERT_WEBHOOK_URL`). `router.independent` is False until two remote transports are configured, and `tradebot health` says which ones are |
 
 ### 20.6 Testing and measuring — 🟡
@@ -118,11 +118,11 @@ shadow form; **fund** does not exist.
 | 21.4 | Lifecycle manager: IDEA→…→RETIRED, gated transitions, decay auto-disable, 60-day retirement | ⬜ strategies are static in config |
 | 21.5 | Fund loop: cost ledger, self-funding ratio, break-even capital, profit waterfall, budget caps | 🟡 tax reserve + daily report ✅; the rest ⬜ |
 | 21.6 | Learn schedule: continuous drift, weekly retrain, monthly research, quarterly audit | 🟡 research loop and trial log exist; no scheduler |
-| 21.7 | Autonomy limits, approvals, autonomy ledger, forbidden-action tests | 🟡 confirm-with-TTL for pause/kill ✅; autonomy ledger and forbidden-action suite ⬜ |
+| 21.7 | Autonomy limits, approvals, autonomy ledger, forbidden-action tests | 🟡 working branch has partial ledger and approval records; authorization and enforcement at actual mutation boundaries remain unbuilt |
 | 21.8 | Operator-absent ladder (7 d warn, 14 d half size, 21 d L1) | ⬜ |
 | 21.9 | Build order: operate + heal first | ✅ this file follows it |
 | 21.10 | Honest limits + scenarios 29–34 | 🟡 stated in docs; the mechanisms are the rows above |
-| 21.11 | Dashboard Autonomy page + go/no-go additions | 🟡 `/api/health` exists; Autonomy page ⬜ |
+| 21.11 | Dashboard Health + Autonomy + go/no-go additions | 🟡 working branch adds read-only health and partial-autonomy audit panels and `/api/autonomy`; complete audit coverage, approval authorization, go/no-go and preview access remain open |
 
 ---
 
@@ -131,14 +131,14 @@ shadow form; **fund** does not exist.
 | PR | Scope | State |
 | --- | --- | --- |
 | **A** | Health model, component checks, `tradebot health`, `/api/health`, report section, restart budget for strategies, audit events | ✅ merged |
-| **B** | Heal playbook table + circuit breaker (60 s, half-open probe) + stuck-**exit** sweep + verification, cooldowns, escalation + MTTR + one injection test per wired row | ✅ this PR |
-| **C** | Watchdog v2: restart on lost heartbeat with a 3/hour budget and post-restart verification, flatten-if-unprotected preflight, dead man's switch, alert router (file floor + webhook + retry queue) | ✅ this PR |
-| **D** | Autonomy ledger + approval flow + forbidden-action tests (§21.7) + flapping forces L1 | ▶ next |
+| **B** | Heal playbook table + circuit breaker (60 s, half-open probe) + stuck-**exit** sweep + verification, cooldowns, escalation + MTTR + one injection test per wired row | ✅ merged |
+| **C** | Watchdog v2: restart budget, dead man's switch and alert router | 🟡 merged implementation; live venue preflight is not verified and live restart is blocked |
+| **D** | Autonomy ledger + approval flow + forbidden-action tests (§21.7) + flapping forces L1 | 🟡 in progress on working branch |
 | **E** | Market graph (§21.2) and the contagion exposure cut | ⬜ |
 | **F** | Allocator (§21.3) with the equal-weight backtest comparison as its gate | ⬜ |
 | **G** | Lifecycle manager (§21.4) with decay auto-disable | ⬜ |
 | **H** | Fund loop (§21.5), operator-absent ladder (§21.8), weekly digest | ⬜ |
-| **I** | Dashboard Health + Autonomy pages, MTTR metrics, monthly game day | ⬜ |
+| **I** | Dashboard Health + Autonomy pages, MTTR metrics, monthly game day | 🟡 partial read-only panels on working branch; game day and go/no-go remain |
 
 ### Non-negotiables carried into every PR
 
@@ -165,8 +165,8 @@ shadow form; **fund** does not exist.
   the module says so instead of implying otherwise.
 - **Give the watchdog a venue client in the CLI.** `tradebot watchdog --supervise` reports
   `venue_client: none`, because building a ccxt client from the CLI is not wired yet. It can
-  escalate, alert and restart; it cannot sell. Claiming the flatten path works from the CLI
-  would be a lie, so the output says which one it is.
+  escalate and alert, but cannot sell. Live/testnet restart is blocked until an independent
+  venue snapshot and verified preflight are implemented; paper restart remains available.
 - **Touch risk limits.** The watchdog still only raises kill levels, never lowers them, and
   the dead man's switch only closes positions.
 - If a mechanism cannot be verified here, it is marked 🔒 rather than claimed.

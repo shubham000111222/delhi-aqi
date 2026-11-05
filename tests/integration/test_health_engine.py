@@ -99,3 +99,114 @@ async def test_the_daily_report_carries_the_health_line(engine):
     assert "Component health:" in markdown
     line = markdown.split("Component health:", 1)[1].splitlines()[0].strip("- ").strip()
     assert line and "not sampled" not in line, line
+
+
+async def test_critical_flapping_pauses_and_prevents_existing_l1_auto_resume(engine):
+    from tradebot.core.models import KillLevel
+    from tradebot.health import Check
+
+    engine.killswitch.trigger(KillLevel.L1, trigger="stale_feeds", reason="test")
+    for step in range(1, 7):
+        engine.health.report(
+            "feed", now=START + timedelta(seconds=step), ticks=Check(readiness=step % 2 == 0)
+        )
+    now = START + timedelta(seconds=7)
+    assert engine._hold_on_flapping(now=now) == ["feed"]
+    engine._resume(reason="feed recovered", now=now)
+    assert engine.killswitch.level is KillLevel.L1
+
+
+async def test_flapping_raises_l1_and_optional_component_does_not(engine):
+    from tradebot.core.models import KillLevel
+    from tradebot.health import Check
+
+    engine.health.register("optional-test", critical=False)
+    for step in range(1, 7):
+        engine.health.report(
+            "optional-test", now=START + timedelta(seconds=step), ticks=Check(readiness=step % 2 == 0)
+        )
+    assert engine._hold_on_flapping(now=START + timedelta(seconds=7)) == []
+    assert engine.killswitch.level is KillLevel.L0
+    for step in range(1, 7):
+        engine.health.report(
+            "feed", now=START + timedelta(seconds=step), ticks=Check(readiness=step % 2 == 0)
+        )
+    assert engine._hold_on_flapping(now=START + timedelta(seconds=7)) == ["feed"]
+    assert engine.killswitch.level is KillLevel.L1
+    assert engine.autonomy.recent()[-1]["action"] == "hold_for_flapping"
+
+
+async def test_flapping_hold_survives_restart_and_blocks_manual_and_auto_resume(engine):
+    from tradebot.core.models import KillLevel
+    from tradebot.health import Check
+    from tradebot.risk.killswitch import KillSwitch
+
+    for step in range(1, 7):
+        engine.health.report(
+            "feed", now=START + timedelta(seconds=step), ticks=Check(readiness=step % 2 == 0)
+        )
+    engine.clock.set(START + timedelta(seconds=7))
+    engine._hold_on_flapping(now=engine.clock.now())
+    restarted_switch = KillSwitch(engine.store, clock=engine.clock, kill_file=None)
+    assert restarted_switch.level is KillLevel.L1
+    assert not restarted_switch.auto_resume(reason="restart")
+    with pytest.raises(PermissionError, match="flapping"):
+        restarted_switch.reset(reason="operator")
+    # Six transitions are no longer in the window after the first ages out.
+    engine.clock.set(START + timedelta(minutes=10, seconds=2))
+    restarted_switch.reset(reason="settled")
+    assert restarted_switch.level is KillLevel.L0
+
+
+async def test_corrupt_flapping_hold_fails_closed(engine):
+    from tradebot.core.models import KillLevel
+    from tradebot.risk.killswitch import KillSwitch
+
+    engine.killswitch.trigger(KillLevel.L1, trigger="stale_feeds", reason="test")
+    engine.store.kv_set("health_flapping_hold", {"until": "not a timestamp"})
+    restarted_switch = KillSwitch(engine.store, clock=engine.clock, kill_file=None)
+    assert not restarted_switch.auto_resume(reason="test")
+    with pytest.raises(PermissionError):
+        restarted_switch.reset(reason="test")
+
+
+async def test_engine_restores_five_changes_so_restart_cannot_hide_the_sixth(fast_cfg):
+    from tradebot.core.models import KillLevel
+    from tradebot.health import Check
+
+    fast_cfg.ensure_dirs()
+    clock = SimClock(START + timedelta(seconds=6))
+    store = Store(":memory:")
+    for step in range(1, 6):
+        store.log_event(
+            "health_change",
+            {"component": "feed", "from": "HEALTHY", "to": "DEGRADED" if step % 2 else "HEALTHY"},
+            ts=START + timedelta(seconds=step),
+        )
+    engine = await Engine.build(fast_cfg, clock=clock, store=store)
+    try:
+        assert len(engine.health.components["feed"].transitions) == 5
+        engine.health.report("feed", now=clock.now(), ticks=Check(readiness=True))
+        assert engine._hold_on_flapping(now=clock.now()) == ["feed"]
+        assert engine.killswitch.level is KillLevel.L1
+    finally:
+        engine.close()
+
+
+async def test_engine_restores_six_changes_and_holds_immediately(fast_cfg):
+    from tradebot.core.models import KillLevel
+
+    fast_cfg.ensure_dirs()
+    clock = SimClock(START + timedelta(seconds=7))
+    store = Store(":memory:")
+    for step in range(1, 7):
+        store.log_event(
+            "health_change", {"component": "feed", "from": "HEALTHY", "to": "DEGRADED"},
+            ts=START + timedelta(seconds=step),
+        )
+    engine = await Engine.build(fast_cfg, clock=clock, store=store)
+    try:
+        assert engine.killswitch.level is KillLevel.L1
+        assert engine.killswitch.flapping_hold_active()
+    finally:
+        engine.close()

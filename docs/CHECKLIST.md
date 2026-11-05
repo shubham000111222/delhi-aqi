@@ -1,6 +1,6 @@
 # Completion checklist
 
-The build plan's code is written; what remains is **evidence and access**. This file is the
+The project still needs both implementation and external evidence. This file is the
 one place that says what is left, in order, with the exact command, the pass criterion, and
 what to send back. Work down it top to bottom; each phase produces a number the next phase
 depends on.
@@ -13,8 +13,12 @@ depends on.
 > data they already do. A project that reports its own failure is finished; one that
 > manufactures a pass is not.
 
-**Last updated:** 2026-11-04 · **Suite:** 708 passed, 2 skipped · **Archive as of this
-note:** 30 days × 5 symbols of real 1m Binance candles (216,198 bars).
+For the full Windows installation, implementation and validation procedure, see
+[`WINDOWS_LOCAL_LIVE_READINESS.md`](WINDOWS_LOCAL_LIVE_READINESS.md).
+
+**Last updated:** 2026-11-04 · **Suite:** 758 passed, 2 skipped on the working branch.
+The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
+machine; this workspace has no real-price archive.
 
 ---
 
@@ -48,8 +52,8 @@ python -m tradebot backfill-history --months 6 --page-limit 1000 --json > histor
 python -m tradebot archive
 ```
 
-  **Pass:** 5 symbols, ~215 days, roughly 1.1M candles, and one `complete` line per chunk
-  in `history.json`.
+  **Pass:** 5 symbols, approximately six calendar months of complete one-minute bars,
+  and one `complete` line per chunk in `history.json`; verify the actual date range and gaps.
 
 - [ ] **1.3** If a chunk says `incomplete` or exits 4:
 
@@ -73,7 +77,7 @@ Run on the archive, not on a simulation. `--feed archive` reads `data/archive` b
 - [ ] **2.2** `python -m tradebot walk-forward --feed archive --train-days 60 --test-days 30 --windows 4`
 - [ ] **2.3** `python -m tradebot robustness --feed archive --days 180 --cost-multiplier 2`
 - [ ] **2.4** `python -m tradebot signals --feed archive --days 180 --horizon 4`
-- [ ] **2.5** `python -m tradebot sensitivity --feed archive --strategy S3_breakout --param lookback=10,20,30,40 --days 120`
+- [ ] **2.5** `python -m tradebot sensitivity --feed archive --strategy S3_breakout --param donchian=10,20,30,40 --days 120`
 
 **Pass** (§8 gates, all of them): OOS profit factor > 1.3 · Sharpe > 1.0 · max drawdown
 < 15% · ≥ 200 closed trades · still profitable at 2× costs · Monte-Carlo p95 drawdown
@@ -116,7 +120,7 @@ python -m tradebot run --feed ccxt --minutes 43200 --mlflow mlruns > soak.log 2>
 
 | | Item | Command | Pass |
 | --- | --- | --- | --- |
-| 🔒 | Telegram | put `token` + `chat_id` in `config/settings.yaml`, then `python -m tradebot telegram` | prints reachable, message arrives |
+| 🔒 | Telegram | configure `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` locally using `.env.example`, then run `python -m tradebot telegram` | prints reachable, message arrives |
 | 🔒 | News overlay (optional) | `python -m tradebot news --url <rss>` | multiplier ≤ 1.0, never grows a position |
 | 🔒 | MLflow (optional) | `mlflow server --port 5000` then `python -m tradebot experiments --read-server http://127.0.0.1:5000` | runs visible |
 | 🔒 | NSE / Kite (optional) | `python -m tradebot venues --venue nse --notional 100000` with keys | session + cost model printed |
@@ -129,9 +133,9 @@ python -m tradebot run --feed ccxt --minutes 43200 --mlflow mlruns > soak.log 2>
 Only after Phase 2 and Phase 3 pass. Live mode is refused unless every guard in
 `risk/live_guards.py` holds, and the capital cap stays at 250 USDT.
 
-- [ ] **5.1** `mode: testnet` + testnet keys → `python -m tradebot live-check --confirm` → every gate PASS.
+- [ ] **5.1** Configure testnet keys and validate the testnet adapter. `live-check` is a live-mode check, not a testnet certification; it requires a confirmation argument when live mode is eventually assessed.
 - [ ] **5.2** Two weeks on testnet; re-run `slippage`, re-train the ledger card on testnet trades.
-- [ ] **5.3** `mode: live` → `python -m tradebot live-check --confirm --with-adapter`.
+- [ ] **5.3** Only after the safety gaps and preceding gates are resolved: `python -m tradebot live-check --mode live --confirm "250 LIVE" --with-adapter` (replace 250 with the configured capital cap).
 - [ ] **5.4** First live week supervised: `status` twice a day, `drill` once, ramp enforced.
 - [ ] **5.5** Promote only while `metrics` keeps passing; any failed gate drops back to paper.
 
@@ -151,18 +155,37 @@ Tracked in detail in [`BUILD_PLAN_20_21.md`](BUILD_PLAN_20_21.md); this is the r
       MTTR per row is compared with the §20.6 target and printed by `tradebot health`.
 - [ ] **Heal playbook, remaining rows** — candle repair, memory restart, clock resync,
       config keep-last-good, alert retry queue, exchange status polling, model rollback.
-- [x] **Watchdog v2** — restart on a lost heartbeat (3/hour, then refused and escalated),
-      flatten-if-unprotected *before* the new process starts, verification that the restarted
-      bot actually heartbeats, a latching dead man's switch armed only in testnet/live, and an
-      alert path with a file floor, an independent webhook and a retry queue.
+- [ ] **Watchdog v2** — restart budget, new-heartbeat verification, latching dead man's switch and alert routing exist. Live/testnet restart is blocked pending an independently
+      verified venue preflight; automatic flattening is not available through the CLI.
       `tradebot watchdog --once`, `tradebot alerts --test`.
+- [ ] **Watchdog venue safety verification** — audit stop quantity/side and verify actual
+      executions before restarting; a submitted or partially covering stop is not proof that
+      an entire position is protected or flat. The CLI currently has no venue client.
 - [ ] **Watchdog v2, the part a host must do** — `ProcessSpawner` starts a child of the
       watchdog, so surviving a reboot needs systemd/Docker. Until then, supervision dies with
       its parent and says so.
-- [ ] **Autonomy ledger + approvals + forbidden-action tests** (§21.7).
-- [ ] **Market graph, allocator, lifecycle manager, fund loop** (§21.2–21.5).
-  The allocator ships **only** if it beats equal weighting after costs in backtest.
+- [ ] **Autonomy ledger + approvals + forbidden-action tests** (§21.7): initial audit table and approval records exist on the working branch; integrate every decision path, authenticate and atomically consume action-bound approvals (approval decisions are atomic, but no authorization consumer is wired), and enforce/test actual mutation boundaries before treating this as complete. The refusal helpers alone do not enforce policy.
+- [x] **Flapping**: critical flapping holds L1, persists its deadline and recent health transitions across restart, and blocks automatic or manual L0 reset until the window settles.
+- [ ] **Market graph** (§21.2) — persistent asset/strategy/source relationships, lead-lag,
+      beta and contagion cuts; test against recorded data.
+- [ ] **Allocator** (§21.3) — volatility/performance tilt and bounds; ship a non-equal
+      allocator only if it beats equal weighting after costs in backtest.
+- [ ] **Strategy lifecycle** (§21.4) — nine states, gated transitions, decay disable and retirement.
+- [ ] **Fund loop** (§21.5) — cost ledger, self-funding ratio, break-even, reserves and budgets.
+- [ ] **Learn schedule** (§21.6) — drift, retrain, research and audit schedules without automatic promotion.
 - [ ] **Operator-absent ladder** (§21.8) — 7 days warn, 14 days half size, 21 days L1.
+- [ ] **Dashboard Health/Autonomy** (§21.11) — working branch has read-only health and
+      partial-audit panels, but approval authorization, full audit coverage and go/no-go remain.
+- [ ] **Historical backfill duration** — fix `--months` arithmetic for 12+ months and
+      test year and leap-day boundaries; until fixed, use explicit UTC `--from`/`--to`.
+- [ ] **Promotion evidence integration** — provenance is not verified by the current
+      metrics pipeline, and the 2×-cost rerun is not connected to its verdict; promotion
+      fails closed until both are supplied and independently validated.
+- [ ] **Dashboard exposure** — controls default to disabled and require a password if
+      enabled; read endpoints are unauthenticated and require a protected deployment.
+- [ ] **Game day and MTTR evidence** (§20.6) — exercise every playbook row and measure targets.
+- [ ] **Arena preview access** — port 8000 responds locally, but the preview gateway was
+      inaccessible to the user; requires platform-side investigation.
 
 ## Phase 7 — housekeeping (monthly)
 

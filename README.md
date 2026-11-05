@@ -52,7 +52,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 python -m tradebot check                  # validate config, print effective settings
-python -m tradebot dashboard --speed 600   # bot + dashboard on http://localhost:8000
+python -m tradebot dashboard --speed 1     # paper demo at real-time speed, on port 8000
 python -m tradebot backtest --days 10      # full engine run over synthetic data + gates
 python -m tradebot drill                   # kill-switch fire drill, measures time-to-flat
 python -m tradebot metrics                 # metrics + validation gates for the paper DB
@@ -63,6 +63,12 @@ python -m tradebot learn                   # learn from the bot's own closed tra
 
 Or through the Makefile: `make dashboard`, `make backtest`, `make learn`, `make soak`,
 `make test`, `make lint`. `make soak` runs one supervised paper hour.
+
+Dashboard controls are **disabled by default**. To opt in, set both
+`DASHBOARD_READONLY=false` and a strong `DASHBOARD_PASSWORD` in `.env` or the
+process environment. The password protects control requests only: dashboard data
+and reports are not authenticated. Restrict access separately and use HTTPS before
+entering a password; do not expose this app directly to the public internet.
 
 Everything runs on a **seeded synthetic market** by default: five coins, regime
 shifts, order books with depth, spread and volume. Nothing leaves your machine and
@@ -82,7 +88,7 @@ no API key is needed.
 | Profit handling: 50% at 1.5R, break-even, 3-ATR chandelier trail, daily profit locks | done | `engine.py` |
 | Decimal ledger with average entry, fees, realized/unrealized PnL and invariants | done | `portfolio/ledger.py` |
 | Reconciliation against the venue every health tick | done | `engine.reconcile` |
-| Supervision: restart-on-lost-heartbeat with a restart budget and post-restart heartbeat verification, flatten-if-unprotected preflight, latching dead man's switch (live/testnet only) | done | `watchdog/supervisor.py`, `watchdog/deadman.py` |
+| Supervision: restart budget, heartbeat verification and latching dead man's switch | partial: live/testnet restart and independent flatten require a verified venue integration | `watchdog/supervisor.py`, `watchdog/deadman.py` |
 | Alerting: file floor written before any network call, Telegram plus an independent webhook, JSONL retry queue with attempt/age ceilings | done | `alerts/router.py` |
 | Self-healing playbook: six verified repair rows (stale feed, API pressure + 60 s breaker, stuck exit, unprotected position, disk, reconcile), cooldowns, one escalation per burst, MTTR vs target | done | `heal.py`, `engine._build_playbook` |
 | Daily report (11 sections) → markdown, HTML, JSON, Telegram text, trades CSV, tax CSV | done | `reporting/daily.py` |
@@ -225,13 +231,13 @@ docs/                  architecture, risk model, runbook, go/no-go, roadmap, dec
 | Command | What it does |
 | --- | --- |
 | `tradebot check` | validate all config; print effective settings and secret presence |
-| `tradebot dashboard` | run the demo bot + dashboard (`--no-bot` for read-only) |
+| `tradebot dashboard` | run the paper demo + dashboard; controls are read-only by default (`--no-bot` views stored state only) |
 | `tradebot dashboard-png` | render the live dashboard to a PNG, no browser needed (`--out`, `--url`) |
 | `tradebot backtest --days N` | deterministic synthetic run through the real engine, writes reports |
 | `tradebot metrics` | metrics, Monte Carlo and acceptance gates for the paper database |
 | `tradebot run` | paper trading on the configured feed until Ctrl-C or `--minutes N` (`--mlflow DIR` logs the session on exit, `--mlflow-server URI` streams it live, `--news-url` adds the reduce-only sentiment overlay, `--meta-gate` adds the meta veto filter, `--ledger-gate` adds one trained on the bot's own trades) |
 | `tradebot status` | positions, kill level, recent events |
-| `tradebot watchdog --once` / `--supervise` | supervision: one pass, or the loop that restarts a wedged bot (3/hour, after flattening anything without a stop) |
+| `tradebot watchdog --once` / `--supervise` | one pass or supervised loop; live/testnet restart is blocked without an independent, verified venue preflight |
 | `tradebot alerts --test` / `--flush` | prove the alert path (file floor → Telegram → independent webhook → retry queue) or drain the queue |
 | `tradebot health` | one health check: per-component `HEALTHY`/`DEGRADED`/`FAILED` with the failing question (exit 1 if any critical component is `FAILED`), plus the heal playbook's attempts, verified count, p50 MTTR and target per row |
 | `tradebot report` | build today's report now |

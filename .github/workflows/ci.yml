@@ -18,6 +18,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+      - name: wheel includes dashboard
+        run: |
+          python -m pip wheel --no-deps -w /tmp/tradebot-wheel .
+          python -c 'import glob,zipfile; p=glob.glob("/tmp/tradebot-wheel/*.whl")[0]; assert "tradebot/dashboard/index.html" in zipfile.ZipFile(p).namelist()'
       - name: lint
         run: ruff check src tests
       - name: types
@@ -29,4 +33,4 @@ jobs:
       - name: secrets scan
         run: |
           pip install detect-secrets
-          detect-secrets scan --baseline .secrets.baseline || true
+          detect-secrets-hook --baseline .secrets.baseline $(git ls-files)

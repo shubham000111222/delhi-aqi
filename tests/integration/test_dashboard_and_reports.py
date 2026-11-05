@@ -44,6 +44,16 @@ def test_dashboard_serves_page_and_snapshot(client):
     assert "available" in data["veto_breakdown"], "the veto panel must say whether it has verdicts"
 
 
+def test_dashboard_drawdown_uses_peak_not_day_start(client, monkeypatch):
+    store = client.app.state.dashboard.store
+    store.kv_set("peak_equity", "1250")
+    store.kv_set("day_start_equity", "1000")
+    monkeypatch.setattr(store, "last_equity", lambda: D("1000"))
+    snapshot = client.get("/api/snapshot").json()
+    assert D(snapshot["day_pnl_pct"]) == 0
+    assert D(snapshot["drawdown_pct"]) == D("-0.2")
+
+
 def test_dashboard_health_and_reports_listing(client):
     assert client.get("/healthz").text == "ok"
     health = client.get("/api/health")
@@ -56,11 +66,83 @@ def test_dashboard_health_and_reports_listing(client):
     assert client.get("/api/report/latest").status_code in (200, 404)
 
 
+def test_dashboard_exposes_health_and_partial_autonomy_audit(client):
+    from tradebot.autonomy import AutonomyLedger, AutonomyLevel
+
+    store = client.app.state.dashboard.store
+    AutonomyLedger(store=store).record("health", "hold_for_flapping", AutonomyLevel.PROTECT)
+    result = client.get("/api/autonomy")
+    assert result.status_code == 200
+    data = result.json()
+    assert data["ledger"]["recent"][-1]["action"] == "hold_for_flapping"
+    assert "not authenticated" in data["limitation"]
+    snapshot = client.get("/api/snapshot").json()
+    assert snapshot["autonomy"]["ledger"]["actions"] == 1
+    assert snapshot["controls_enabled"] is False
+    page = client.get("/").text
+    assert 'id="component-health"' in page
+    assert 'id="autonomy"' in page
+    assert "right.textContent = String(value)" in page
+
+
 def test_dashboard_controls_need_confirmation(client):
-    assert client.post("/api/control/pause", json={}).status_code == 409 or True
-    # no engine in this process -> conflict; with an engine the destructive path needs CONFIRM
-    response = client.post("/api/control/flatten", json={"reason": "test"})
-    assert response.status_code in (400, 409)
+    assert client.post("/api/control/pause", json={}).status_code == 403
+    assert client.post("/api/control/flatten", json={"reason": "test"}).status_code == 403
+
+
+def test_dashboard_controls_require_opt_in_and_password(fast_cfg):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    engine = SimpleNamespace(store=Store(":memory:"), running=False, pause=AsyncMock())
+    fast_cfg = replace(fast_cfg, secrets=replace(fast_cfg.secrets, dashboard_password="test-password"))
+    with TestClient(create_app(fast_cfg, engine=engine, run_bot=False)) as c:
+        assert c.post("/api/control/pause", headers={"x-dashboard-token": "test-password"}).status_code == 403
+    fast_cfg = replace(fast_cfg, secrets=replace(fast_cfg.secrets, dashboard_readonly=False, dashboard_password=""))
+    with TestClient(create_app(fast_cfg, engine=engine, run_bot=False)) as c:
+        assert c.post("/api/control/pause").status_code == 403
+    fast_cfg = replace(fast_cfg, secrets=replace(fast_cfg.secrets, dashboard_password="test-password"))
+    with TestClient(create_app(fast_cfg, engine=engine, run_bot=False)) as c:
+        assert c.post("/api/control/pause").status_code == 401
+        assert c.post("/api/control/pause", headers={"x-dashboard-token": "wrong"}).status_code == 401
+        assert c.post("/api/control/pause", headers={"x-dashboard-token": "test-password"}).status_code == 200
+    engine.pause.assert_awaited_once()
+
+
+def test_dashboard_readonly_dotenv_and_environment_precedence(fast_cfg):
+    from tradebot.config import load_config
+
+    config_dir = fast_cfg.settings.config_dir
+    (config_dir.parent / ".env").write_text("DASHBOARD_READONLY=false\nDASHBOARD_PASSWORD=test-only\n")
+    enabled = load_config(config_dir, environ={})
+    assert enabled.secrets.dashboard_readonly is False
+    assert enabled.secrets.dashboard_password == "test-only"
+    disabled = load_config(config_dir, environ={"DASHBOARD_READONLY": "true"})
+    assert disabled.secrets.dashboard_readonly is True
+
+
+def test_dashboard_flatten_pauses_before_close(fast_cfg):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    operations = []
+
+    async def pause(reason):
+        operations.append("pause")
+
+    async def flatten(reason):
+        operations.append("flatten")
+
+    engine = SimpleNamespace(store=Store(":memory:"), running=False, pause=pause, flatten_all=flatten)
+    fast_cfg = replace(fast_cfg, secrets=replace(fast_cfg.secrets, dashboard_password="test-password"))
+    fast_cfg = replace(fast_cfg, secrets=replace(fast_cfg.secrets, dashboard_readonly=False))
+    with TestClient(create_app(fast_cfg, engine=engine, run_bot=False)) as c:
+        headers = {"x-dashboard-token": "test-password"}
+        assert c.post("/api/control/flatten", headers=headers, json={}).status_code == 400
+        assert operations == []
+        assert c.post("/api/control/flatten", headers=headers, json={"confirm": "CONFIRM"}).status_code == 200
+    assert operations == ["pause", "flatten"]
 
 
 async def test_report_contains_all_sections(fast_cfg):
@@ -158,3 +240,29 @@ def test_reports_are_written_to_the_configured_directory(fast_cfg):
     paths = write_reports(report, fast_cfg.settings.reports_dir, tax_ledger=[])
     assert all(Path(p).exists() for p in paths.values())
     assert Path(paths["markdown"]).parent.name == "2024-06-01"
+
+
+def test_hosted_paper_demo_has_alert_floor_and_no_future_market_clock(fast_cfg):
+    fast_cfg.settings.synthetic.speed = 1
+    app = create_app(fast_cfg, run_bot=True)
+    with TestClient(app) as c:
+        engine = app.state.dashboard.engine
+        assert engine is not None
+        assert engine.notifier is not None
+        assert engine.notifier.router is not None
+        import asyncio
+
+        asyncio.run(engine.notifier.warn("dashboard alert floor check", key="dashboard-floor"))
+        alert_log = engine.cfg.settings.state_dir / engine.cfg.settings.watchdog.alert_log
+        assert "dashboard alert floor check" in alert_log.read_text()
+        assert engine.cfg.settings.data_quality.stale_symbol_seconds >= 120
+        assert engine.clock.now() <= datetime.now(UTC)
+        assert c.get("/api/self-test").json()["bot_running"]
+
+
+def test_hosted_demo_refuses_non_paper_mode(fast_cfg):
+    from tradebot.config import Mode
+
+    fast_cfg.settings.mode = Mode.LIVE
+    with pytest.raises(RuntimeError, match="requires paper"), TestClient(create_app(fast_cfg, run_bot=True)):
+        pass

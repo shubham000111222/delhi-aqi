@@ -49,6 +49,9 @@ dev = [
 [project.scripts]
 tradebot = "tradebot.main:main"
 
+[tool.setuptools.package-data]
+"tradebot.dashboard" = ["index.html"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

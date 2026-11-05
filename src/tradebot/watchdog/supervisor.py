@@ -190,6 +190,12 @@ class Supervisor:
             # one starts, or two processes trade the same account.
             result["stopped_wedged"] = True
             self.spawner.stop(self.handle)
+            if self.spawner.alive(self.handle):
+                self.failures += 1
+                result.update(action="stop_failed", reason="previous process is still alive")
+                self._event("supervisor_stop_failed", {"reason": result["reason"]})
+                self._escalate("supervisor_stop_failed", result["reason"])
+                return result
             self.handle = None
             self._event("supervisor_stopped_wedged", {"pid": None})
 
@@ -252,6 +258,8 @@ class Supervisor:
     async def _await_heartbeat(self, heartbeat_ok: Callable[[], Awaitable[bool]]) -> bool:
         waited = 0.0
         while waited <= self.verify_seconds:
+            if self.handle is None or not self.spawner.alive(self.handle):
+                return False
             try:
                 if await heartbeat_ok():
                     return True
