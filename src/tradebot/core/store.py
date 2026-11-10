@@ -422,6 +422,98 @@ class Store:
     def strategy_disabled(self, name: str) -> bool:
         return bool(self._query("SELECT 1 FROM disabled_strategies WHERE strategy=?", (name,)))
 
+    @staticmethod
+    def _strategy_size_value(raw: Any) -> Decimal:
+        if not isinstance(raw, str) or len(raw) > 64:
+            raise ValueError("invalid strategy size multiplier")
+        try:
+            value = Decimal(raw)
+            if not value.is_finite() or value <= 0 or value > 1:
+                raise ValueError("invalid strategy size multiplier")
+            return value
+        except ArithmeticError as exc:
+            raise ValueError("invalid strategy size multiplier") from exc
+
+    def strategy_size_multiplier(self, name: str) -> Decimal:
+        rows = self._query("SELECT value FROM kv WHERE key=?", (f"size_mult_{name}",))
+        return self._strategy_size_value(json.loads(rows[0]["value"])) if rows else Decimal("1")
+
+    def reduce_strategy_size(self, name: str, multiplier: Decimal, *, now: datetime, reason: str) -> bool:
+        """Persist only a stricter size multiplier, atomically with its audit."""
+        if not isinstance(name, str) or not name or not isinstance(multiplier, Decimal):
+            raise ValueError("invalid strategy size reduction")
+        value = self._strategy_size_value(str(multiplier))
+        key = f"size_mult_{name}"
+        timestamp = iso(now)
+        with self.transaction() as conn:
+            row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+            previous = self._strategy_size_value(json.loads(row["value"])) if row else Decimal("1")
+            if value >= previous:
+                return False
+            conn.execute("INSERT INTO kv(key,value,updated_at) VALUES(?,?,?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                         (key, json.dumps(str(value)), timestamp))
+            conn.execute("INSERT INTO autonomy(ts,actor,action,level,detail,outcome) VALUES(?,?,?,?,?,?)",
+                         (timestamp, "risk", "reduce_strategy_size", 3, reason, "ok"))
+            conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                         (timestamp, "WARN", "size_reduction", "risk", json.dumps({
+                             "strategy": name, "from": str(previous), "multiplier": str(value), "reason": reason,
+                         })))
+        return True
+
+    def strategy_paused(self, name: str, *, now: datetime) -> bool:
+        """All durable strategy holds, including malformed legacy pause records."""
+        if self.strategy_disabled(name) or self.strategy_fault_paused(name, now=now):
+            return True
+        rows = self._query("SELECT value FROM kv WHERE key='paused_strategies'")
+        if not rows:
+            return False
+        try:
+            paused = json.loads(rows[0]["value"])
+            if not isinstance(paused, dict):
+                return True
+            if name not in paused:
+                return False
+            info = paused[name]
+            if not isinstance(info, dict) or not isinstance(info.get("until"), str):
+                return True
+            return utc(now) < parse_iso(info["until"])
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            return True
+
+    def extend_strategy_pause(self, name: str, *, until: datetime, reason: str, now: datetime) -> bool:
+        """Atomically extend a timed pause and record the action; never shorten a hold."""
+        if not isinstance(name, str) or not name or not isinstance(reason, str):
+            raise ValueError("invalid strategy pause")
+        if utc(until) <= utc(now):
+            raise ValueError("pause deadline must be in the future")
+        timestamp = iso(now)
+        with self.transaction() as conn:
+            row = conn.execute("SELECT value FROM kv WHERE key='paused_strategies'").fetchone()
+            paused = json.loads(row["value"]) if row else {}
+            if not isinstance(paused, dict):
+                raise ValueError("invalid persisted strategy pauses")
+            if name in paused:
+                try:
+                    info = paused[name]
+                    if not isinstance(info, dict) or not isinstance(info.get("until"), str):
+                        return False  # an indefinite or corrupt hold cannot be weakened
+                    if parse_iso(info["until"]) >= utc(until):
+                        return False
+                except (ValueError, TypeError, OverflowError, AttributeError):
+                    return False
+            paused[name] = {"until": iso(until), "reason": reason}
+            conn.execute("INSERT INTO kv(key,value,updated_at) VALUES('paused_strategies',?,?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                         (json.dumps(paused), timestamp))
+            conn.execute("INSERT INTO autonomy(ts,actor,action,level,detail,outcome) VALUES(?,?,?,?,?,?)",
+                         (timestamp, "risk", "pause_strategy", 3, reason, "ok"))
+            conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                         (timestamp, "WARN", "strategy_paused", "risk", json.dumps({
+                             "strategy": name, "until": iso(until), "reason": reason,
+                         })))
+        return True
+
     # --- autonomy ledger and approvals (§21.7) ----------------------------
     def add_autonomy(
         self,

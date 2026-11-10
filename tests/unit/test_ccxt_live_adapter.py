@@ -558,3 +558,26 @@ def test_failed_permission_refresh_replaces_previous_pass_without_exposing_error
     assert adapter._key_permissions == result
     assert "secret-error-token" not in result["detail"]
     adapter.killswitch.store.close()
+
+
+def test_direct_venue_entry_obeys_timed_strategy_pause():
+    from datetime import timedelta
+
+    adapter, exchange = adapter_with()
+    store = adapter.killswitch.store
+    now = adapter.clock.now()
+    store.extend_strategy_pause("S1_ema_trend", until=now + timedelta(hours=1), reason="losses", now=now)
+    with pytest.raises(PermanentExchangeError, match="disabled or paused"):
+        asyncio.run(adapter.place_order(request()))
+    assert not [call for call in exchange.calls if call[0] == "create_order"]
+    store.close()
+
+
+def test_direct_venue_entry_rechecks_strategy_size():
+    adapter, exchange = adapter_with()
+    store = adapter.killswitch.store
+    store.reduce_strategy_size("S1_ema_trend", Decimal("0.5"), now=adapter.clock.now(), reason="losses")
+    with pytest.raises(PermanentExchangeError, match="strategy size multiplier"):
+        asyncio.run(adapter.place_order(request()))
+    assert not [call for call in exchange.calls if call[0] == "create_order"]
+    store.close()

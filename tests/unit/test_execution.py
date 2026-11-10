@@ -675,3 +675,36 @@ async def test_stressed_invalid_market_price_rejects_order_without_filling(cfg):
         await adapter.place_order(req)
     assert adapter.orders[req.client_order_id].status is OrderStatus.REJECTED
     assert not adapter.fills
+
+
+async def test_timed_strategy_pause_blocks_direct_manager_entry(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    store.extend_strategy_pause("S1", until=NOW + timedelta(hours=2), reason="losses", now=NOW)
+    signal = Signal(id="timed-pause", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+async def test_strategy_size_reduction_rechecked_at_placement(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    store.reduce_strategy_size("S1", D("0.5"), now=NOW, reason="losses")
+    signal = Signal(id="reduced", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000"),
+                                      sized_strategy_multiplier=D("1")) is None
+    assert not adapter.orders
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000"),
+                                      sized_strategy_multiplier=D("0.5")) is not None
+    store.close()

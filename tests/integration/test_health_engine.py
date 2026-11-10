@@ -405,3 +405,23 @@ async def test_venue_engine_does_not_initialize_reconciliation_to_ok(fast_cfg, m
     finally:
         store.close()
         paper_engine.close()
+
+
+async def test_strategy_pause_audit_failure_rolls_back_and_attempts_l1(engine):
+    import sqlite3
+
+    engine.store._exec("CREATE TRIGGER fail_pause_write BEFORE INSERT ON events WHEN NEW.kind='strategy_paused' "
+                       "BEGIN SELECT RAISE(ABORT, 'audit failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="audit failure"):
+        engine._pause_strategy("S1_ema_trend", hours=2, reason="consecutive losses")
+    assert engine.store.kv_get("paused_strategies") is None
+    assert engine.killswitch.level is KillLevel.L1
+    assert engine._strategy_blocked("S1_ema_trend")
+
+
+async def test_engine_risk_context_applies_durable_size_reduction(engine):
+    from decimal import Decimal
+
+    engine.store.reduce_strategy_size("S1_ema_trend", Decimal("0.5"), now=engine.clock.now(), reason="losses")
+    context = engine._risk_context("BTC/USDT", "S1_ema_trend")
+    assert context.size_multiplier == Decimal("0.5")

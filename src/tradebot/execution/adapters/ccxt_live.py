@@ -228,9 +228,17 @@ class CcxtLiveAdapter(ExchangeAdapter):
                     size_current = False
                 if not size_current:
                     self._refuse_order(request, "missing, invalid or stale live sizing multiplier")
-            if (self.killswitch.store.strategy_disabled(request.strategy)
-                    or self.killswitch.store.strategy_fault_paused(request.strategy, now=self.clock.now())):
-                self._refuse_order(request, "strategy is durably disabled or fault-paused")
+            try:
+                sized = request.sized_strategy_multiplier
+                sized = Decimal("1") if sized is None else sized
+                valid_size = (isinstance(sized, Decimal) and sized.is_finite() and 0 < sized <= 1
+                              and sized <= self.killswitch.store.strategy_size_multiplier(request.strategy))
+            except (ValueError, ArithmeticError):
+                valid_size = False
+            if not valid_size:
+                self._refuse_order(request, "invalid or stale strategy size multiplier")
+            if self.killswitch.store.strategy_paused(request.strategy, now=self.clock.now()):
+                self._refuse_order(request, "strategy is durably disabled or paused")
         rules = self.get_market_rules(request.symbol)
         qty = round_qty(request.qty, rules.lot_step)
         price = round_price(request.price, rules.tick_size, request.side.value) if request.price else None

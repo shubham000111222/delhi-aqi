@@ -528,7 +528,12 @@ class Engine:
             self.store.save_verdict(signal.id, self._veto("kill_switch", f"kill level {self.killswitch.level.value}"))
             return
         rules = self.adapter.get_market_rules(signal.symbol)
-        risk_ctx = self._risk_context(signal.symbol)
+        try:
+            risk_ctx = self._risk_context(signal.symbol, signal.strategy)
+        except (ValueError, ArithmeticError):
+            self.stats.vetoes += 1
+            self.store.save_verdict(signal.id, self._veto("strategy_size", "invalid strategy size multiplier"))
+            return
         decision = self.risk.approve_entry(signal, risk_ctx, rules)
         self.store.save_verdict(signal.id, decision.verdict, ts=self.clock.now())
         if not decision.approved:
@@ -564,7 +569,8 @@ class Engine:
             atr=D(ctx.atr) if ctx.atr == ctx.atr else ZERO,
         )
         await self.om.submit_entry(signal, qty, price=decision.entry_price, plan=plan,
-                                   sized_ramp_multiplier=risk_ctx.ramp_multiplier)
+                                   sized_ramp_multiplier=risk_ctx.ramp_multiplier,
+                                   sized_strategy_multiplier=risk_ctx.size_multiplier)
         self.stats.orders += 1
 
     def _maybe_calibrate_slippage(self, minimum_fills: int = 30) -> None:
@@ -708,7 +714,7 @@ class Engine:
 
         return RiskVerdict(approved=False, reason=f"{name}: {detail}", checks=[RiskCheck(name, False, detail)])
 
-    def _risk_context(self, symbol: str) -> RiskContext:
+    def _risk_context(self, symbol: str, strategy: str) -> RiskContext:
         marks = self.marks
         equity = self.ledger.equity(marks)
         book = self.market.book(symbol)
@@ -738,7 +744,8 @@ class Engine:
             book=book,
             cooldown_until=self._cooldowns.get(symbol),
             symbol_enabled=symbol in self.cfg.symbol_names(),
-            strategy_paused=False,
+            strategy_paused=self._strategy_blocked(strategy),
+            size_multiplier=self.store.strategy_size_multiplier(strategy),
             mode_allows_entries=self.killswitch.level is KillLevel.L0,
             ramp_multiplier=self.ramp.multiplier(),
             available_cash=self.adapter_cash(),
@@ -861,15 +868,16 @@ class Engine:
                     reason=f"{streak} consecutive losses",
                 )
             elif streak >= self.cfg.risk.consecutive_losses_halve:
-                self.store.kv_set(f"size_mult_{trade.strategy}", to_str(D("0.5")))
-                self._log(
-                    "size_reduction",
-                    {"strategy": trade.strategy, "multiplier": "0.5", "streak": streak},
-                    level="WARN",
-                    actor="risk",
-                )
-        else:
-            self.store.kv_delete(f"size_mult_{trade.strategy}")
+                try:
+                    self.store.reduce_strategy_size(trade.strategy, D("0.5"), now=self.clock.now(),
+                                                    reason=f"{streak} consecutive losses")
+                except Exception:  # noqa: BLE001 - preserve protection when persistence/audit fails
+                    self._disabled_strategies[trade.strategy] = "strategy size reduction failed"
+                    self.killswitch.trigger(KillLevel.L1, trigger="strategy_size_reduction_failed",
+                                            reason=f"could not persist reduction for {trade.strategy}", actor="risk")
+                    raise
+        # A profitable trade is not authenticated authorization to increase future risk.
+        # Existing reductions remain latched until a safe operator release is implemented.
         self._reserve_tax()
 
     def _reserve_tax(self) -> None:
@@ -1027,17 +1035,7 @@ class Engine:
     # strategy pausing / decay
     # ------------------------------------------------------------------
     def _strategy_blocked(self, name: str) -> bool:
-        if (name in self._disabled_strategies or self.store.strategy_disabled(name)
-                or self.store.strategy_fault_paused(name, now=self.clock.now())):
-            return True
-        paused = self.store.kv_get("paused_strategies", {}) or {}
-        info = paused.get(name)
-        if not info:
-            return False
-        until = info.get("until") if isinstance(info, dict) else None
-        if until is None:
-            return True
-        return self.clock.now() < _parse(until)
+        return name in self._disabled_strategies or self.store.strategy_paused(name, now=self.clock.now())
 
     def _handle_strategy_fault(self, name: str, *, reason: str) -> None:
         """Pause a faulty strategy, and after three faults in an hour, disable it (§20.3).
@@ -1063,12 +1061,14 @@ class Engine:
             raise
 
     def _pause_strategy(self, name: str, *, hours: int, reason: str) -> None:
-        paused = self.store.kv_get("paused_strategies", {}) or {}
-        paused[name] = {"until": iso(self.clock.now() + timedelta(hours=hours)), "reason": reason}
-        self.store.kv_set("paused_strategies", paused)
-        self._log(
-            "strategy_paused", {"strategy": name, "hours": hours, "reason": reason}, level="WARN", actor="risk"
-        )
+        now = self.clock.now()
+        try:
+            self.store.extend_strategy_pause(name, until=now + timedelta(hours=hours), reason=reason, now=now)
+        except Exception:  # noqa: BLE001 - pause or audit failure must not enable entries
+            self._disabled_strategies[name] = reason
+            self.killswitch.trigger(KillLevel.L1, trigger="strategy_pause_failed",
+                                    reason=f"could not persist strategy pause for {name}", actor="risk")
+            raise
 
     # ------------------------------------------------------------------
     # equity, health, kill switch

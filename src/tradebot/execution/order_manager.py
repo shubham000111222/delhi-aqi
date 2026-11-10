@@ -136,6 +136,7 @@ class OrderManager:
         plan: Any = None,
         *,
         sized_ramp_multiplier: Decimal | None = None,
+        sized_strategy_multiplier: Decimal | None = None,
     ) -> Order | None:
         rules = self.adapter.get_market_rules(signal.symbol)
         order_type = signal.entry_type
@@ -153,6 +154,7 @@ class OrderManager:
             signal_id=signal.id,
             reason=signal.reason[:200],
             sized_ramp_multiplier=sized_ramp_multiplier,
+            sized_strategy_multiplier=sized_strategy_multiplier,
         )
         if plan is not None:
             # register before placement: a limit order can fill inside place_order
@@ -251,13 +253,30 @@ class OrderManager:
                         level="CRIT", actor="execution", ts=self.clock.now(),
                     )
                     return None
+            if not request.reduce_only:
+                try:
+                    sized = request.sized_strategy_multiplier
+                    # Legacy callers without a multiplier assert full size, which only
+                    # passes when no stricter persisted reduction exists.
+                    sized = Decimal("1") if sized is None else sized
+                    valid_size = (isinstance(sized, Decimal) and sized.is_finite() and 0 < sized <= 1
+                                  and sized <= self.store.strategy_size_multiplier(request.strategy))
+                except (ValueError, ArithmeticError):
+                    valid_size = False
+                if not valid_size:
+                    self.store.log_event(
+                        "autonomy_refused", {"action": "increase_position_size", "strategy": request.strategy,
+                                             "reason": "invalid or stale strategy size multiplier",
+                                             "client_order_id": request.client_order_id},
+                        level="CRIT", actor="execution", ts=self.clock.now(),
+                    )
+                    return None
             if not request.reduce_only and (
-                self.store.strategy_disabled(request.strategy)
-                or self.store.strategy_fault_paused(request.strategy, now=self.clock.now())
+                self.store.strategy_paused(request.strategy, now=self.clock.now())
             ):
                 self.store.log_event(
                     "autonomy_refused", {"action": "re_enable_strategy", "strategy": request.strategy,
-                                         "reason": "strategy is durably disabled or fault-paused",
+                                         "reason": "strategy is durably disabled or paused",
                                          "client_order_id": request.client_order_id},
                     level="CRIT", actor="execution", ts=self.clock.now(),
                 )

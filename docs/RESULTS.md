@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest strategy risk-boundary pass (working branch)
+
+- Risk/decay pause extensions now serialize and preserve longer or malformed holds, with pause and audit in one transaction; normal manager and CCXT entry paths recheck them. Loss-streak size reductions now feed engine risk sizing, are monotonic and audited, and are rechecked as caller-supplied assertions at placement. A win no longer automatically removes the reduction. There is no authenticated release workflow yet.
+- Full suite **1118 passed, 2 skipped**; Ruff, mypy and `git diff --check` passed. Consecutive-loss counting itself is still process-local and non-atomic; direct SQL, custom/raw venue access, misrepresented strategy/multiplier, reduce-only assertions and in-flight orders can bypass these controls. This does not prove actual submitted quantity or venue-side safety; dashboard process predates these changes. Earlier performance results predate this sizing change.
+
 ## Latest modeled cost-stress rerun pass (working branch)
 
 - Paper market fills can now model increased adverse slippage relative to the decision reference; the 2× stress configuration doubles fees and modeled adverse market slippage. Limit orders remain at their limit, zero modeled slippage is not invented, and old stop references can overstate stress. Walk-forward CLI runs a separate stressed sequence over the same configured windows/parameters and independently carried capital; robustness includes its rerun result in the cost gate. Backtests, walk-forward and robustness refuse live/testnet mode.
