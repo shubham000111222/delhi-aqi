@@ -768,3 +768,39 @@ def test_model_copy_cannot_override_absolute_envelope(cfg):
     })
     with pytest.raises(ValueError, match="hard envelope"):
         RiskEngine(replace(cfg, risk=spoofed), KillSwitch(Store(), kill_file=None))
+
+
+@pytest.mark.parametrize("mode", [Mode.LIVE, Mode.TESTNET])
+@pytest.mark.parametrize("level", [KillLevel.L1, KillLevel.L2, KillLevel.L3])
+def test_manual_reset_fails_closed_in_live_and_testnet_without_authorization(mode, level):
+    clock = SimClock(NOW)
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=mode)
+    switch.trigger(level, trigger="test", reason="pause")
+    clock.advance(timedelta(hours=2))
+    with pytest.raises(PermissionError, match="authenticated authorization"):
+        switch.reset(reason="reviewed", actor="operator")
+    assert switch.level is level
+    assert store.count_events("manual_reset_refused") == 1
+    store.close()
+
+
+def test_kill_switch_mode_binding_is_read_only():
+    store = Store(":memory:")
+    switch = KillSwitch(store, mode=Mode.LIVE, kill_file=None)
+    with pytest.raises(AttributeError):
+        switch.mode = Mode.PAPER
+    with pytest.raises(ValueError, match="mode"):
+        KillSwitch(store, mode="paper", kill_file=None)
+    store.close()
+
+
+@pytest.mark.parametrize("mode", [Mode.LIVE, Mode.TESTNET])
+def test_live_testnet_auto_resume_fails_closed_without_independent_evidence(mode):
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=mode)
+    switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+    assert not switch.auto_resume(reason="recovered", expected_state=switch.state)
+    assert switch.level is KillLevel.L1
+    assert store.count_events("autonomy_refused") == 1
+    store.close()

@@ -242,7 +242,7 @@ class Engine:
         )
         feed = feed or make_feed(config, clock)
         rules = feed.market_rules()
-        killswitch = KillSwitch(store, clock=clock)
+        killswitch = KillSwitch(store, clock=clock, mode=config.mode)
         if adapter is None:
             from .execution.adapters import make_adapter
 

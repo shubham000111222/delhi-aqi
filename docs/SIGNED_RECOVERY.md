@@ -6,7 +6,7 @@ short-lived acknowledgement, bound to a database identity, mode and exact kill-s
 The database consumes each request once, transactionally with the acknowledgement audit and
 kill-state update. A signature proves possession of a key, not who held it.
 
-The action **does not reset the kill switch**, prove positions flat, rebuild missing incidents,
+Live/testnet manual and automatic resets are currently blocked pending authenticated reset and independent recovery evidence. The action **does not reset the kill switch**, prove positions flat, rebuild missing incidents,
 or authorize a ramp increase. It records that incident history is unverified and sets a separate
 durable hold. Entries and reset remain blocked while that hold exists. There is **no implemented
 authenticated reconciliation/hold-clearing workflow** yet; do not delete the hold or edit the

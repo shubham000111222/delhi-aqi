@@ -777,7 +777,7 @@ def cmd_control(args: argparse.Namespace) -> int:
     from .risk.killswitch import KillSwitch
 
     store = Store(cfg.settings.db_path)
-    ks = KillSwitch(store)
+    ks = KillSwitch(store, mode=cfg.mode)
     if args.action == "pause":
         ks.trigger(KillLevel.L1, trigger="manual", reason=args.reason or "manual pause", actor="cli")
     elif args.action == "kill":

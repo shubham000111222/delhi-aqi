@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from ..config import Mode
 from ..core.clock import Clock, iso, parse_iso, utcnow
 from ..core.logging import get_logger
 from ..core.models import KillLevel
@@ -33,7 +34,11 @@ class KillSwitch:
         store: Store,
         clock: Clock | None = None,
         kill_file: Path | str | None = Path("KILL"),
+        *, mode: Mode = Mode.PAPER,
     ) -> None:
+        if not isinstance(mode, Mode):
+            raise ValueError("kill switch mode must be a Mode value")
+        self._mode = mode
         self.store = store
         self.clock = clock
         self.kill_file = Path(kill_file) if kill_file is not None else None
@@ -42,6 +47,10 @@ class KillSwitch:
             self.store.recover_pending_kill_incidents()
         except Exception:  # noqa: BLE001 - leave the durable hold intact
             log.exception('{"event":"kill_incident_recovery_failed"}')
+
+    @property
+    def mode(self) -> Mode:
+        return self._mode
 
     # --- state ------------------------------------------------------------
     def _ensure_state(self) -> None:
@@ -173,6 +182,8 @@ class KillSwitch:
             )
             return False
 
+        if self.mode is not Mode.PAPER:
+            return refuse("live/testnet auto-resume requires independent recovery evidence; not implemented")
         if expected_state is None:
             return refuse("missing evaluated pause state")
         # A kill file is an independent stop request; honor it before attempting L0.
@@ -217,6 +228,8 @@ class KillSwitch:
 
         if self.check_kill_file():
             refuse("cannot reset while KILL file is present")
+        if self.mode is not Mode.PAPER:
+            refuse("live/testnet manual reset requires authenticated authorization; not implemented")
         current = self.state
         if expected_state is not None and current != expected_state:
             refuse("kill state changed; recheck before reset")

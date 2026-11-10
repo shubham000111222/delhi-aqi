@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest live/testnet reset fail-closed pass (working branch)
+
+- Normal engine and CLI kill switches now capture their configured mode and refuse both manual and automatic live/testnet reset until authenticated authorization and independent recovery evidence exist. Paper mode retains its previous reset paths. A caller-provided operator name is not authorization.
+- Full suite **907 passed, 2 skipped**; Ruff (including tools), mypy and `git diff --check` passed. Tests cover L1–L3, both live/testnet modes and the real CLI.
+- This is a deliberate operational restriction, **not** a completed authenticated reset flow. Direct Store writes, incorrectly constructed kill switches, private-field mutation, arbitrary process code and external venue actions bypass the restriction. Signed tracking-fault acknowledgement still does not permit a reset, and no real exchange was tested. The dashboard process must restart to load this change.
+
 ## Latest signed tracking-fault acknowledgement pass (working branch)
 
 - Added a short-lived Ed25519-signed request bound to database identity, mode, key fingerprint and exact kill-state snapshot. The one-use consumption and audit event commit atomically. This one action acknowledges a tracking fault, preserves the kill level and creates an unverified-history hold; it neither fabricates an incident nor permits entries/reset. The public-key trust bundle must be separately provisioned and protected; private keys remain offline.
