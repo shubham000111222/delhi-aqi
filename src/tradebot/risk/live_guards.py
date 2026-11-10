@@ -192,7 +192,7 @@ class RampController:
         if (self.store.has_pending_kill_incident()
                 or self.store.kill_state().get("incident_tracking_failed")):
             raise ValueError("live ramp has an unrecorded kill incident")
-        if self.store.kv_get("ramp_incident_tracking_invalid") is not None:
+        if self.store.has_invalid_ramp_tracking():
             raise ValueError("live ramp incident tracking is invalid; operator investigation required")
         if not self.guards.ramp_multipliers:
             raise ValueError("live ramp requires an initial multiplier")

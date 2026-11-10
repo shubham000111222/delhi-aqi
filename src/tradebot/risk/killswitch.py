@@ -78,7 +78,8 @@ class KillSwitch:
         state = self.state
         return (state.get("level") == KillLevel.L0.value
                 and not state.get("incident_tracking_failed")
-                and not self.store.has_pending_kill_incident())
+                and not self.store.has_pending_kill_incident()
+                and not self.store.has_invalid_ramp_tracking())
 
     def must_flatten(self) -> bool:
         return self.level in (KillLevel.L2, KillLevel.L3)
@@ -246,7 +247,7 @@ class KillSwitch:
             ts=self.now(),
         )
         if not changed:
-            refuse("kill state, flapping hold or pending incident changed; recheck before reset")
+            refuse("kill state, flapping hold or incident tracking changed; recheck before reset")
         self.store.kv_set("last_reset", {"ts": iso(self.now()), "reason": reason, "actor": actor})
         log.warning('{"event":"kill_switch_reset","to":"%s","actor":"%s"}', level.value, actor)
 

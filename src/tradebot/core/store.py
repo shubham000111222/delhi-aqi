@@ -206,6 +206,14 @@ CREATE TABLE IF NOT EXISTS approvals (
     decided_by TEXT
 );
 
+CREATE TABLE IF NOT EXISTS signed_action_consumptions (
+    request_id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    action TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS holdout_uses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
@@ -877,6 +885,8 @@ class Store:
             if require_no_pending_incident and (
                 current.get("incident_tracking_failed") or conn.execute(
                     "SELECT 1 FROM kv WHERE key GLOB 'kill_incident_pending:*' LIMIT 1"
+                ).fetchone() is not None or conn.execute(
+                    "SELECT 1 FROM kv WHERE key='ramp_incident_tracking_invalid'"
                 ).fetchone() is not None
             ):
                 return False
@@ -949,6 +959,9 @@ class Store:
 
     def has_pending_kill_incident(self) -> bool:
         return bool(self._query("SELECT 1 FROM kv WHERE key GLOB 'kill_incident_pending:*' LIMIT 1"))
+
+    def has_invalid_ramp_tracking(self) -> bool:
+        return bool(self._query("SELECT 1 FROM kv WHERE key='ramp_incident_tracking_invalid'"))
 
     def recover_pending_kill_incidents(self) -> int:
         """Replay committed escalation outbox records; never changes the kill level."""

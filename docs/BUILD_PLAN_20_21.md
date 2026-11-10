@@ -118,7 +118,7 @@ shadow form; **fund** does not exist.
 | 21.4 | Lifecycle manager: IDEA→…→RETIRED, gated transitions, decay auto-disable, 60-day retirement | ⬜ strategies are static in config |
 | 21.5 | Fund loop: cost ledger, self-funding ratio, break-even capital, profit waterfall, budget caps | 🟡 tax reserve + daily report ✅; the rest ⬜ |
 | 21.6 | Learn schedule: continuous drift, weekly retrain, monthly research, quarterly audit | 🟡 research loop and trial log exist; no scheduler |
-| 21.7 | Autonomy limits, approvals, autonomy ledger, forbidden-action tests | 🟡 working branch has partial ledger and approval records; request snapshots, decision events and ledger events now commit atomically. Identity authentication, action-bound consumption and enforcement at actual mutation boundaries remain unbuilt; old rows may lack audit events. |
+| 21.7 | Autonomy limits, approvals, autonomy ledger, forbidden-action tests | 🟡 working branch has partial ledger and approval records; request snapshots, decision events and ledger events now commit atomically. An offline signed, single-use action can acknowledge a tracking fault without resuming, but its replacement hold remains; identity authentication and action-bound consumption for allocation/reset and enforcement at other mutation boundaries remain unbuilt. Old rows may lack audit events. |
 | 21.8 | Operator-absent ladder (7 d warn, 14 d half size, 21 d L1) | ⬜ |
 | 21.9 | Build order: operate + heal first | ✅ this file follows it |
 | 21.10 | Honest limits + scenarios 29–34 | 🟡 stated in docs; the mechanisms are the rows above |

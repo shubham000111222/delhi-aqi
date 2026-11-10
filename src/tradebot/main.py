@@ -540,6 +540,39 @@ def cmd_autonomy(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_recovery_request(args: argparse.Namespace) -> int:
+    """Create a short-lived, state-bound request for offline operator signature."""
+    from .signed_recovery import SignedFaultRecovery
+
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    try:
+        result = SignedFaultRecovery(cfg, store).request(args.key_id, args.reason)
+    finally:
+        store.close()
+    _print(result)
+    return 0
+
+
+def cmd_recovery_apply(args: argparse.Namespace) -> int:
+    """Verify and consume an offline signature without resetting the kill switch."""
+    from .signed_recovery import SignedFaultRecovery
+
+    request_path, signature_path = Path(args.request), Path(args.signature)
+    if request_path.stat().st_size > 16384 or signature_path.stat().st_size > 1024:
+        raise ValueError("recovery input file is too large")
+    request = json.loads(request_path.read_text(encoding="utf-8-sig"))
+    signature = signature_path.read_text(encoding="utf-8-sig").strip()
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    try:
+        SignedFaultRecovery(cfg, store).apply(request, signature)
+        print("signature consumed; kill level unchanged; incident history remains unverified")
+    finally:
+        store.close()
+    return 0
+
+
 def cmd_health(args: argparse.Namespace) -> int:
     """One health check, printed: what each component answered and what the model made of it.
 
@@ -1029,6 +1062,13 @@ def build_parser() -> argparse.ArgumentParser:
     bfl.add_argument("--json", action="store_true")
 
     sub.add_parser("autonomy", help="show the partial autonomy audit ledger")
+
+    rec_req = sub.add_parser("recovery-request", help="create a signed incident-tracking acknowledgement request")
+    rec_req.add_argument("--key-id", required=True, help="SHA-256 fingerprint of an authorized public key")
+    rec_req.add_argument("--reason", required=True, help="written reason for acknowledgement")
+    rec_apply = sub.add_parser("recovery-apply", help="consume an offline signed incident acknowledgement")
+    rec_apply.add_argument("--request", required=True, help="request JSON file")
+    rec_apply.add_argument("--signature", required=True, help="base64 Ed25519 signature file")
 
     hlth = sub.add_parser("health", help="run one health check and print component state")
     hlth.add_argument("--json", action="store_true")
@@ -2800,6 +2840,8 @@ def main(argv: list[str] | None = None) -> int:
         "backfill-history": cmd_backfill_history,
         "health": cmd_health,
         "autonomy": cmd_autonomy,
+        "recovery-request": cmd_recovery_request,
+        "recovery-apply": cmd_recovery_apply,
         "alerts": cmd_alerts,
         "watchdog": cmd_watchdog,
         "experiments": cmd_experiments,
@@ -2811,7 +2853,7 @@ def main(argv: list[str] | None = None) -> int:
     handler = handlers[args.command]
     try:
         return int(handler(args) or 0)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError, PermissionError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:  # pragma: no cover

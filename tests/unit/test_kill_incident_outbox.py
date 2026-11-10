@@ -29,7 +29,7 @@ def test_escalation_survives_audit_failure_and_recovers_after_restart(tmp_path, 
     assert switch.level is KillLevel.L2
     assert store.has_pending_kill_incident()
     assert not store.incidents()
-    with pytest.raises(PermissionError, match="pending incident"):
+    with pytest.raises(PermissionError, match="incident tracking"):
         switch.reset(reason="review")
     config = replace(cfg, settings=cfg.settings.model_copy(update={"mode": Mode.LIVE}))
     with pytest.raises(ValueError, match="unrecorded kill incident"):
@@ -56,7 +56,7 @@ def test_recovery_failure_keeps_the_hold(cfg):
     assert store.has_pending_kill_incident()
     assert not reopened.auto_resume(reason="recovered", expected_state=reopened.state)
     assert reopened.level is KillLevel.L1
-    with pytest.raises(PermissionError, match="pending incident"):
+    with pytest.raises(PermissionError, match="incident tracking"):
         reopened.reset(reason="manual")
     store.close()
 
@@ -88,7 +88,7 @@ def test_outbox_failure_preserves_kill_and_latches_tracking_fault(cfg):
     assert switch.level is KillLevel.L2
     assert switch.state["incident_tracking_failed"] is True
     assert not store.has_pending_kill_incident()
-    with pytest.raises(PermissionError, match="pending incident"):
+    with pytest.raises(PermissionError, match="incident tracking"):
         switch.reset(reason="review")
     config = replace(cfg, settings=cfg.settings.model_copy(update={"mode": Mode.LIVE}))
     with pytest.raises(ValueError, match="unrecorded kill incident"):

@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest signed tracking-fault acknowledgement pass (working branch)
+
+- Added a short-lived Ed25519-signed request bound to database identity, mode, key fingerprint and exact kill-state snapshot. The one-use consumption and audit event commit atomically. This one action acknowledges a tracking fault, preserves the kill level and creates an unverified-history hold; it neither fabricates an incident nor permits entries/reset. The public-key trust bundle must be separately provisioned and protected; private keys remain offline.
+- Full suite **897 passed, 2 skipped**; Ruff (including tools), mypy and `git diff --check` passed. Tests use generated ephemeral keys and exercise CLI, replay, stale state, expiry, wrong/revoked keys, database binding, concurrency and audit rollback.
+- This is not a general approval flow or operator identity proof: it proves possession of a configured key under documented OS trust assumptions. There is no authenticated workflow to reconcile/clear the resulting hold; allocation and reset authorization, independent venue proof and complete Phase D remain open. Exact DB clones share identity. See `docs/SIGNED_RECOVERY.md`. No actual user/operator key was provisioned or real venue tested; the dashboard process must restart to load this change.
+
 ## Latest immutable risk and runtime entry-boundary pass (working branch)
 
 - Risk-limit models and the outer config binding are frozen; hard envelope constants are class constants, cannot be configured, and are revalidated when constructing risk and order managers. Risk entry and order-manager/CCXT placement paths refuse detected runtime risk, mode or adapter changes; the order manager rejects reduce-only buys.
