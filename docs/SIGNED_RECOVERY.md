@@ -90,3 +90,37 @@ Paths below are examples: adjust them to your own secure operator device and pap
 
 Do not run these steps for real money as a substitute for independent venue-state checks,
 authenticated reset, incident reconciliation or the other unfinished go/no-go requirements.
+
+## Signed live allocation-cap reduction
+
+The same offline key and `tools/sign_recovery.py` can sign the distinct
+`reduce_live_allocation_cap` action. This is a **reduction only**, not live authorization,
+strategy promotion, a kill reset, or evidence of safe trading. It changes the persisted
+operator cap used by the normal live `RampController.multiplier()`; the effective multiplier
+is the minimum of that cap, the configured initial multiplier, and 0.10. For example,
+`0.03` caps the ramp multiplier at 3%, not 3% of account equity. A configured stricter
+multiplier still wins. The displayed `previous_cap` is the stored operator cap (initially
+0.10), not necessarily the smaller effective multiplier. No signed cap-increase/clear
+workflow exists; do not apply a reduction unless it is intended to persist.
+
+With an already provisioned key and operator process as above, the request/apply commands
+below target the **live-mode database**, even if no exchange is connected. Use an isolated
+configuration and data directory for practice; do not use a real trading database for a drill.
+The private key remains on the offline machine. Transfer only the request and signature.
+
+```powershell
+tradebot allocation-request --mode live --key-id $KeyId --reason 'Reduce allocation cap' --cap '0.03' | Set-Content -Encoding UTF8 "$env:TEMP\allocation-request.json"
+# On the offline operator machine, after secure transfer and review:
+python tools/sign_recovery.py --private-key 'C:\secure\operator-key.pem' --request "$env:TEMP\allocation-request.json" --signature "$env:TEMP\allocation.sig"
+# Transfer the signature back, then on the trading machine:
+tradebot allocation-apply --mode live --request "$env:TEMP\allocation-request.json" --signature "$env:TEMP\allocation.sig"
+```
+
+The signature binds the database ID, mode, action, old and new operator caps, key, reason,
+nonce and 15-minute maximum expiry. Consumption, cap update and audit are transactional;
+concurrent/stale/replayed requests cannot apply. Key possession is not human identity:
+the public trust bundle, database and process need separate OS protection. The cap is not
+an exchange-side order limit: raw SQL, direct exchange/custom adapter calls, alternate sizing
+paths, misconfigured processes and orders already sized or in flight can bypass it. Real
+venue behavior has not been tested. An invalid cap blocks normal live sizing. Live ramp
+increases and live/testnet kill resets remain blocked.

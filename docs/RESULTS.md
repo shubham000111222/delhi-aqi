@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest signed allocation-cap reduction pass (working branch)
+
+- Added an offline Ed25519, database/mode/action/state/expiry-bound, single-use approval that can only reduce the persisted live allocation cap. Applying it atomically records the consumed request, level-4 autonomy row and event. Normal live ramp sizing takes the minimum of this cap, configured initial cap and 10%. The real CLI and offline signing tools are tested using temporary keys and an isolated database, without connecting to an exchange.
+- Full suite **951 passed, 2 skipped**; Ruff (including tools), mypy and `git diff --check` passed. This does not authorize increased allocation, implement authenticated reset, verify a human identity or certify live readiness. It does not enforce venue-side exposure limits or retroactively resize in-flight/already-sized orders; raw SQL, direct exchange/custom adapters and alternative sizing paths remain outside the boundary. The dashboard process predates the change.
+
 ## Latest durable strategy fault-budget pass (working branch)
 
 - The first three strategy faults now atomically persist a one-hour entry pause and autonomy/event records; the fourth within the window atomically latches the disable. Multiple processes share the same serialized budget, backward clock movement does not discard future-dated faults, and engine restarts restore the dashboard view. The order-manager and CCXT entry boundaries recheck the durable pause. Audit-write failures roll back the fault transaction and attempt L1.

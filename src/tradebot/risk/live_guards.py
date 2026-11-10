@@ -183,6 +183,19 @@ class RampController:
                 })),
             )
 
+    @staticmethod
+    def operator_cap(raw: Any) -> Decimal:
+        """Validate a durable operator cap; malformed records fail closed."""
+        if not isinstance(raw, dict) or set(raw) != {"cap"} or not isinstance(raw["cap"], str):
+            raise ValueError("invalid operator allocation cap")
+        try:
+            cap = Decimal(raw["cap"])
+            if not cap.is_finite() or cap <= 0 or cap > D("0.10"):
+                raise ValueError("invalid operator allocation cap")
+            return cap
+        except ArithmeticError as exc:
+            raise ValueError("invalid operator allocation cap") from exc
+
     def multiplier(self) -> Decimal:
         if self.cfg.mode is not Mode.LIVE:
             return D("1")
@@ -199,7 +212,9 @@ class RampController:
         initial = self.guards.ramp_multipliers[0]
         if not initial.is_finite() or initial <= 0 or initial > 1:
             raise ValueError("invalid initial live ramp multiplier")
-        return min(initial, D("0.10"))
+        cap_rows = self.store._query("SELECT value FROM kv WHERE key='operator_allocation_cap'")
+        cap = self.operator_cap(json.loads(cap_rows[0]["value"])) if cap_rows else D("0.10")
+        return min(initial, D("0.10"), cap)
 
 
 class LiveGuardChecker:

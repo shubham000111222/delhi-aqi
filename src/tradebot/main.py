@@ -573,6 +573,36 @@ def cmd_recovery_apply(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_allocation_request(args: argparse.Namespace) -> int:
+    from .signed_allocation import SignedAllocation
+
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    try:
+        _print(SignedAllocation(cfg, store).request(args.key_id, args.reason, args.cap))
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_allocation_apply(args: argparse.Namespace) -> int:
+    from .signed_allocation import SignedAllocation
+
+    request_path, signature_path = Path(args.request), Path(args.signature)
+    if request_path.stat().st_size > 16384 or signature_path.stat().st_size > 1024:
+        raise ValueError("allocation input file is too large")
+    request = json.loads(request_path.read_text(encoding="utf-8-sig"))
+    signature = signature_path.read_text(encoding="utf-8-sig").strip()
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    try:
+        SignedAllocation(cfg, store).apply(request, signature)
+        print("allocation cap reduced; live readiness and kill level unchanged")
+    finally:
+        store.close()
+    return 0
+
+
 def cmd_health(args: argparse.Namespace) -> int:
     """One health check, printed: what each component answered and what the model made of it.
 
@@ -1069,6 +1099,14 @@ def build_parser() -> argparse.ArgumentParser:
     rec_apply = sub.add_parser("recovery-apply", help="consume an offline signed incident acknowledgement")
     rec_apply.add_argument("--request", required=True, help="request JSON file")
     rec_apply.add_argument("--signature", required=True, help="base64 Ed25519 signature file")
+
+    alloc_req = sub.add_parser("allocation-request", help="request a signed reduction of the live allocation cap")
+    alloc_req.add_argument("--key-id", required=True)
+    alloc_req.add_argument("--reason", required=True)
+    alloc_req.add_argument("--cap", required=True, help="new cap as a decimal fraction")
+    alloc_apply = sub.add_parser("allocation-apply", help="consume a signed live allocation cap reduction")
+    alloc_apply.add_argument("--request", required=True)
+    alloc_apply.add_argument("--signature", required=True)
 
     hlth = sub.add_parser("health", help="run one health check and print component state")
     hlth.add_argument("--json", action="store_true")
@@ -2842,6 +2880,8 @@ def main(argv: list[str] | None = None) -> int:
         "autonomy": cmd_autonomy,
         "recovery-request": cmd_recovery_request,
         "recovery-apply": cmd_recovery_apply,
+        "allocation-request": cmd_allocation_request,
+        "allocation-apply": cmd_allocation_apply,
         "alerts": cmd_alerts,
         "watchdog": cmd_watchdog,
         "experiments": cmd_experiments,

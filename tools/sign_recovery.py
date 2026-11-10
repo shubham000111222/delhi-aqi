@@ -29,7 +29,7 @@ def main() -> int:
     if request_path.stat().st_size > 16384 or private_path.stat().st_size > 16384:
         raise ValueError("input file too large")
     request = json.loads(request_path.read_text(encoding="utf-8-sig"))
-    if not isinstance(request, dict) or request.get("action") != "acknowledge_kill_incident_tracking_failure":
+    if not isinstance(request, dict) or request.get("action") not in {"acknowledge_kill_incident_tracking_failure", "reduce_live_allocation_cap"}:
         raise ValueError("unsupported action")
     print(json.dumps(request, indent=2, sort_keys=True))
     if input("Review the request and type SIGN to approve: ").strip() != "SIGN":
