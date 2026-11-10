@@ -32,9 +32,11 @@ from ...core.models import (
     OrderRequest,
     OrderStatus,
     OrderType,
+    Side,
 )
 from ...core.money import ZERO, D, round_price, round_qty
 from ...data.hub import MarketData
+from ...risk.killswitch import KillSwitch
 from .base import ExchangeAdapter, PermanentExchangeError, TransientExchangeError
 
 log = get_logger(__name__)
@@ -64,6 +66,7 @@ class CcxtLiveAdapter(ExchangeAdapter):
         *,
         testnet: bool = False,
         exchange: Any = None,
+        killswitch: KillSwitch | None = None,
     ) -> None:
         self.cfg = config
         self.market = market
@@ -72,6 +75,7 @@ class CcxtLiveAdapter(ExchangeAdapter):
         self.name = f"ccxt:{config.secrets.exchange_id}{'-testnet' if testnet else ''}"
         self.testnet = testnet
         self.exchange = exchange
+        self.killswitch = killswitch
         self.rules: dict[str, MarketRules] = {}
         self.orders: dict[str, Order] = {}
         self.seen_fills: dict[str, Decimal] = {}
@@ -166,10 +170,30 @@ class CcxtLiveAdapter(ExchangeAdapter):
             await self.exchange.close()
 
     # --- orders -----------------------------------------------------------
+    def _refuse_order(self, request: OrderRequest, reason: str) -> None:
+        if self.killswitch is not None:
+            self.killswitch.store.log_event(
+                "autonomy_refused",
+                {"actor": "live_adapter", "action": "place_order_without_kill_check",
+                 "reason": reason, "client_order_id": request.client_order_id, "symbol": request.symbol},
+                level="WARN", actor="live_adapter", ts=self.clock.now(),
+            )
+        raise PermanentExchangeError(reason)
+
     async def place_order(self, request: OrderRequest) -> Order:
         existing = self.orders.get(request.client_order_id)
         if existing is not None and not existing.status.is_terminal:
             return existing
+        # Spot strategy is long-only. A caller cannot label a buy as a reducing exit
+        # to bypass the entry stop. A sell's label is still NOT proof the venue enforces
+        # reduce-only or that a balance/position exists.
+        if request.reduce_only and request.side is not Side.SELL:
+            self._refuse_order(request, "reduce-only buy is not a supported protective action")
+        if not request.reduce_only:
+            if self.killswitch is None:
+                self._refuse_order(request, "kill switch is not attached")
+            if self.killswitch is None or not self.killswitch.can_open_entries():
+                self._refuse_order(request, "kill switch blocks entry")
         rules = self.get_market_rules(request.symbol)
         qty = round_qty(request.qty, rules.lot_step)
         price = round_price(request.price, rules.tick_size, request.side.value) if request.price else None

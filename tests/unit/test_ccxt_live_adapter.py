@@ -17,10 +17,12 @@ import pytest
 
 from tradebot.config import load_config
 from tradebot.core.clock import Clock
-from tradebot.core.models import OrderRequest, OrderStatus, OrderType, Side
+from tradebot.core.models import KillLevel, OrderRequest, OrderStatus, OrderType, Side
+from tradebot.core.store import Store
 from tradebot.data.hub import MarketData
 from tradebot.execution.adapters.base import PermanentExchangeError, TransientExchangeError
 from tradebot.execution.adapters.ccxt_live import CcxtLiveAdapter
+from tradebot.risk.killswitch import KillSwitch
 
 SYMBOL = "BTC/USDT"
 
@@ -136,7 +138,8 @@ class FakeExchange:
 def build(exchange: FakeExchange) -> CcxtLiveAdapter:
     cfg = load_config()
     market = MarketData(cfg.symbol_names(), timeframes=())
-    return CcxtLiveAdapter(cfg, market, Clock(), exchange=exchange)
+    return CcxtLiveAdapter(cfg, market, Clock(), exchange=exchange,
+                           killswitch=KillSwitch(Store(":memory:"), kill_file=None))
 
 
 def adapter_with(**kwargs: Any) -> tuple[CcxtLiveAdapter, FakeExchange]:
@@ -372,3 +375,67 @@ class TestMarketData:
         adapter, exchange = adapter_with()
         asyncio.run(adapter.close())
         assert exchange.closed is True
+
+
+def test_live_adapter_refuses_direct_entry_without_killswitch():
+    cfg = load_config()
+    exchange = FakeExchange(symbols=cfg.symbol_names())
+    adapter = CcxtLiveAdapter(cfg, MarketData(cfg.symbol_names(), timeframes=()), Clock(), exchange=exchange)
+    asyncio.run(adapter.connect())
+    with pytest.raises(PermanentExchangeError, match="not attached"):
+        asyncio.run(adapter.place_order(request()))
+    assert not [call for call in exchange.calls if call[0] == "create_order"]
+
+
+@pytest.mark.parametrize("level", [KillLevel.L1, KillLevel.L2, KillLevel.L3])
+def test_live_adapter_direct_entry_obeys_persisted_kill_level(level):
+    adapter, exchange = adapter_with()
+    assert adapter.killswitch is not None
+    adapter.killswitch.trigger(level, trigger="test", reason="pause")
+    with pytest.raises(PermanentExchangeError, match="blocks entry"):
+        asyncio.run(adapter.place_order(request()))
+    assert not [call for call in exchange.calls if call[0] == "create_order"]
+    assert adapter.killswitch.store.count_events("autonomy_refused") == 1
+
+
+def test_live_adapter_rejects_buy_disguised_as_reduce_only():
+    adapter, exchange = adapter_with()
+    assert adapter.killswitch is not None
+    adapter.killswitch.trigger(KillLevel.L1, trigger="test", reason="pause")
+    with pytest.raises(PermanentExchangeError, match="reduce-only buy"):
+        asyncio.run(adapter.place_order(request(reduce_only=True)))
+    assert not [call for call in exchange.calls if call[0] == "create_order"]
+    assert adapter.killswitch.store.count_events("autonomy_refused") == 1
+
+
+def test_live_adapter_keeps_protective_sell_available_at_l3():
+    adapter, exchange = adapter_with()
+    assert adapter.killswitch is not None
+    adapter.killswitch.trigger(KillLevel.L3, trigger="test", reason="pause")
+    asyncio.run(adapter.place_order(request(side=Side.SELL, reduce_only=True)))
+    assert len([call for call in exchange.calls if call[0] == "create_order"]) == 1
+
+
+def test_live_adapter_checks_kill_file_for_direct_entry(tmp_path):
+    adapter, exchange = adapter_with()
+    assert adapter.killswitch is not None
+    kill_file = tmp_path / "KILL"
+    kill_file.write_text("emergency stop")
+    adapter.killswitch.kill_file = kill_file
+    with pytest.raises(PermanentExchangeError, match="blocks entry"):
+        asyncio.run(adapter.place_order(request()))
+    assert adapter.killswitch.level is KillLevel.L2
+    assert not [call for call in exchange.calls if call[0] == "create_order"]
+
+
+def test_live_adapter_fails_closed_if_kill_state_cannot_be_read(monkeypatch):
+    adapter, exchange = adapter_with()
+    assert adapter.killswitch is not None
+
+    def broken():
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(adapter.killswitch, "can_open_entries", broken)
+    with pytest.raises(OSError, match="database unavailable"):
+        asyncio.run(adapter.place_order(request()))
+    assert not [call for call in exchange.calls if call[0] == "create_order"]

@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest live-adapter and remote-reset boundary pass (working branch)
+
+- The CCXT adapter refuses direct exposure-increasing submissions without an attached kill switch or when entries are blocked, including a KILL file; it also rejects a buy falsely marked reduce-only. The engine supplies its persisted switch on normal CCXT construction. Dashboard remote resume is restricted to the exact reviewed L1 state, like Telegram.
+- Direct adapter, corrupt/unavailable state, kill file, protective sell and reset-race regressions pass; full suite **819 passed, 2 skipped**, Ruff and mypy passed.
+- This does not cover direct raw exchange calls or arbitrary injected/other adapters. A sell labelled reduce-only is not independent proof of venue behavior; CCXT spot submission does not guarantee reduce-only and in-flight requests cannot be recalled. Approval identity, action-bound consumption and comprehensive action enforcement remain unbuilt. No real venue was tested. Dashboard process still runs its previously loaded code until restarted.
+
 ## Latest manual reset-boundary pass (working branch)
 
 - Telegram's L1-only reset now uses the exact reviewed kill-state generation, so a concurrent L2/L3 or replacement pause cannot be cleared by the stale request. Manual reset refuses a present KILL file, missing or corrupt L3 cooldown, and corrupt flapping holds; refusals are audited. Dashboard reset refusals return a conflict rather than a server error.

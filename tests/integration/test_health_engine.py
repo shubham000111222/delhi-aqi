@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from tradebot.core.clock import SimClock
+from tradebot.core.models import KillLevel
 from tradebot.core.store import Store
 from tradebot.engine import Engine
 
@@ -210,3 +211,22 @@ async def test_engine_restores_six_changes_and_holds_immediately(fast_cfg):
         assert engine.killswitch.flapping_hold_active()
     finally:
         engine.close()
+
+
+async def test_remote_engine_resume_only_clears_reviewed_l1(engine, monkeypatch):
+    engine.killswitch.trigger(KillLevel.L2, trigger="test", reason="pause")
+    with pytest.raises(PermissionError, match="only clear L1"):
+        await engine.resume("reviewed", actor="dashboard", l1_only=True)
+    assert engine.killswitch.level is KillLevel.L2
+    engine.killswitch.reset(reason="local review")
+    engine.killswitch.trigger(KillLevel.L1, trigger="test", reason="pause")
+    original = engine.killswitch.reset
+
+    def race(*args, **kwargs):
+        engine.killswitch.trigger(KillLevel.L3, trigger="test", reason="concurrent escalation")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(engine.killswitch, "reset", race)
+    with pytest.raises(PermissionError, match="changed"):
+        await engine.resume("reviewed", actor="dashboard", l1_only=True)
+    assert engine.killswitch.level is KillLevel.L3

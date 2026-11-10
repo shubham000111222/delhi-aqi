@@ -385,7 +385,7 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
             await state.engine.pause(reason or "dashboard pause")
         elif action == "resume":
             try:
-                await state.engine.resume(reason or "dashboard resume")
+                await state.engine.resume(reason or "dashboard resume", actor="dashboard", l1_only=True)
             except PermissionError as exc:
                 raise HTTPException(409, str(exc)) from exc
         elif action == "flatten":

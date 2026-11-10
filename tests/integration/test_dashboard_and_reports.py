@@ -284,3 +284,19 @@ def test_dashboard_reports_refused_resume_as_conflict(fast_cfg):
         assert response.status_code == 409
         assert "KILL file" in response.json()["detail"]
     engine.store.close()
+
+
+def test_dashboard_resume_requests_l1_only(fast_cfg):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    engine = SimpleNamespace(store=Store(":memory:"), running=False, resume=AsyncMock())
+    fast_cfg = replace(fast_cfg, secrets=replace(
+        fast_cfg.secrets, dashboard_password="test-password", dashboard_readonly=False,
+    ))
+    with TestClient(create_app(fast_cfg, engine=engine, run_bot=False)) as c:
+        response = c.post("/api/control/resume", headers={"x-dashboard-token": "test-password"})
+        assert response.status_code == 200
+    engine.resume.assert_awaited_once_with("dashboard resume", actor="dashboard", l1_only=True)
+    engine.store.close()

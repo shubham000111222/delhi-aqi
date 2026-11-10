@@ -242,14 +242,14 @@ class Engine:
         )
         feed = feed or make_feed(config, clock)
         rules = feed.market_rules()
+        killswitch = KillSwitch(store, clock=clock)
         if adapter is None:
             from .execution.adapters import make_adapter
 
-            adapter = make_adapter(config, market, clock, rules)
+            adapter = make_adapter(config, market, clock, rules, killswitch=killswitch)
             connect = getattr(adapter, "connect", None)
             if connect is not None:  # live / testnet: load markets and market rules
                 await connect()
-        killswitch = KillSwitch(store, clock=clock)
         risk = RiskEngine(config, killswitch)
         ledger = Ledger(
             starting_cash=config.settings.starting_capital_usdt,
@@ -2085,8 +2085,16 @@ class Engine:
         self.killswitch.trigger(KillLevel.L2, trigger="manual_kill", reason=reason, actor=actor)
         await self.flatten_all(reason)
 
-    async def resume(self, reason: str = "manual resume", actor: str = "operator") -> None:
-        self.killswitch.reset(reason=reason, actor=actor)
+    async def resume(
+        self, reason: str = "manual resume", actor: str = "operator", *, l1_only: bool = False,
+    ) -> None:
+        if l1_only:
+            reviewed = self.killswitch.state
+            if reviewed.get("level") != KillLevel.L1.value:
+                raise PermissionError("remote resume may only clear L1; L2/L3 require local review")
+            self.killswitch.reset(reason=reason, actor=actor, expected_state=reviewed)
+        else:
+            self.killswitch.reset(reason=reason, actor=actor)
 
     def status(self) -> dict[str, Any]:
         marks = self.marks
