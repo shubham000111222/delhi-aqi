@@ -833,7 +833,18 @@ class Engine:
                     actor="portfolio",
                 )
             if pos_before is not None and closed is not None:
-                self.store.close_position(pos_before, fill.price, closed.reason or "exit", closed_at=fill.ts)
+                try:
+                    self.store.close_position_with_risk(
+                        pos_before, fill.price, closed.reason or "exit", closed_at=fill.ts, now=self.clock.now(),
+                        halve_at=self.cfg.risk.consecutive_losses_halve,
+                        pause_at=self.cfg.risk.consecutive_losses_pause,
+                        pause_hours=self.cfg.risk.consecutive_losses_pause_hours,
+                    )
+                except Exception:  # noqa: BLE001 - ledger and risk no longer agree
+                    self._disabled_strategies[closed.strategy] = "position close persistence failed"
+                    self.killswitch.trigger(KillLevel.L1, trigger="position_close_persistence_failed",
+                                            reason=f"could not persist close for {closed.strategy}", actor="risk")
+                    raise
                 await self._on_trade_closed(closed)
             self._exiting.pop(key, None)
         self.om.record_fill(fill)
@@ -854,19 +865,6 @@ class Engine:
                 },
                 actor="risk",
             )
-        try:
-            self.store.record_strategy_trade_risk(
-                trade.strategy, loss=trade.pnl < 0, closed_at=trade.closed_at, now=self.clock.now(),
-                halve_at=self.cfg.risk.consecutive_losses_halve,
-                pause_at=self.cfg.risk.consecutive_losses_pause,
-                pause_hours=self.cfg.risk.consecutive_losses_pause_hours,
-            )
-        except Exception:  # noqa: BLE001 - risk and audit must commit together
-            self._disabled_strategies[trade.strategy] = "strategy trade risk persistence failed"
-            self.killswitch.trigger(KillLevel.L1, trigger="strategy_trade_risk_failed",
-                                    reason=f"could not persist risk for {trade.strategy}", actor="risk")
-            raise
-        # Profitable trades cannot release a latched size reduction.
         self._reserve_tax()
 
     def _reserve_tax(self) -> None:

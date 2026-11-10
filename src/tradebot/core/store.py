@@ -465,78 +465,83 @@ class Store:
         self, name: str, *, loss: bool, closed_at: datetime, now: datetime,
         halve_at: int, pause_at: int, pause_hours: int,
     ) -> int:
-        """Serialize streak changes and risk controls across processes.
+        """Standalone streak transition; does not independently prove a trade occurred."""
+        with self.transaction() as conn:
+            return self._record_strategy_trade_risk(
+                conn, name, loss=loss, closed_at=closed_at, now=now,
+                halve_at=halve_at, pause_at=pause_at, pause_hours=pause_hours,
+            )
 
-        Older/equal-time wins do not reset a newer streak; late losses are counted
-        conservatively. This does not deduplicate trade callbacks or atomically close
-        the ledger position, so it must not be treated as verified trade history.
-        """
+    def _record_strategy_trade_risk(
+        self, conn: sqlite3.Connection, name: str, *, loss: bool, closed_at: datetime, now: datetime,
+        halve_at: int, pause_at: int, pause_hours: int,
+    ) -> int:
+        """Update risk in an existing transaction; stale wins cannot reset newer losses."""
         if (not isinstance(name, str) or not name or type(loss) is not bool
                 or type(halve_at) is not int or type(pause_at) is not int or type(pause_hours) is not int
                 or halve_at < 1 or pause_at < halve_at or pause_hours < 1):
             raise ValueError("invalid strategy loss policy")
         timestamp = iso(now)
         closed_at = utc(closed_at)
-        with self.transaction() as conn:
-            def read(key: str, default: Any) -> Any:
-                row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
-                return json.loads(row["value"]) if row else default
+        def read(key: str, default: Any) -> Any:
+            row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+            return json.loads(row["value"]) if row else default
 
-            def write(key: str, value: Any) -> None:
-                conn.execute("INSERT INTO kv(key,value,updated_at) VALUES(?,?,?) "
-                             "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
-                             (key, json.dumps(value), timestamp))
+        def write(key: str, value: Any) -> None:
+            conn.execute("INSERT INTO kv(key,value,updated_at) VALUES(?,?,?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                         (key, json.dumps(value), timestamp))
 
-            streaks = read("consecutive_losses", {})
-            latest = read("consecutive_losses_latest", {})
-            if (not isinstance(streaks, dict) or not isinstance(latest, dict)
-                    or any(not isinstance(k, str) or type(v) is not int or v < 0 for k, v in streaks.items())
-                    or any(not isinstance(k, str) or not isinstance(v, str) for k, v in latest.items())):
-                raise ValueError("invalid persisted loss streak")
-            last = parse_iso(latest[name]) if name in latest else None
-            streak = streaks.get(name, 0)
-            if loss:
-                streak += 1
-            elif last is None or closed_at > last:
-                streak = 0
-            if last is None or closed_at > last:
-                latest[name] = iso(closed_at)
-            streaks[name] = streak
-            write("consecutive_losses", streaks)
-            write("consecutive_losses_latest", latest)
-            if loss and streak >= halve_at:
-                key = f"size_mult_{name}"
-                old = self._strategy_size_value(read(key, "1"))
-                if old > Decimal("0.5"):
-                    write(key, "0.5")
-                    reason = f"{streak} consecutive losses"
-                    conn.execute("INSERT INTO autonomy(ts,actor,action,level,detail,outcome) VALUES(?,?,?,?,?,?)",
-                                 (timestamp, "risk", "reduce_strategy_size", 3, reason, "ok"))
-                    conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
-                                 (timestamp, "WARN", "size_reduction", "risk", json.dumps({
-                                     "strategy": name, "from": str(old), "multiplier": "0.5", "reason": reason,
-                                 })))
-            if loss and streak >= pause_at:
-                paused = read("paused_strategies", {})
-                if not isinstance(paused, dict):
-                    raise ValueError("invalid persisted strategy pauses")
-                until = utc(now) + timedelta(hours=pause_hours)
-                existing = paused.get(name)
-                should_extend = name not in paused
-                if name in paused and isinstance(existing, dict) and isinstance(existing.get("until"), str):
-                    # Malformed/indefinite holds remain in force.
-                    with suppress(ValueError, OverflowError, TypeError):
-                        should_extend = parse_iso(existing["until"]) < until
-                if should_extend:
-                    reason = f"{streak} consecutive losses"
-                    paused[name] = {"until": iso(until), "reason": reason}
-                    write("paused_strategies", paused)
-                    conn.execute("INSERT INTO autonomy(ts,actor,action,level,detail,outcome) VALUES(?,?,?,?,?,?)",
-                                 (timestamp, "risk", "pause_strategy", 3, reason, "ok"))
-                    conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
-                                 (timestamp, "WARN", "strategy_paused", "risk", json.dumps({
-                                     "strategy": name, "until": iso(until), "reason": reason,
-                                 })))
+        streaks = read("consecutive_losses", {})
+        latest = read("consecutive_losses_latest", {})
+        if (not isinstance(streaks, dict) or not isinstance(latest, dict)
+                or any(not isinstance(k, str) or type(v) is not int or v < 0 for k, v in streaks.items())
+                or any(not isinstance(k, str) or not isinstance(v, str) for k, v in latest.items())):
+            raise ValueError("invalid persisted loss streak")
+        last = parse_iso(latest[name]) if name in latest else None
+        streak = streaks.get(name, 0)
+        if loss:
+            streak += 1
+        elif last is None or closed_at > last:
+            streak = 0
+        if last is None or closed_at > last:
+            latest[name] = iso(closed_at)
+        streaks[name] = streak
+        write("consecutive_losses", streaks)
+        write("consecutive_losses_latest", latest)
+        if loss and streak >= halve_at:
+            key = f"size_mult_{name}"
+            old = self._strategy_size_value(read(key, "1"))
+            if old > Decimal("0.5"):
+                write(key, "0.5")
+                reason = f"{streak} consecutive losses"
+                conn.execute("INSERT INTO autonomy(ts,actor,action,level,detail,outcome) VALUES(?,?,?,?,?,?)",
+                             (timestamp, "risk", "reduce_strategy_size", 3, reason, "ok"))
+                conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                             (timestamp, "WARN", "size_reduction", "risk", json.dumps({
+                                 "strategy": name, "from": str(old), "multiplier": "0.5", "reason": reason,
+                             })))
+        if loss and streak >= pause_at:
+            paused = read("paused_strategies", {})
+            if not isinstance(paused, dict):
+                raise ValueError("invalid persisted strategy pauses")
+            until = utc(now) + timedelta(hours=pause_hours)
+            existing = paused.get(name)
+            should_extend = name not in paused
+            if name in paused and isinstance(existing, dict) and isinstance(existing.get("until"), str):
+                # Malformed/indefinite holds remain in force.
+                with suppress(ValueError, OverflowError, TypeError):
+                    should_extend = parse_iso(existing["until"]) < until
+            if should_extend:
+                reason = f"{streak} consecutive losses"
+                paused[name] = {"until": iso(until), "reason": reason}
+                write("paused_strategies", paused)
+                conn.execute("INSERT INTO autonomy(ts,actor,action,level,detail,outcome) VALUES(?,?,?,?,?,?)",
+                             (timestamp, "risk", "pause_strategy", 3, reason, "ok"))
+                conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                             (timestamp, "WARN", "strategy_paused", "risk", json.dumps({
+                                 "strategy": name, "until": iso(until), "reason": reason,
+                             })))
         return streak
 
     def strategy_paused(self, name: str, *, now: datetime) -> bool:
@@ -1004,6 +1009,13 @@ class Store:
         The payload is denormalised on purpose: a closed trade must be readable
         without joining back to the position and without recomputing R multiples.
         """
+        with self.transaction() as conn:
+            self._close_position(conn, pos, exit_price, exit_reason, closed_at or utcnow())
+
+    @staticmethod
+    def _close_position(
+        conn: sqlite3.Connection, pos: Position, exit_price: Decimal, exit_reason: str, closed_at: datetime,
+    ) -> int:
         risk = pos.avg_entry - pos.initial_stop
         r_multiple = ((exit_price - pos.avg_entry) / risk) if risk > 0 else ZERO
         payload = json.dumps(
@@ -1013,18 +1025,18 @@ class Store:
                 "exit": to_str(exit_price, 8),
                 "entry": to_str(pos.avg_entry, 8),
                 "exit_reason": exit_reason,
-                "closed_at": iso(closed_at or utcnow()),
+                "closed_at": iso(closed_at),
                 "pnl": to_str(pos.realized_pnl, 8),
                 "r_multiple": to_str(r_multiple, 4),
             },
             default=str,
         )
-        self._exec(
+        cur = conn.execute(
             """UPDATE positions SET closed_at=?, exit_price=?, exit_reason=?, qty=?, realized_pnl=?,
                    fees=?, payload=?
-               WHERE symbol=? AND strategy=? AND closed_at IS NULL""",
+               WHERE symbol=? AND strategy=? AND opened_at=? AND closed_at IS NULL""",
             (
-                iso(closed_at or utcnow()),
+                iso(closed_at),
                 to_str(exit_price),
                 exit_reason,
                 to_str(pos.qty),
@@ -1033,8 +1045,28 @@ class Store:
                 payload,
                 pos.symbol,
                 pos.strategy,
+                iso(pos.opened_at),
             ),
         )
+        return cur.rowcount
+
+    def close_position_with_risk(
+        self, pos: Position, exit_price: Decimal, exit_reason: str, *, closed_at: datetime,
+        now: datetime, halve_at: int, pause_at: int, pause_hours: int,
+    ) -> None:
+        """Commit the position closure and its risk actions together exactly once per open row.
+
+        Does not make the external fill or in-memory ledger atomic with SQLite.
+        """
+        if not pos.realized_pnl.is_finite() or not exit_price.is_finite() or exit_price <= 0 or pos.qty != ZERO:
+            raise ValueError("invalid closed position")
+        with self.transaction() as conn:
+            if self._close_position(conn, pos, exit_price, exit_reason, closed_at) != 1:
+                raise ValueError("persisted open position missing or changed")
+            self._record_strategy_trade_risk(
+                conn, pos.strategy, loss=pos.realized_pnl < 0, closed_at=closed_at, now=now,
+                halve_at=halve_at, pause_at=pause_at, pause_hours=pause_hours,
+            )
 
     def open_positions(self) -> list[Position]:
         rows = self._query("SELECT * FROM positions WHERE closed_at IS NULL ORDER BY opened_at")

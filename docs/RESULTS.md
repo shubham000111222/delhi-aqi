@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest atomic position-close pass (working branch)
+
+- The engine now commits the persisted position closure, shared loss streak, threshold size reduction/pause and risk audit in one transaction. Missing, stale-opened-at or already-closed positions refuse a second risk transition; failed audits roll back the close. An error attempts L1 and locally disables the strategy.
+- Full suite **1135 passed, 2 skipped**; Ruff, mypy and `git diff --check` passed. The exchange fill, in-memory ledger mutation, fill recording and SQLite close are not atomic. A crash before the transaction or total database failure can still lose the close/risk transition; symbol/strategy/opened-at is not a guaranteed unique trade identity. Generic Store close, raw SQL, alternate paths and venue calls remain outside this boundary. Venue reconciliation and replay remain unverified; live promotion and live/testnet resets remain blocked. Dashboard process predates this change.
+
 ## Latest concurrent loss-streak pass (working branch)
 
 - Shared loss-streak updates, threshold size reductions, pause extensions and their action audits now commit together. Corrupt streak state blocks normal entries; an older or equal-time win cannot reset a newer streak, and a late loss is conservatively counted. Existing stored streaks are retained. Size reductions stay latched after a win.
