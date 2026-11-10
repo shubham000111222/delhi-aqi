@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest order-boundary safety pass (working branch)
+
+- The order manager rechecks the persisted kill switch immediately before each non-reduce-only submission, including after a rate-limit wait and before a retry. Denials are audited; paper exits remain possible at L1–L3.
+- Failed order lookups and unproven production-adapter absence no longer trigger blind retries: the outcome is logged as unknown and new entries are paused. A found order is persisted and logged as recovered. Only the in-process paper simulator can currently establish absence for a retry.
+- This is not a global adapter authorization boundary, cannot undo a request already in flight, and does not establish that an exchange enforces reduce-only semantics or that an unknown order is flat. Independent venue reconciliation, authenticated approvals and live verification remain open.
+- Full suite: **771 passed, 2 skipped**; Ruff, mypy and `git diff --check` passed. The tests exercise simulated adapters, not a real venue.
+
 ## 2026-11-04 — system recheck (working branch)
 
 - Automated suite after the repository audit: **758 passed, 2 skipped**; Ruff and mypy (88 source files) passed. See `REPO_AUDIT.md` for scope and limitations.

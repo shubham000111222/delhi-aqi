@@ -71,7 +71,7 @@ report. A state change writes a `health_change` event - the audit trail §20.4 a
 | Every heal action is verified, unverified counts as failure | ✅ B: `Playbook` runs detect → act → verify; a false verify writes `heal_failed` and counts toward escalation |
 | Escalation is once per burst, never per attempt | ✅ B: 3 failures inside 10 min escalate once, then the window clears |
 | Bounded retries: cooldown per row | ✅ B: 30 s-30 min per row, so a broken repair cannot become a busy loop |
-| Healing may only cancel, reduce, close, protect | 🟡 `SAFE_ACTIONS` documents allowed categories; it is not an enforcement boundary. Actual mutation paths need explicit enforcement and adversarial tests. |
+| Healing may only cancel, reduce, close, protect | 🟡 `SAFE_ACTIONS` is not an enforcement boundary. The order manager rechecks the kill switch before each non-reduce-only submit and refuses ambiguous-outcome retries; this does not cover direct adapter calls, in-flight requests or independently verify venue reduce-only behavior. Actual mutation paths need explicit enforcement and adversarial tests. |
 | Flapping detector: >5 state changes in 10 min holds at L1 | ✅ working branch: critical flapping forces L1, persists the hold and recent transitions, and blocks L0 reset until settled |
 | Post-heal checklist before returning to L0 | 🟡 auto-resume requires reconciliation `ok` + 10 min sustained health; the full checklist is not a gate |
 | Auto-resume only from L1, infrastructure causes only | ✅ (`AUTO_RESUME_TRIGGERS`) |
@@ -133,7 +133,7 @@ shadow form; **fund** does not exist.
 | **A** | Health model, component checks, `tradebot health`, `/api/health`, report section, restart budget for strategies, audit events | ✅ merged |
 | **B** | Heal playbook table + circuit breaker (60 s, half-open probe) + stuck-**exit** sweep + verification, cooldowns, escalation + MTTR + one injection test per wired row | ✅ merged |
 | **C** | Watchdog v2: restart budget, dead man's switch and alert router | 🟡 merged implementation; live venue preflight is not verified and live restart is blocked |
-| **D** | Autonomy ledger + approval flow + forbidden-action tests (§21.7) + flapping forces L1 | 🟡 in progress on working branch |
+| **D** | Autonomy ledger + approval flow + forbidden-action tests (§21.7) + flapping forces L1 | 🟡 in progress; order manager kill rechecks and fail-closed ambiguous retries added, global boundaries and authenticated approvals remain |
 | **E** | Market graph (§21.2) and the contagion exposure cut | ⬜ |
 | **F** | Allocator (§21.3) with the equal-weight backtest comparison as its gate | ⬜ |
 | **G** | Lifecycle manager (§21.4) with decay auto-disable | ⬜ |

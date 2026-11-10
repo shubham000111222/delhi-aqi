@@ -16,7 +16,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from ..config import Config
+from ..config import Config, Mode
 from ..core.clock import Clock
 from ..core.logging import get_logger
 from ..core.models import (
@@ -38,6 +38,7 @@ from .adapters.base import (
     PermanentExchangeError,
     TransientExchangeError,
 )
+from .adapters.paper import PaperAdapter
 from .rate_limit import SlidingWindowCounter, TokenBucket
 
 log = get_logger(__name__)
@@ -196,6 +197,26 @@ class OrderManager:
 
         attempt = 0
         while attempt < max(1, self.exec_cfg.retry_attempts):
+            # Risk approval may have happened before a rate-limit wait or retry. Re-read
+            # the persisted switch immediately before every exposure-increasing submit.
+            # Reducing exits must remain possible at L1-L3. This is not a global adapter
+            # boundary and cannot cancel a request already in flight at the venue.
+            if not request.reduce_only and not self.killswitch.can_open_entries():
+                self.store.log_event(
+                    "autonomy_refused",
+                    {
+                        "actor": "execution",
+                        "action": "place_order_without_kill_check",
+                        "reason": "kill switch blocks entry",
+                        "kill_level": self.killswitch.level.value,
+                        "client_order_id": request.client_order_id,
+                        "symbol": request.symbol,
+                    },
+                    level="WARN",
+                    actor="execution",
+                    ts=self.clock.now(),
+                )
+                return None
             attempt += 1
             try:
                 order = await self.adapter.place_order(request)
@@ -223,10 +244,42 @@ class OrderManager:
                     actor="execution",
                     ts=self.clock.now(),
                 )
-                # Never resend blind: ask the venue what happened first.
-                existing = await self._safe_get_order(request.client_order_id)
+                # A failed lookup is not proof of absence. The CCXT lookup is backed by
+                # process-local orders, so None there cannot establish venue absence.
+                try:
+                    existing = await self.adapter.get_order(request.client_order_id)
+                except Exception:  # noqa: BLE001 - an unknown result must fail closed
+                    existing = None
+                    lookup_ok = False
+                else:
+                    lookup_ok = True
                 if existing is not None:
+                    self.store.upsert_order(existing)
+                    self.store.log_event(
+                        "order_recovered",
+                        {"client_order_id": request.client_order_id, "attempt": attempt},
+                        actor="execution",
+                        ts=self.clock.now(),
+                    )
                     return existing
+                # Only the in-process simulator can currently prove an order was not
+                # accepted. No production adapter has demonstrated authoritative absence.
+                authoritative_absence = (
+                    lookup_ok and isinstance(self.adapter, PaperAdapter) and self.adapter.mode is Mode.PAPER
+                )
+                if not authoritative_absence:
+                    self.store.log_event(
+                        "order_outcome_unknown",
+                        {"client_order_id": request.client_order_id, "symbol": request.symbol,
+                         "attempt": attempt, "lookup_failed": not lookup_ok},
+                        level="CRIT", actor="execution", ts=self.clock.now(),
+                    )
+                    self.killswitch.trigger(
+                        KillLevel.L1, trigger="order_outcome_unknown",
+                        reason=f"cannot establish venue outcome for {request.client_order_id}",
+                        actor="execution",
+                    )
+                    return None
                 if attempt >= self.exec_cfg.retry_attempts:
                     self.stats.timeouts += 1
                     log.error(
