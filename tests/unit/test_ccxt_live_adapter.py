@@ -141,7 +141,7 @@ def build(exchange: FakeExchange) -> CcxtLiveAdapter:
     cfg = replace(cfg, settings=cfg.settings.model_copy(update={"mode": Mode.LIVE}))
     market = MarketData(cfg.symbol_names(), timeframes=())
     return CcxtLiveAdapter(cfg, market, Clock(), exchange=exchange,
-                           killswitch=KillSwitch(Store(":memory:"), kill_file=None))
+                           killswitch=KillSwitch(Store(":memory:"), kill_file=None, mode=Mode.LIVE))
 
 
 def adapter_with(**kwargs: Any) -> tuple[CcxtLiveAdapter, FakeExchange]:
@@ -456,3 +456,12 @@ def test_live_adapter_refuses_direct_entries_after_runtime_changes(mutation):
     with pytest.raises(PermanentExchangeError, match="configuration"):
         asyncio.run(adapter.place_order(request()))
     assert not [call for call in exchange.calls if call[0] == "create_order"]
+
+
+def test_live_adapter_refuses_kill_switch_with_wrong_mode():
+    adapter, exchange = adapter_with()
+    adapter.killswitch = KillSwitch(Store(":memory:"), kill_file=None, mode=Mode.PAPER)
+    with pytest.raises(PermanentExchangeError, match="kill switch changed"):
+        asyncio.run(adapter.place_order(request()))
+    assert not [call for call in exchange.calls if call[0] == "create_order"]
+    adapter.killswitch.store.close()

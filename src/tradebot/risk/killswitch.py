@@ -34,7 +34,7 @@ class KillSwitch:
         store: Store,
         clock: Clock | None = None,
         kill_file: Path | str | None = Path("KILL"),
-        *, mode: Mode = Mode.PAPER,
+        *, mode: Mode,
     ) -> None:
         if not isinstance(mode, Mode):
             raise ValueError("kill switch mode must be a Mode value")

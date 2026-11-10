@@ -79,6 +79,7 @@ class CcxtLiveAdapter(ExchangeAdapter):
         self.testnet = testnet
         self.exchange = exchange
         self.killswitch = killswitch
+        self._initial_killswitch = killswitch
         self.rules: dict[str, MarketRules] = {}
         self.orders: dict[str, Order] = {}
         self.seen_fills: dict[str, Decimal] = {}
@@ -174,8 +175,8 @@ class CcxtLiveAdapter(ExchangeAdapter):
 
     # --- orders -----------------------------------------------------------
     def _refuse_order(self, request: OrderRequest, reason: str) -> None:
-        if self.killswitch is not None:
-            self.killswitch.store.log_event(
+        if self._initial_killswitch is not None:
+            self._initial_killswitch.store.log_event(
                 "autonomy_refused",
                 {"actor": "live_adapter", "action": "place_order_without_kill_check",
                  "reason": reason, "client_order_id": request.client_order_id, "symbol": request.symbol},
@@ -198,6 +199,10 @@ class CcxtLiveAdapter(ExchangeAdapter):
                 self._refuse_order(request, "runtime mode or risk configuration changed or mismatched")
             if self.killswitch is None:
                 self._refuse_order(request, "kill switch is not attached")
+            if self.killswitch is not self._initial_killswitch:
+                self._refuse_order(request, "kill switch changed after adapter construction")
+            if self.killswitch is not None and self.killswitch.mode != self._initial_mode:
+                self._refuse_order(request, "kill switch mode does not match adapter mode")
             if self.killswitch is None or not self.killswitch.can_open_entries():
                 self._refuse_order(request, "kill switch blocks entry")
         rules = self.get_market_rules(request.symbol)

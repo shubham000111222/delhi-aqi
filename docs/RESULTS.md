@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest kill-switch mode binding pass (working branch)
+
+- Kill-switch construction now requires an explicit mode; normal engine and CLI callers supply it. Order-manager and CCXT entry paths reject mismatched or replaced kill switches rather than trusting an unrelated paper-mode switch.
+- Full suite **911 passed, 2 skipped**; Ruff (including tools), mypy and `git diff --check` passed. Direct Store writes, deliberately incorrect mode selection, private-field mutation, raw exchange access and in-flight requests remain outside this boundary. Live/testnet reset is still blocked; signed authorization and independent recovery evidence remain unbuilt. The dashboard process must restart to load this change.
+
 ## Latest live/testnet reset fail-closed pass (working branch)
 
 - Normal engine and CLI kill switches now capture their configured mode and refuse both manual and automatic live/testnet reset until authenticated authorization and independent recovery evidence exist. Paper mode retains its previous reset paths. A caller-provided operator name is not authorization.

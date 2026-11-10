@@ -60,7 +60,7 @@ def _ctx(**kw) -> RiskContext:
 @pytest.fixture
 def engine(cfg) -> RiskEngine:
     store = Store()
-    return RiskEngine(cfg, KillSwitch(store, clock=SimClock(NOW)))
+    return RiskEngine(cfg, KillSwitch(store, clock=SimClock(NOW), mode=Mode.PAPER))
 
 
 class TestCostBudget:
@@ -87,7 +87,7 @@ class TestCostBudget:
         from dataclasses import replace
 
         limits = cfg.risk.model_copy(update={"min_target_cost_ratio": D("0")})
-        engine = RiskEngine(replace(cfg, risk=limits), KillSwitch(Store(), clock=SimClock(NOW)))
+        engine = RiskEngine(replace(cfg, risk=limits), KillSwitch(Store(), clock=SimClock(NOW), mode=Mode.PAPER))
         decision = engine.approve_entry(
             _signal(target=D("60100")), _ctx(round_trip_cost_bps=D("100")), _rules()
         )
@@ -198,8 +198,8 @@ class TestRiskChecks:
 def test_cross_process_kill_escalation_is_visible_immediately(tmp_path):
     path = tmp_path / "state.db"
     one, two = Store(path), Store(path)
-    reader = KillSwitch(one, clock=SimClock(NOW))
-    watchdog = KillSwitch(two, clock=SimClock(NOW))
+    reader = KillSwitch(one, clock=SimClock(NOW), mode=Mode.PAPER)
+    watchdog = KillSwitch(two, clock=SimClock(NOW), mode=Mode.PAPER)
     assert reader.can_open_entries()
     watchdog.trigger(KillLevel.L3, trigger="test", reason="lockdown")
     assert not reader.can_open_entries()
@@ -215,8 +215,8 @@ def test_cross_process_kill_escalation_is_visible_immediately(tmp_path):
 def test_auto_resume_cannot_clear_a_concurrent_escalation(tmp_path, monkeypatch):
     path = tmp_path / "state.db"
     one, two = Store(path), Store(path)
-    switch = KillSwitch(one, clock=SimClock(NOW))
-    other = KillSwitch(two, clock=SimClock(NOW))
+    switch = KillSwitch(one, clock=SimClock(NOW), mode=Mode.PAPER)
+    other = KillSwitch(two, clock=SimClock(NOW), mode=Mode.PAPER)
     switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
     expected = switch.state
     original = one.set_kill_state
@@ -235,7 +235,7 @@ def test_auto_resume_cannot_clear_a_concurrent_escalation(tmp_path, monkeypatch)
 def test_auto_resume_cannot_clear_a_new_flapping_hold(tmp_path, monkeypatch):
     path = tmp_path / "state.db"
     one, two = Store(path), Store(path)
-    switch = KillSwitch(one, clock=SimClock(NOW))
+    switch = KillSwitch(one, clock=SimClock(NOW), mode=Mode.PAPER)
     switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
     expected = switch.state
     original = one.set_kill_state
@@ -254,7 +254,7 @@ def test_auto_resume_cannot_clear_a_new_flapping_hold(tmp_path, monkeypatch):
 @pytest.mark.parametrize("trigger", ["manual", "weekly_loss", "order_outcome_unknown", "flapping"])
 def test_auto_resume_boundary_refuses_non_whitelisted_l1_cause(trigger):
     store = Store(":memory:")
-    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
     switch.trigger(KillLevel.L1, trigger=trigger, reason="pause")
     assert not switch.auto_resume(reason="untrusted caller", expected_state=switch.state)
     assert switch.level is KillLevel.L1
@@ -264,7 +264,7 @@ def test_auto_resume_boundary_refuses_non_whitelisted_l1_cause(trigger):
 
 def test_auto_resume_needs_evaluated_snapshot():
     store = Store(":memory:")
-    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
     switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
     assert not switch.auto_resume(reason="caller supplied no state")
     assert switch.level is KillLevel.L1
@@ -274,7 +274,7 @@ def test_auto_resume_needs_evaluated_snapshot():
 
 def test_auto_resume_refuses_new_identical_pause_even_at_same_clock_time():
     store = Store(":memory:")
-    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
     switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
     old_pause = switch.state
     switch.reset(reason="manual review")
@@ -288,7 +288,7 @@ def test_auto_resume_refuses_new_identical_pause_even_at_same_clock_time():
 def test_auto_resume_honours_kill_file(tmp_path):
     store = Store(":memory:")
     kill_file = tmp_path / "KILL"
-    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=kill_file)
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=kill_file, mode=Mode.PAPER)
     switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
     pause = switch.state
     kill_file.write_text("emergency stop")
@@ -300,7 +300,7 @@ def test_auto_resume_honours_kill_file(tmp_path):
 
 class TestKillSwitch:
     def test_escalates_but_never_auto_de_escalates(self):
-        ks = KillSwitch(Store(), clock=SimClock(NOW))
+        ks = KillSwitch(Store(), clock=SimClock(NOW), mode=Mode.PAPER)
         assert ks.level is KillLevel.L0
         assert ks.trigger(KillLevel.L1, trigger="t", reason="r")
         assert not ks.trigger(KillLevel.L0, trigger="t", reason="r")
@@ -311,14 +311,14 @@ class TestKillSwitch:
         assert ks.must_flatten()
 
     def test_reset_returns_to_l0(self):
-        ks = KillSwitch(Store(), clock=SimClock(NOW))
+        ks = KillSwitch(Store(), clock=SimClock(NOW), mode=Mode.PAPER)
         ks.trigger(KillLevel.L1, trigger="t", reason="r")
         ks.reset(reason="reviewed", actor="operator")
         assert ks.level is KillLevel.L0
 
     def test_l3_needs_reason_and_cooldown(self):
         clock = SimClock(NOW)
-        ks = KillSwitch(Store(), clock=clock)
+        ks = KillSwitch(Store(), clock=clock, mode=Mode.PAPER)
         ks.trigger(KillLevel.L3, trigger="drawdown", reason="dd")
         with pytest.raises(PermissionError):
             ks.reset(reason="too early", actor="op")
@@ -331,7 +331,7 @@ class TestKillSwitch:
     def test_kill_file_triggers_flatten(self, tmp_path):
         kill_file = tmp_path / "KILL"
         kill_file.write_text("manual stop: testing")
-        ks = KillSwitch(Store(), clock=SimClock(NOW), kill_file=kill_file)
+        ks = KillSwitch(Store(), clock=SimClock(NOW), kill_file=kill_file, mode=Mode.PAPER)
         assert ks.can_open_entries() is False
         assert ks.level is KillLevel.L2
         assert ks.state["trigger"] == "kill_file"
@@ -339,11 +339,11 @@ class TestKillSwitch:
     def test_state_is_persisted(self, tmp_path):
         path = tmp_path / "k.db"
         store = Store(path)
-        ks = KillSwitch(store, clock=SimClock(NOW))
+        ks = KillSwitch(store, clock=SimClock(NOW), mode=Mode.PAPER)
         ks.trigger(KillLevel.L2, trigger="reconciliation", reason="mismatch")
         store.close()
         reopened = Store(path)
-        assert KillSwitch(reopened, clock=SimClock(NOW)).level is KillLevel.L2
+        assert KillSwitch(reopened, clock=SimClock(NOW), mode=Mode.PAPER).level is KillLevel.L2
 
 
 class TestLiveGuards:
@@ -652,7 +652,7 @@ class TestAutoResume:
 def test_manual_reset_rejects_kill_file_and_audits(tmp_path):
     store = Store(":memory:")
     kill_file = tmp_path / "KILL"
-    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=kill_file)
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=kill_file, mode=Mode.PAPER)
     switch.trigger(KillLevel.L1, trigger="manual", reason="pause")
     kill_file.write_text("emergency")
     with pytest.raises(PermissionError, match="KILL file"):
@@ -668,7 +668,7 @@ def test_manual_reset_rejects_kill_file_and_audits(tmp_path):
 @pytest.mark.parametrize("cooldown", [None, "invalid", 123])
 def test_manual_reset_fails_closed_on_bad_l3_cooldown(cooldown):
     store = Store(":memory:")
-    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
     switch.trigger(KillLevel.L3, trigger="test", reason="lockdown")
     state = switch.state
     state["cooldown_until"] = cooldown
@@ -682,8 +682,8 @@ def test_manual_reset_fails_closed_on_bad_l3_cooldown(cooldown):
 
 def test_manual_reset_cannot_clear_concurrent_escalation(tmp_path, monkeypatch):
     one, two = Store(tmp_path / "state.db"), Store(tmp_path / "state.db")
-    switch = KillSwitch(one, clock=SimClock(NOW), kill_file=None)
-    other = KillSwitch(two, clock=SimClock(NOW), kill_file=None)
+    switch = KillSwitch(one, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
+    other = KillSwitch(two, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
     switch.trigger(KillLevel.L1, trigger="manual", reason="pause")
     original = one.set_kill_state
 
@@ -703,7 +703,7 @@ def test_manual_reset_cannot_clear_concurrent_escalation(tmp_path, monkeypatch):
 @pytest.mark.parametrize("hold", [{"until": 123}, [], {"until": "invalid"}])
 def test_corrupt_flapping_hold_blocks_reset(hold):
     store = Store(":memory:")
-    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
     switch.trigger(KillLevel.L1, trigger="manual", reason="pause")
     store.kv_set("health_flapping_hold", hold)
     with pytest.raises(PermissionError, match="flapping"):
@@ -736,14 +736,14 @@ def test_runtime_risk_and_config_bindings_are_immutable(cfg):
         cfg.risk.risk_per_trade = D("0.02")
     with pytest.raises(FrozenInstanceError):
         cfg.risk = cfg.risk.model_copy(update={"risk_per_trade": D("0.02")})
-    engine = RiskEngine(cfg, KillSwitch(Store(), clock=SimClock(NOW), kill_file=None))
+    engine = RiskEngine(cfg, KillSwitch(Store(), clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER))
     with pytest.raises(AttributeError):
         engine.limits = cfg.risk.model_copy(update={"risk_per_trade": D("0.02")})
 
 
 def test_risk_boundary_refuses_replaced_private_limits(cfg):
     store = Store(":memory:")
-    engine = RiskEngine(cfg, KillSwitch(store, clock=SimClock(NOW), kill_file=None))
+    engine = RiskEngine(cfg, KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER))
     engine._limits = cfg.risk.model_copy(update={"risk_per_trade": D("0.02")})
     result = engine.approve_entry(_signal(), _ctx(), _rules())
     assert not result.approved
@@ -757,7 +757,7 @@ def test_risk_engine_revalidates_preconstructed_limits(cfg):
 
     too_large = cfg.risk.model_copy(update={"risk_per_trade": D("0.05")})
     with pytest.raises(ValueError, match="hard envelope"):
-        RiskEngine(replace(cfg, risk=too_large), KillSwitch(Store(), kill_file=None))
+        RiskEngine(replace(cfg, risk=too_large), KillSwitch(Store(), kill_file=None, mode=Mode.PAPER))
 
 
 def test_model_copy_cannot_override_absolute_envelope(cfg):
@@ -767,7 +767,7 @@ def test_model_copy_cannot_override_absolute_envelope(cfg):
         "risk_per_trade": D("0.5"), "ABSOLUTE_MAX_RISK_PER_TRADE": D("1"),
     })
     with pytest.raises(ValueError, match="hard envelope"):
-        RiskEngine(replace(cfg, risk=spoofed), KillSwitch(Store(), kill_file=None))
+        RiskEngine(replace(cfg, risk=spoofed), KillSwitch(Store(), kill_file=None, mode=Mode.PAPER))
 
 
 @pytest.mark.parametrize("mode", [Mode.LIVE, Mode.TESTNET])
@@ -803,4 +803,11 @@ def test_live_testnet_auto_resume_fails_closed_without_independent_evidence(mode
     assert not switch.auto_resume(reason="recovered", expected_state=switch.state)
     assert switch.level is KillLevel.L1
     assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+def test_kill_switch_requires_explicit_mode():
+    store = Store(":memory:")
+    with pytest.raises(TypeError, match="mode"):
+        KillSwitch(store)
     store.close()

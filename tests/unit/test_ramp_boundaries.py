@@ -147,7 +147,7 @@ def test_real_kill_escalation_registers_incident(cfg):
     from tradebot.risk.killswitch import KillSwitch
 
     store = Store(":memory:")
-    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
     switch.trigger(KillLevel.L2, trigger="test", reason="critical")
     assert RampController(live(cfg), store).load().critical_incidents == 1
     assert store.incidents()[0]["trigger"] == "test"
@@ -161,7 +161,7 @@ def test_corrupt_ramp_does_not_prevent_escalation_but_blocks_live_even_after_rep
     from tradebot.risk.killswitch import KillSwitch
 
     store = Store(":memory:")
-    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
     store.kv_set("ramp", {"stage": "corrupt"})
     assert switch.trigger(KillLevel.L2, trigger="test", reason="critical")
     assert switch.level is KillLevel.L2

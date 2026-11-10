@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from tradebot.config import Mode
 from tradebot.core.clock import SimClock
 from tradebot.core.models import KillLevel
 from tradebot.core.store import Store
@@ -148,7 +149,7 @@ async def test_flapping_hold_survives_restart_and_blocks_manual_and_auto_resume(
         )
     engine.clock.set(START + timedelta(seconds=7))
     engine._hold_on_flapping(now=engine.clock.now())
-    restarted_switch = KillSwitch(engine.store, clock=engine.clock, kill_file=None)
+    restarted_switch = KillSwitch(engine.store, clock=engine.clock, kill_file=None, mode=Mode.PAPER)
     assert restarted_switch.level is KillLevel.L1
     assert not restarted_switch.auto_resume(reason="restart")
     with pytest.raises(PermissionError, match="flapping"):
@@ -165,7 +166,7 @@ async def test_corrupt_flapping_hold_fails_closed(engine):
 
     engine.killswitch.trigger(KillLevel.L1, trigger="stale_feeds", reason="test")
     engine.store.kv_set("health_flapping_hold", {"until": "not a timestamp"})
-    restarted_switch = KillSwitch(engine.store, clock=engine.clock, kill_file=None)
+    restarted_switch = KillSwitch(engine.store, clock=engine.clock, kill_file=None, mode=Mode.PAPER)
     assert not restarted_switch.auto_resume(reason="test")
     with pytest.raises(PermissionError):
         restarted_switch.reset(reason="test")

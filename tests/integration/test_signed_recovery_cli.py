@@ -7,7 +7,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tradebot import main as cli
-from tradebot.config import load_config
+from tradebot.config import Mode, load_config
 from tradebot.core.models import KillLevel
 from tradebot.core.store import Store
 from tradebot.risk.killswitch import KillSwitch
@@ -29,7 +29,7 @@ def test_signed_recovery_cli_requests_and_consumes(fast_cfg, tmp_path, capsys):
         "version": 1, "keys": {fingerprint: base64.b64encode(public).decode()},
     }))
     store = Store(config.settings.db_path)
-    switch = KillSwitch(store, kill_file=None)
+    switch = KillSwitch(store, kill_file=None, mode=Mode.PAPER)
     store._exec("CREATE TRIGGER fail_outbox BEFORE INSERT ON kv WHEN NEW.key GLOB 'kill_incident_pending:*' "
                 "BEGIN SELECT RAISE(ABORT, 'outbox failed'); END")
     assert switch.trigger(KillLevel.L2, trigger="test", reason="critical")

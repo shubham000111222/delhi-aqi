@@ -140,7 +140,7 @@ class TestPaperAdapter:
 class TestOrderManager:
     def _manager(self, cfg, adapter, clock):
         store = Store()
-        ks = KillSwitch(store, clock=clock)
+        ks = KillSwitch(store, clock=clock, mode=cfg.mode)
         return OrderManager(cfg, adapter, store, ks, clock), ks, store
 
     @pytest.mark.parametrize("level", [KillLevel.L1, KillLevel.L2, KillLevel.L3])
@@ -163,8 +163,8 @@ class TestOrderManager:
         adapter = _adapter(cfg, _market(), clock)
         store = Store(tmp_path / "state.db")
         other_store = Store(tmp_path / "state.db")
-        ks = KillSwitch(store, clock=clock)
-        other = KillSwitch(other_store, clock=clock)
+        ks = KillSwitch(store, clock=clock, mode=Mode.PAPER)
+        other = KillSwitch(other_store, clock=clock, mode=Mode.PAPER)
         manager = OrderManager(cfg, adapter, store, ks, clock)
         calls = []
 
@@ -473,7 +473,7 @@ async def test_order_boundary_refuses_runtime_risk_mode_or_adapter_changes(cfg, 
     clock = SimClock(NOW)
     adapter = _adapter(cfg, _market(), clock)
     store = Store(":memory:")
-    switch = KillSwitch(store, clock=clock, kill_file=None)
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER)
     manager = OrderManager(cfg, adapter, store, switch, clock)
     if mutation == "mode":
         cfg.settings.mode = Mode.LIVE
@@ -496,7 +496,7 @@ async def test_entry_refused_when_initial_adapter_mode_does_not_match_config(cfg
     adapter = _adapter(cfg, _market(), clock)
     adapter.mode = Mode.LIVE
     store = Store(":memory:")
-    switch = KillSwitch(store, clock=clock, kill_file=None)
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER)
     manager = OrderManager(cfg, adapter, store, switch, clock)
     signal = Signal(id="wrong-mode", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
                     entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
@@ -510,7 +510,7 @@ async def test_reduce_only_buy_cannot_bypass_kill_check(cfg):
     clock = SimClock(NOW)
     adapter = _adapter(cfg, _market(), clock)
     store = Store(":memory:")
-    switch = KillSwitch(store, clock=clock, kill_file=None)
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER)
     manager = OrderManager(cfg, adapter, store, switch, clock)
     switch.trigger(KillLevel.L2, trigger="test", reason="stop")
     request = OrderRequest(symbol="BTC/USDT", side=Side.BUY, qty=D("0.001"),
@@ -519,3 +519,32 @@ async def test_reduce_only_buy_cannot_bypass_kill_check(cfg):
     assert not adapter.orders
     assert store.count_events("autonomy_refused") == 1
     store.close()
+
+
+async def test_order_boundary_refuses_mismatched_kill_switch_mode(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.LIVE)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    signal = Signal(id="wrong-switch", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+async def test_order_boundary_refuses_replaced_kill_switch(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store, other = Store(":memory:"), Store(":memory:")
+    manager = OrderManager(cfg, adapter, store, KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER), clock)
+    manager.killswitch = KillSwitch(other, clock=clock, kill_file=None, mode=Mode.PAPER)
+    signal = Signal(id="switch-swap", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+    other.close()

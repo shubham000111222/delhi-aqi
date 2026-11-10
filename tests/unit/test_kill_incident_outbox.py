@@ -23,7 +23,7 @@ def test_escalation_survives_audit_failure_and_recovers_after_restart(tmp_path, 
     path = tmp_path / "state.db"
     store = Store(path)
     clock = SimClock(NOW)
-    switch = KillSwitch(store, clock=clock, kill_file=None)
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER)
     fail_incident(store)
     assert switch.trigger(KillLevel.L2, trigger="test", reason="emergency")
     assert switch.level is KillLevel.L2
@@ -37,7 +37,7 @@ def test_escalation_survives_audit_failure_and_recovers_after_restart(tmp_path, 
     store._exec("DROP TRIGGER fail_incident")
     store.close()
     recovered = Store(path)
-    reopened = KillSwitch(recovered, clock=clock, kill_file=None)
+    reopened = KillSwitch(recovered, clock=clock, kill_file=None, mode=Mode.PAPER)
     assert reopened.level is KillLevel.L2
     assert not recovered.has_pending_kill_incident()
     assert len(recovered.incidents()) == 1
@@ -49,10 +49,10 @@ def test_escalation_survives_audit_failure_and_recovers_after_restart(tmp_path, 
 
 def test_recovery_failure_keeps_the_hold(cfg):
     store = Store(":memory:")
-    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
     fail_incident(store)
     switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
-    reopened = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    reopened = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
     assert store.has_pending_kill_incident()
     assert not reopened.auto_resume(reason="recovered", expected_state=reopened.state)
     assert reopened.level is KillLevel.L1
@@ -63,7 +63,7 @@ def test_recovery_failure_keeps_the_hold(cfg):
 
 def test_outbox_mismatch_does_not_clear_pending():
     store = Store(":memory:")
-    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
     fail_incident(store)
     switch.trigger(KillLevel.L2, trigger="test", reason="emergency")
     store._exec("DROP TRIGGER fail_incident")
@@ -80,7 +80,7 @@ def test_outbox_mismatch_does_not_clear_pending():
 
 def test_outbox_failure_preserves_kill_and_latches_tracking_fault(cfg):
     store = Store(":memory:")
-    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
     store._exec("CREATE TRIGGER fail_outbox BEFORE INSERT ON kv "
                 "WHEN NEW.key GLOB 'kill_incident_pending:*' "
                 "BEGIN SELECT RAISE(ABORT, 'outbox failed'); END")
@@ -98,7 +98,7 @@ def test_outbox_failure_preserves_kill_and_latches_tracking_fault(cfg):
 
 def test_pending_incidents_for_multiple_escalations_recover_once():
     store = Store(":memory:")
-    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
     fail_incident(store)
     assert switch.trigger(KillLevel.L1, trigger="feed", reason="pause")
     assert switch.trigger(KillLevel.L2, trigger="manual", reason="flatten")
@@ -113,7 +113,7 @@ def test_pending_incidents_for_multiple_escalations_recover_once():
 
 def test_stale_outbox_completion_cannot_clear_another_transition():
     store = Store(":memory:")
-    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
     fail_incident(store)
     switch.trigger(KillLevel.L1, trigger="feed", reason="pause")
     first = switch.state["generation"]
@@ -132,7 +132,7 @@ def test_stale_outbox_completion_cannot_clear_another_transition():
 
 def test_entry_boundary_fails_closed_if_pending_exists_even_at_l0():
     store = Store(":memory:")
-    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
     store.kv_set("kill_incident_pending:999", {"damaged": True})
     assert switch.level is KillLevel.L0
     assert not switch.can_open_entries()

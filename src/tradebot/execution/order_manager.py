@@ -99,6 +99,7 @@ class OrderManager:
         self._risk_snapshot = config.risk.model_dump(mode="json")
         self.store = store
         self.killswitch = killswitch
+        self._initial_killswitch = killswitch
         self.clock = clock
         self.exec_cfg = config.settings.execution
         self.on_fill_callback = on_fill
@@ -220,6 +221,8 @@ class OrderManager:
                 or self.adapter is not self._initial_adapter
                 or self.adapter.mode != self._initial_adapter_mode
                 or self._initial_adapter_mode != self._initial_mode
+                or self.killswitch is not self._initial_killswitch
+                or self.killswitch.mode != self._initial_mode
                 or self.cfg.risk.model_dump(mode="json") != self._risk_snapshot
             ):
                 self.store.log_event(

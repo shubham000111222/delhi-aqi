@@ -9,6 +9,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from tradebot.config import Mode
 from tradebot.core.clock import SimClock
 from tradebot.core.models import KillLevel
 from tradebot.core.store import Store
@@ -27,7 +28,7 @@ def setup(fast_cfg, tmp_path):
     keyfile = fast_cfg.settings.config_dir.resolve().parent / "operator-keys.json"
     keyfile.write_text(json.dumps({"version": 1, "keys": {fingerprint: base64.b64encode(pub).decode()}}))
     store = Store(tmp_path / "recovery.db")
-    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
     store._exec("CREATE TRIGGER fail_outbox BEFORE INSERT ON kv WHEN NEW.key GLOB 'kill_incident_pending:*' "
                 "BEGIN SELECT RAISE(ABORT, 'outbox failed'); END")
     assert switch.trigger(KillLevel.L2, trigger="test", reason="emergency")
