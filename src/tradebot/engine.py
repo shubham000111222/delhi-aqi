@@ -2116,7 +2116,11 @@ class Engine:
             "pending_orders": len(self.om.pending),
             "stats": self.stats.to_dict(),
             "order_stats": self.om.stats.to_dict(),
-            "ramp": self.ramp.load().to_dict(),
+            "ramp": self.ramp.load().to_dict() | {
+                "recorded_stage_multiplier": to_str(self.ramp.load().multiplier, 4),
+                "multiplier": to_str(self.ramp.multiplier(), 4),
+                "advancement_authorized": False,
+            },
             "now": iso(self.clock.now()),
         }
 

@@ -6,6 +6,7 @@ exchange does not report API-key permissions), it counts as failed.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -63,28 +64,77 @@ class RampState:
 
 
 class RampController:
-    """Enforced live ramp: 10% -> 25% -> 50% -> 100%, each stage needs days + no incidents."""
+    """Live ramp is capped until authenticated, action-bound advancement is built."""
 
     def __init__(self, config: Config, store: Store) -> None:
         self.cfg = config
         self.store = store
         self.guards = config.settings.live_guards
 
-    def load(self) -> RampState:
-        raw = self.store.kv_get("ramp") or {}
+    @staticmethod
+    def _state(raw: Any) -> RampState:
+        if raw is None:
+            raw = {}
+        if not isinstance(raw, dict):
+            raise ValueError("invalid persisted ramp state")
+        stage = raw.get("stage", 0)
+        clean_days = raw.get("clean_days", 0)
+        incidents = raw.get("critical_incidents", 0)
+        if any(type(value) is not int for value in (stage, clean_days, incidents)):
+            raise ValueError("invalid persisted ramp counters")
+        if not 0 <= stage <= 3 or clean_days < 0 or incidents < 0:
+            raise ValueError("invalid persisted ramp counters")
         started = raw.get("stage_started")
-        return RampState(
-            stage=int(raw.get("stage", 0)),
-            stage_started=utc(datetime.fromisoformat(started.replace("Z", "+00:00"))) if started else None,
-            clean_days=int(raw.get("clean_days", 0)),
-            critical_incidents=int(raw.get("critical_incidents", 0)),
-        )
+        try:
+            if started is not None and not isinstance(started, str):
+                raise ValueError("invalid stage timestamp")
+            stage_started = utc(datetime.fromisoformat(started.replace("Z", "+00:00"))) if started else None
+        except (ValueError, OverflowError) as exc:
+            raise ValueError("invalid ramp stage timestamp") from exc
+        return RampState(stage=stage, stage_started=stage_started, clean_days=clean_days,
+                         critical_incidents=incidents)
+
+    @classmethod
+    def _state_in_transaction(cls, conn: Any) -> RampState:
+        row = conn.execute("SELECT value FROM kv WHERE key='ramp'").fetchone()
+        return cls._state(json.loads(row["value"]) if row else None)
+
+    def load(self) -> RampState:
+        return self._state(self.store.kv_get("ramp"))
 
     def save(self, state: RampState) -> None:
-        self.store.kv_set("ramp", state.to_dict())
+        """Save only a non-escalating, non-clearing state; no approval consumer exists."""
+        checked = self._state(state.to_dict())
+        refused = ""
+        now = utcnow()
+        with self.store.transaction() as conn:
+            current = self._state_in_transaction(conn)
+            if checked.stage > current.stage:
+                refused = "live ramp increase needs authenticated action-bound approval"
+            elif checked.critical_incidents < current.critical_incidents:
+                refused = "critical ramp incidents cannot be cleared automatically"
+            elif (checked.stage == current.stage and current.stage_started is not None
+                  and checked.stage_started != current.stage_started):
+                refused = "ramp start time cannot be rewritten"
+            if refused:
+                conn.execute(
+                    "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                    (iso(now), "WARN", "autonomy_refused", "ramp", json.dumps({
+                        "action": "increase_allocation", "reason": refused,
+                        "current_stage": current.stage, "requested_stage": checked.stage,
+                    })),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO kv(key,value,updated_at) VALUES('ramp',?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                    (json.dumps(checked.to_dict()), iso(now)),
+                )
+        if refused:
+            raise PermissionError(refused)
 
     def advance_if_eligible(self, now: datetime | None = None) -> RampState:
-        """Promote one stage when the minimum days and a clean record are satisfied."""
+        """Record eligibility without increasing exposure; approvals cannot yet authorize it."""
         now = utc(now or utcnow())
         state = self.load()
         if state.stage_started is None:
@@ -96,26 +146,44 @@ class RampController:
         if elapsed >= required_days and state.critical_incidents == 0 and state.stage < len(
             self.guards.ramp_multipliers
         ) - 1:
-            state.stage += 1
-            state.stage_started = now
-            state.clean_days = 0
-            self.save(state)
-            log.warning(
-                '{"event":"ramp_advanced","stage":%d,"multiplier":"%s"}',
-                state.stage,
-                to_str(state.multiplier, 2),
+            self.store.log_event(
+                "autonomy_refused", {"action": "increase_allocation", "stage": state.stage,
+                                     "reason": "authenticated approval consumer not implemented"},
+                level="WARN", actor="ramp", ts=now,
             )
         return state
 
     def register_incident(self) -> None:
-        state = self.load()
-        state.critical_incidents += 1
-        self.save(state)
+        # Read/increment/write under one SQLite transaction so concurrent incidents do
+        # not get lost, and a stale save cannot clear one.
+        now = utcnow()
+        with self.store.transaction() as conn:
+            state = self._state_in_transaction(conn)
+            state.critical_incidents += 1
+            conn.execute(
+                "INSERT INTO kv(key,value,updated_at) VALUES('ramp',?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                (json.dumps(state.to_dict()), iso(now)),
+            )
+            conn.execute(
+                "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                (iso(now), "WARN", "ramp_incident", "ramp", json.dumps({
+                    "stage": state.stage, "critical_incidents": state.critical_incidents,
+                })),
+            )
 
     def multiplier(self) -> Decimal:
         if self.cfg.mode is not Mode.LIVE:
             return D("1")
-        return self.load().multiplier
+        # Existing database stages predate authentication. Do not trust them to raise
+        # exposure; cap at the initial 10% until a real authorization path is built.
+        self.load()
+        if not self.guards.ramp_multipliers:
+            raise ValueError("live ramp requires an initial multiplier")
+        initial = self.guards.ramp_multipliers[0]
+        if not initial.is_finite() or initial <= 0 or initial > 1:
+            raise ValueError("invalid initial live ramp multiplier")
+        return min(initial, D("0.10"))
 
 
 class LiveGuardChecker:

@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest live-ramp allocation boundary pass (working branch)
+
+- Live ramp advancement now records a refusal instead of raising allocation; direct ramp saves cannot increase stages or clear incidents, and concurrent incident increments commit with audit events. Legacy unverified stages are capped to the initial 10% live sizing multiplier (or a stricter configured initial cap). Risk-sizing multipliers outside 0–1 or non-finite are refused; status distinguishes recorded stage from effective multiplier.
+- Full suite **855 passed, 2 skipped**; Ruff, mypy and `git diff --check` passed. Tests include legacy stage, direct/stale writes, concurrent incidents, audit rollback and invalid multipliers.
+- This deliberately blocks promotion above the initial live ramp, rather than claiming an unimplemented approval flow. Registration is not yet wired to every real incident, raw SQL and alternate execution/sizing paths can bypass these checks, and the existing approval records still cannot authorize execution. No real venue was tested. The dashboard process must restart to load this change.
+
 ## Latest software stop-ratchet boundary pass (working branch)
 
 - Trailing-stop tightening now commits its state and audit event together before changing engine memory. Independent SQLite writers cannot lower this ratchet; stale position saves preserve tighter persisted base and trailing stops while retaining quantity/accounting updates and auditing refused widening.

@@ -413,13 +413,14 @@ class TestLiveGuards:
         # paper mode always gets full size
         assert ramp.multiplier() == D("1")
 
-    def test_ramp_advances_after_min_days(self, cfg):
+    def test_ramp_never_advances_without_authenticated_approval(self, cfg):
         store = Store()
         ramp = RampController(cfg, store)
         start = datetime(2024, 1, 1, tzinfo=UTC)
         store.kv_set("ramp", {"stage": 0, "stage_started": start.isoformat().replace("+00:00", "Z"), "clean_days": 0, "critical_incidents": 0})
         state = ramp.advance_if_eligible(start + timedelta(days=8))
-        assert state.stage == 1 and state.multiplier == D("0.25")
+        assert state.stage == 0 and state.multiplier == D("0.10")
+        assert store.count_events("autonomy_refused") == 1
         store.kv_set("ramp", {"stage": 1, "stage_started": start.isoformat().replace("+00:00", "Z"), "clean_days": 0, "critical_incidents": 1})
         state = ramp.advance_if_eligible(start + timedelta(days=30))
         assert state.stage == 1  # a critical incident blocks promotion

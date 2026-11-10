@@ -262,3 +262,15 @@ async def test_engine_trailing_stop_ratchets_before_memory_update(engine, monkey
         await engine._manage_positions(pos.symbol)
     assert pos.effective_stop == Decimal("104")
     assert engine.store.open_positions()[0].effective_stop == Decimal("104")
+
+
+async def test_engine_status_reports_effective_ramp_not_legacy_stage(engine):
+    from tradebot.config import Mode
+
+    engine.cfg.settings.mode = Mode.LIVE
+    engine.store.kv_set("ramp", {"stage": 3, "critical_incidents": 0})
+    ramp = engine.status()["ramp"]
+    assert ramp["stage"] == 3
+    assert ramp["recorded_stage_multiplier"] == "1.0000"
+    assert ramp["multiplier"] == "0.1000"
+    assert ramp["advancement_authorized"] is False
