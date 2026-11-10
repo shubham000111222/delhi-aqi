@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest kill-incident outbox pass (working branch)
+
+- Kill-switch and watchdog escalations commit a generation-bound incident outbox alongside the kill transition. Incident creation, ramp accounting, audit and removal of the matching pending record commit together. Pending records block entry and reset; kill-switch initialization retries their recording without changing the kill level. An incident-write failure no longer interrupts engine kill/flatten or watchdog continuation.
+- If the outbox write fails, escalation is retried without it and a durable incident-tracking fault blocks entry and reset. Full suite **871 passed, 2 skipped**; Ruff, mypy and `git diff --check` passed. Tests cover restart recovery, multiple transitions, stale completion, outbox and incident write failures, entry/reset holds, and engine/watchdog paths.
+- The fallback fault has no authenticated repair/clear workflow; it intentionally remains latched. Total database failure may prevent even fallback escalation, and direct store writes, `incident=False`, external adapters and in-flight venue requests are outside this boundary. This does not prove venue flattening or complete Phase D approvals. Dashboard process must restart to load this change.
+
 ## Latest critical-incident ramp accounting pass (working branch)
 
 - L2, L3 and CRIT records written through `Store.add_incident` now atomically commit incident, audit events and ramp counter; watchdog and kill-switch paths use that method. A corrupt ramp records the incident and a durable invalid-tracking marker instead of preventing the already-issued escalation. Live ramp sizing remains blocked even if the ramp row alone is repaired. A present JSON null ramp is now treated as corrupt, not as an absent default.

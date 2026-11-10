@@ -855,6 +855,10 @@ class Store:
         only_if_missing: bool = False,
         expected_state: dict[str, Any] | None = None,
         require_no_flapping_hold: bool = False,
+        require_no_pending_incident: bool = False,
+        track_incident: bool = False,
+        transition_id_out: list[int] | None = None,
+        incident_tracking_failed: bool = False,
     ) -> bool:
         now = ts or utcnow()
         with self.transaction() as conn:
@@ -870,6 +874,12 @@ class Store:
                 # Unknown/corrupt levels must never be downgraded.
                 if level not in ranks or previous not in ranks or ranks[level] <= ranks[previous]:
                     return False
+            if require_no_pending_incident and (
+                current.get("incident_tracking_failed") or conn.execute(
+                    "SELECT 1 FROM kv WHERE key GLOB 'kill_incident_pending:*' LIMIT 1"
+                ).fetchone() is not None
+            ):
+                return False
             if require_no_flapping_hold:
                 hold_row = conn.execute("SELECT value FROM kv WHERE key='health_flapping_hold'").fetchone()
                 if hold_row is not None:
@@ -892,6 +902,15 @@ class Store:
                     iso(cooldown_until) if cooldown_until else None,
                 ),
             )
+            transition_id = int(event.lastrowid or 0)
+            if track_incident:
+                conn.execute(
+                    "INSERT INTO kv(key,value,updated_at) VALUES(?,?,?)",
+                    (f"kill_incident_pending:{transition_id}", json.dumps({
+                        "transition_id": transition_id, "level": level, "trigger": trigger,
+                        "reason": reason, "actor": actor, "previous_level": previous, "ts": iso(now),
+                    }), iso(now)),
+                )
             conn.execute(
                 "INSERT INTO kv(key,value,updated_at) VALUES('kill_state',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
                 (
@@ -906,6 +925,9 @@ class Store:
                             "actor": actor,
                             "ts": iso(now),
                             "cooldown_until": iso(cooldown_until) if cooldown_until else None,
+                            "incident_tracking_failed": bool(
+                                incident_tracking_failed or current.get("incident_tracking_failed")
+                            ),
                         }
                     ),
                     iso(now),
@@ -921,7 +943,26 @@ class Store:
                     json.dumps({"level": level, "previous": previous, "trigger": trigger, "reason": reason}),
                 ),
             )
+        if transition_id_out is not None:
+            transition_id_out.append(transition_id)
         return True
+
+    def has_pending_kill_incident(self) -> bool:
+        return bool(self._query("SELECT 1 FROM kv WHERE key GLOB 'kill_incident_pending:*' LIMIT 1"))
+
+    def recover_pending_kill_incidents(self) -> int:
+        """Replay committed escalation outbox records; never changes the kill level."""
+        rows = self._query("SELECT value FROM kv WHERE key GLOB 'kill_incident_pending:*' ORDER BY key")
+        recovered = 0
+        for row in rows:
+            pending = json.loads(row["value"])
+            self.add_incident(
+                pending["level"], pending["trigger"], pending["reason"],
+                {"previous_level": pending["previous_level"], "actor": pending["actor"]},
+                ts=parse_iso(pending["ts"]), kill_generation=pending["transition_id"],
+            )
+            recovered += 1
+        return recovered
 
     def kill_state(self) -> dict[str, Any]:
         state = self.kv_get("kill_state", {"level": "L0"}) or {"level": "L0"}
@@ -943,6 +984,7 @@ class Store:
         summary: str,
         payload: dict[str, Any] | None = None,
         ts: datetime | None = None,
+        *, kill_generation: int | None = None,
     ) -> int:
         """Persist an incident and its audit atomically; track critical ramp incidents.
 
@@ -956,6 +998,18 @@ class Store:
         timestamp = iso(now)
         critical = level in ("L2", "L3", "CRIT")
         with self.transaction() as conn:
+            if kill_generation is not None:
+                key = f"kill_incident_pending:{kill_generation}"
+                pending_row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+                if pending_row is None:
+                    raise ValueError("kill incident is no longer pending")
+                pending = json.loads(pending_row["value"])
+                if (pending.get("transition_id") != kill_generation or pending.get("level") != level
+                        or pending.get("trigger") != trigger or pending.get("reason") != summary):
+                    raise ValueError("kill incident does not match the pending transition")
+                payload = {"previous_level": pending["previous_level"], "actor": pending["actor"],
+                           "kill_generation": kill_generation}
+                timestamp = pending["ts"]
             cur = conn.execute(
                 "INSERT INTO incidents(ts,level,trigger,summary,payload) VALUES(?,?,?,?,?)",
                 (timestamp, level, trigger, summary, json.dumps(payload, default=str)),
@@ -994,6 +1048,8 @@ class Store:
                             "critical_incidents": state.critical_incidents,
                         })),
                     )
+            if kill_generation is not None:
+                conn.execute("DELETE FROM kv WHERE key=?", (f"kill_incident_pending:{kill_generation}",))
         return incident_id
 
     def incidents(self, limit: int = 50, since: datetime | None = None) -> list[dict[str, Any]]:

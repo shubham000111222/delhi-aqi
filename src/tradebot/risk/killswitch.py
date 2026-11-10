@@ -38,6 +38,10 @@ class KillSwitch:
         self.clock = clock
         self.kill_file = Path(kill_file) if kill_file is not None else None
         self._ensure_state()
+        try:
+            self.store.recover_pending_kill_incidents()
+        except Exception:  # noqa: BLE001 - leave the durable hold intact
+            log.exception('{"event":"kill_incident_recovery_failed"}')
 
     # --- state ------------------------------------------------------------
     def _ensure_state(self) -> None:
@@ -71,7 +75,10 @@ class KillSwitch:
     # --- queries ----------------------------------------------------------
     def can_open_entries(self) -> bool:
         self.check_kill_file()
-        return self.level is KillLevel.L0
+        state = self.state
+        return (state.get("level") == KillLevel.L0.value
+                and not state.get("incident_tracking_failed")
+                and not self.store.has_pending_kill_incident())
 
     def must_flatten(self) -> bool:
         return self.level in (KillLevel.L2, KillLevel.L3)
@@ -115,25 +122,31 @@ class KillSwitch:
         if level.rank <= current.rank:
             return False
         cooldown = self.now() + LOCKDOWN_COOLDOWN if level is KillLevel.L3 else None
-        changed = self.store.set_kill_state(
-            level.value,
-            only_escalate=True,
-            trigger=trigger,
-            reason=reason,
-            actor=actor,
-            cooldown_until=cooldown,
-            ts=self.now(),
-        )
+        transition_ids: list[int] = []
+        tracking_failed = False
+        try:
+            changed = self.store.set_kill_state(
+                level.value, only_escalate=True, track_incident=incident,
+                transition_id_out=transition_ids, trigger=trigger, reason=reason, actor=actor,
+                cooldown_until=cooldown, ts=self.now(),
+            )
+        except Exception:  # noqa: BLE001 - retry the protective transition with a latched tracking fault
+            log.exception('{"event":"kill_incident_outbox_failed"}')
+            tracking_failed = True
+            changed = self.store.set_kill_state(
+                level.value, only_escalate=True, incident_tracking_failed=True,
+                trigger=trigger, reason=reason, actor=actor, cooldown_until=cooldown, ts=self.now(),
+            )
         if not changed:
             return False
-        if incident:
-            self.store.add_incident(
-                level.value,
-                trigger,
-                reason,
-                {"previous_level": current.value, "actor": actor},
-                ts=self.now(),
-            )
+        if incident and not tracking_failed:
+            try:
+                self.store.add_incident(
+                    level.value, trigger, reason, {"previous_level": current.value, "actor": actor},
+                    ts=self.now(), kill_generation=transition_ids[0],
+                )
+            except Exception:  # noqa: BLE001 - keep protective action running; outbox blocks resume
+                log.exception('{"event":"kill_incident_record_failed","generation":%d}', transition_ids[0])
         log.warning(
             '{"event":"kill_switch","from":"%s","to":"%s","trigger":"%s","reason":"%s"}',
             current.value,
@@ -174,6 +187,7 @@ class KillSwitch:
             KillLevel.L0.value,
             expected_state=expected_state,
             require_no_flapping_hold=True,
+            require_no_pending_incident=True,
             trigger="auto_resume",
             reason=reason,
             actor=actor,
@@ -225,13 +239,14 @@ class KillSwitch:
             level.value,
             expected_state=current,
             require_no_flapping_hold=level is KillLevel.L0,
+            require_no_pending_incident=True,
             trigger="manual_reset",
             reason=reason or "manual reset",
             actor=actor,
             ts=self.now(),
         )
         if not changed:
-            refuse("kill state or flapping hold changed; recheck before reset")
+            refuse("kill state, flapping hold or pending incident changed; recheck before reset")
         self.store.kv_set("last_reset", {"ts": iso(self.now()), "reason": reason, "actor": actor})
         log.warning('{"event":"kill_switch_reset","to":"%s","actor":"%s"}', level.value, actor)
 

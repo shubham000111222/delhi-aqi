@@ -274,3 +274,16 @@ async def test_engine_status_reports_effective_ramp_not_legacy_stage(engine):
     assert ramp["recorded_stage_multiplier"] == "1.0000"
     assert ramp["multiplier"] == "0.1000"
     assert ramp["advancement_authorized"] is False
+
+
+async def test_kill_continues_flatten_when_incident_write_fails(engine, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    flatten = AsyncMock()
+    monkeypatch.setattr(engine, "flatten_all", flatten)
+    engine.store._exec("CREATE TRIGGER fail_incident BEFORE INSERT ON incidents "
+                       "BEGIN SELECT RAISE(ABORT, 'incident write failed'); END")
+    await engine.kill("emergency")
+    assert engine.killswitch.level is KillLevel.L2
+    assert engine.store.has_pending_kill_incident()
+    flatten.assert_awaited_once_with("emergency")

@@ -189,6 +189,9 @@ class RampController:
         # Existing database stages predate authentication. Do not trust them to raise
         # exposure; cap at the initial 10% until a real authorization path is built.
         self.load()
+        if (self.store.has_pending_kill_incident()
+                or self.store.kill_state().get("incident_tracking_failed")):
+            raise ValueError("live ramp has an unrecorded kill incident")
         if self.store.kv_get("ramp_incident_tracking_invalid") is not None:
             raise ValueError("live ramp incident tracking is invalid; operator investigation required")
         if not self.guards.ramp_multipliers:

@@ -223,13 +223,28 @@ class Watchdog:
         current = KillLevel(self.store.kill_level())
         if current.rank >= level.rank:
             return
-        changed = self.store.set_kill_state(
-            level.value, trigger=trigger, reason=reason, actor="watchdog", ts=self.clock.now(),
-            only_escalate=True,
-        )
+        transition_ids: list[int] = []
+        tracking_failed = False
+        try:
+            changed = self.store.set_kill_state(
+                level.value, trigger=trigger, reason=reason, actor="watchdog", ts=self.clock.now(),
+                only_escalate=True, track_incident=True, transition_id_out=transition_ids,
+            )
+        except Exception:  # noqa: BLE001 - retry escalation with a latched tracking fault
+            log.exception('{"event":"watchdog_incident_outbox_failed"}')
+            tracking_failed = True
+            changed = self.store.set_kill_state(
+                level.value, trigger=trigger, reason=reason, actor="watchdog", ts=self.clock.now(),
+                only_escalate=True, incident_tracking_failed=True,
+            )
         if not changed:
             return
-        self.store.add_incident(level.value, trigger, reason, {"actor": "watchdog"})
+        if not tracking_failed:
+            try:
+                self.store.add_incident(level.value, trigger, reason, {"actor": "watchdog"},
+                                        ts=self.clock.now(), kill_generation=transition_ids[0])
+            except Exception:  # noqa: BLE001 - pending outbox blocks resume while protection continues
+                log.exception('{"event":"watchdog_incident_record_failed","generation":%d}', transition_ids[0])
         self.fired += 1
         log.critical('{"event":"watchdog_escalation","level":"%s","trigger":"%s"}', level.value, trigger)
 

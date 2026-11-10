@@ -519,3 +519,17 @@ def test_watchdog_escalation_registers_critical_ramp_incident(fast_cfg):
     assert RampController(fast_cfg, store).load().critical_incidents == 1
     assert store.incidents()[0]["trigger"] == "watchdog_test"
     store.close()
+
+
+def test_watchdog_still_escalates_when_incident_write_fails(fast_cfg):
+    from tradebot.core.models import KillLevel
+
+    store = Store(":memory:")
+    watchdog = Watchdog(fast_cfg, store, clock=SimClock(T0), kill_file=None)
+    store._exec("CREATE TRIGGER fail_incident BEFORE INSERT ON incidents "
+                "BEGIN SELECT RAISE(ABORT, 'incident failed'); END")
+    watchdog._escalate(KillLevel.L2, "test", "emergency")
+    assert store.kill_level() == "L2"
+    assert store.has_pending_kill_incident()
+    assert watchdog.fired == 1
+    store.close()
