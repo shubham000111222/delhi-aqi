@@ -562,7 +562,8 @@ class Engine:
             signal_id=signal.id,
             atr=D(ctx.atr) if ctx.atr == ctx.atr else ZERO,
         )
-        await self.om.submit_entry(signal, qty, price=decision.entry_price, plan=plan)
+        await self.om.submit_entry(signal, qty, price=decision.entry_price, plan=plan,
+                                   sized_ramp_multiplier=risk_ctx.ramp_multiplier)
         self.stats.orders += 1
 
     def _maybe_calibrate_slippage(self, minimum_fills: int = 30) -> None:

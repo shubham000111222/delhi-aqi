@@ -207,7 +207,8 @@ class TestOrderManager:
         adapter.get_order = lookup  # type: ignore[assignment]
         signal = Signal(id="unknown", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
                         entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
-        assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+        assert await manager.submit_entry(signal, D("0.001"), price=D("60000"),
+                                          sized_ramp_multiplier=D("0.10")) is None
         assert len(calls) == 1
         assert ks.level is KillLevel.L1
         assert store.count_events("order_outcome_unknown") == 1
@@ -603,4 +604,41 @@ async def test_fault_pause_blocks_direct_entry_but_expires(cfg):
     assert store.count_events("autonomy_refused") == 1
     clock.advance(timedelta(hours=1, seconds=1))
     assert not store.strategy_fault_paused("S1", now=clock.now())
+    store.close()
+
+
+@pytest.mark.parametrize("sized", [None, D("NaN"), D("-1"), D("0.10")])
+async def test_live_entry_refuses_missing_invalid_or_stale_sizing(cfg, sized):
+    from dataclasses import replace
+
+    cfg = replace(cfg, settings=cfg.settings.model_copy(update={"mode": Mode.LIVE}))
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    adapter.mode = Mode.LIVE
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.LIVE)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    store.kv_set("operator_allocation_cap", {"cap": "0.05"})
+    signal = Signal(id="stale-cap", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000"), sized_ramp_multiplier=sized) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+async def test_live_entry_accepts_current_sizing_assertion(cfg):
+    from dataclasses import replace
+
+    cfg = replace(cfg, settings=cfg.settings.model_copy(update={"mode": Mode.LIVE}))
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    adapter.mode = Mode.LIVE
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.LIVE)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    store.kv_set("operator_allocation_cap", {"cap": "0.05"})
+    signal = Signal(id="current-cap", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000"), sized_ramp_multiplier=D("0.05"))
     store.close()

@@ -216,6 +216,14 @@ class RampController:
         cap = self.operator_cap(json.loads(cap_rows[0]["value"])) if cap_rows else D("0.10")
         return min(initial, D("0.10"), cap)
 
+    def permits_sized_multiplier(self, multiplier: Decimal | None) -> bool:
+        """Reject missing, invalid or stale live sizing assertions at placement time."""
+        if self.cfg.mode is not Mode.LIVE:
+            return True
+        if not isinstance(multiplier, Decimal) or not multiplier.is_finite() or multiplier <= 0:
+            return False
+        return multiplier <= self.multiplier()
+
 
 class LiveGuardChecker:
     """Runs every live-mode gate and records a go/no-go row."""

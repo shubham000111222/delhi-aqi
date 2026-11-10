@@ -161,6 +161,7 @@ def request(**overrides: Any) -> OrderRequest:
         "client_order_id": "tb-abc123",
         "strategy": "S1_ema_trend",
         "signal_id": "sig-1",
+        "sized_ramp_multiplier": Decimal("0.10"),
     }
     payload.update(overrides)
     return OrderRequest(**payload)
@@ -475,4 +476,50 @@ def test_direct_live_adapter_refuses_disabled_strategy():
     with pytest.raises(PermanentExchangeError, match="durably disabled"):
         asyncio.run(adapter.place_order(order))
     assert not [call for call in exchange.calls if call[0] == "create_order"]
+    store.close()
+
+
+@pytest.mark.parametrize("multiplier", [None, Decimal("NaN"), Decimal("0"), Decimal("0.10")])
+def test_direct_live_entry_refuses_stale_sizing(multiplier):
+    adapter, exchange = adapter_with()
+    store = adapter.killswitch.store
+    store.kv_set("operator_allocation_cap", {"cap": "0.05"})
+    with pytest.raises(PermanentExchangeError, match="sizing multiplier"):
+        asyncio.run(adapter.place_order(request(sized_ramp_multiplier=multiplier)))
+    assert not [call for call in exchange.calls if call[0] == "create_order"]
+    store.close()
+
+
+def test_live_protective_sell_does_not_require_sizing_assertion():
+    adapter, exchange = adapter_with()
+    store = adapter.killswitch.store
+    store.kv_set("operator_allocation_cap", {"cap": "invalid"})
+    order = asyncio.run(adapter.place_order(request(side=Side.SELL, reduce_only=True, sized_ramp_multiplier=None)))
+    assert order.reduce_only
+    assert [call for call in exchange.calls if call[0] == "create_order"]
+    store.close()
+
+
+def test_cap_reduction_between_manager_and_adapter_blocks_venue_call():
+    from tradebot.core.models import Signal
+    from tradebot.execution.order_manager import OrderManager
+
+    adapter, exchange = adapter_with()
+    store = adapter.killswitch.store
+    manager = OrderManager(adapter.cfg, adapter, store, adapter.killswitch, adapter.clock)
+    original = adapter.place_order
+
+    async def reduce_before_adapter(request):
+        store.kv_set("operator_allocation_cap", {"cap": "0.05"})
+        return await original(request)
+
+    adapter.place_order = reduce_before_adapter
+    signal = Signal(id="cap-race", strategy="S1", symbol=SYMBOL, timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=adapter.clock.now(),
+                    stop=Decimal("43000"), target=Decimal("46000"))
+    result = asyncio.run(manager.submit_entry(signal, Decimal("0.001"), price=Decimal("44000"),
+                                              sized_ramp_multiplier=Decimal("0.10")))
+    assert result is None
+    assert not [call for call in exchange.calls if call[0] == "create_order"]
+    assert store.count_events("order_rejected") == 1
     store.close()

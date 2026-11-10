@@ -33,6 +33,7 @@ from ..core.models import (
 from ..core.money import ZERO, round_price, round_qty, to_str
 from ..core.store import Store
 from ..risk.killswitch import KillSwitch
+from ..risk.live_guards import RampController
 from .adapters.base import (
     ExchangeAdapter,
     PermanentExchangeError,
@@ -133,6 +134,8 @@ class OrderManager:
         qty: Decimal,
         price: Decimal | None = None,
         plan: Any = None,
+        *,
+        sized_ramp_multiplier: Decimal | None = None,
     ) -> Order | None:
         rules = self.adapter.get_market_rules(signal.symbol)
         order_type = signal.entry_type
@@ -149,6 +152,7 @@ class OrderManager:
             strategy=signal.strategy,
             signal_id=signal.id,
             reason=signal.reason[:200],
+            sized_ramp_multiplier=sized_ramp_multiplier,
         )
         if plan is not None:
             # register before placement: a limit order can fill inside place_order
@@ -232,6 +236,21 @@ class OrderManager:
                     level="CRIT", actor="execution", ts=self.clock.now(),
                 )
                 return None
+            if not request.reduce_only and self._initial_mode is Mode.LIVE:
+                try:
+                    size_current = RampController(self.cfg, self.store).permits_sized_multiplier(
+                        request.sized_ramp_multiplier
+                    )
+                except (ValueError, ArithmeticError):
+                    size_current = False
+                if not size_current:
+                    self.store.log_event(
+                        "autonomy_refused", {"action": "increase_allocation",
+                                             "reason": "missing, invalid or stale live sizing multiplier",
+                                             "client_order_id": request.client_order_id},
+                        level="CRIT", actor="execution", ts=self.clock.now(),
+                    )
+                    return None
             if not request.reduce_only and (
                 self.store.strategy_disabled(request.strategy)
                 or self.store.strategy_fault_paused(request.strategy, now=self.clock.now())

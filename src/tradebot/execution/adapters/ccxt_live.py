@@ -37,6 +37,7 @@ from ...core.models import (
 from ...core.money import ZERO, D, round_price, round_qty
 from ...data.hub import MarketData
 from ...risk.killswitch import KillSwitch
+from ...risk.live_guards import RampController
 from .base import ExchangeAdapter, PermanentExchangeError, TransientExchangeError
 
 log = get_logger(__name__)
@@ -205,6 +206,15 @@ class CcxtLiveAdapter(ExchangeAdapter):
                 self._refuse_order(request, "kill switch mode does not match adapter mode")
             if self.killswitch is None or not self.killswitch.can_open_entries():
                 self._refuse_order(request, "kill switch blocks entry")
+            if self._initial_mode is Mode.LIVE:
+                try:
+                    size_current = RampController(self.cfg, self.killswitch.store).permits_sized_multiplier(
+                        request.sized_ramp_multiplier
+                    )
+                except (ValueError, ArithmeticError):
+                    size_current = False
+                if not size_current:
+                    self._refuse_order(request, "missing, invalid or stale live sizing multiplier")
             if (self.killswitch.store.strategy_disabled(request.strategy)
                     or self.killswitch.store.strategy_fault_paused(request.strategy, now=self.clock.now())):
                 self._refuse_order(request, "strategy is durably disabled or fault-paused")

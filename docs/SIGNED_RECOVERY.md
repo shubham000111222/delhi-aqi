@@ -121,6 +121,9 @@ nonce and 15-minute maximum expiry. Consumption, cap update and audit are transa
 concurrent/stale/replayed requests cannot apply. Key possession is not human identity:
 the public trust bundle, database and process need separate OS protection. The cap is not
 an exchange-side order limit: raw SQL, direct exchange/custom adapter calls, alternate sizing
-paths, misconfigured processes and orders already sized or in flight can bypass it. Real
-venue behavior has not been tested. An invalid cap blocks normal live sizing. Live ramp
+paths, misconfigured processes and orders already in flight can bypass it. Normal engine
+entries carry their sizing multiplier to both the order manager and CCXT adapter, which reject
+missing, invalid or stale live sizing after a cap reduction. This is a caller assertion, not
+proof of the quantity or sizing calculation; it can be misrepresented and the cap can change
+after the final check. Real venue behavior has not been tested. An invalid cap blocks normal live sizing. Live ramp
 increases and live/testnet kill resets remain blocked.

@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest live sizing-cap placement recheck (working branch)
+
+- Normal engine entries carry the risk-sizing multiplier into the order request. The order manager and CCXT adapter recheck the multiplier against the current live cap immediately before a non-reducing placement, refusing missing, invalid or stale assertions. A test reduces the cap between manager and adapter checks and verifies no venue call; protective sells remain available.
+- Full suite **962 passed, 2 skipped**; Ruff (including tools), mypy and `git diff --check` passed. The assertion is not authenticated proof that the quantity was actually sized under that multiplier. Custom callers can lie, direct SQL and raw venue calls bypass checks, and a cap change after the last check cannot stop an in-flight order. The real venue is unverified; live approval increases and reset remain blocked. The dashboard process predates the change.
+
 ## Latest signed allocation-cap reduction pass (working branch)
 
 - Added an offline Ed25519, database/mode/action/state/expiry-bound, single-use approval that can only reduce the persisted live allocation cap. Applying it atomically records the consumed request, level-4 autonomy row and event. Normal live ramp sizing takes the minimum of this cap, configured initial cap and 10%. The real CLI and offline signing tools are tested using temporary keys and an isolated database, without connecting to an exchange.
