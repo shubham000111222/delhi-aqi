@@ -26,7 +26,7 @@ from .risk.live_guards import RampController
 ACTION = "acknowledge_kill_incident_tracking_failure"
 MAX_TTL = timedelta(minutes=15)
 _FIELDS = frozenset({"version", "request_id", "action", "database_id", "mode", "key_id", "state_hash",
-                     "reason", "issued_at", "expires_at"})
+                     "reason", "issued_at", "expires_at", "state"})
 
 
 def canonical_bytes(value: dict[str, Any]) -> bytes:
@@ -95,17 +95,23 @@ class SignedFaultRecovery:
             raise ValueError("no stopped kill state with an incident-tracking fault")
         if self.store.has_pending_kill_incident():
             raise ValueError("pending kill incident must be recovered first")
+        if len(canonical_bytes(state)) > 8192:
+            raise ValueError("kill state is too large for a recovery request")
         now = self._now()
         return {"version": 1, "request_id": secrets.token_hex(32), "action": ACTION,
                 "database_id": self._database_id(), "mode": self._mode, "key_id": fingerprint,
-                "state_hash": state_hash(state), "reason": reason.strip(),
+                "state_hash": state_hash(state), "state": state, "reason": reason.strip(),
                 "issued_at": iso(now), "expires_at": iso(now + ttl)}
 
     def apply(self, request: dict[str, Any], signature_b64: str) -> None:
         if not isinstance(request, dict) or set(request) != _FIELDS or type(request.get("version")) is not int or request.get("version") != 1:
             raise ValueError("invalid signed recovery request")
-        if any(not isinstance(request.get(k), str) for k in _FIELDS - {"version"}):
+        if any(not isinstance(request.get(k), str) for k in _FIELDS - {"version", "state"}):
             raise ValueError("invalid signed recovery fields")
+        if not isinstance(request["state"], dict) or len(canonical_bytes(request["state"])) > 8192:
+            raise ValueError("invalid signed recovery state")
+        if state_hash(request["state"]) != request["state_hash"]:
+            raise ValueError("signed recovery state hash mismatch")
         if request["action"] != ACTION or request["mode"] != self._mode or self.config.mode.value != self._mode:
             raise PermissionError("signed recovery action or mode mismatch")
         if (len(request["request_id"]) != 64 or len(request["state_hash"]) != 64
@@ -146,7 +152,7 @@ class SignedFaultRecovery:
             row = conn.execute("SELECT value FROM kv WHERE key='kill_state'").fetchone()
             state = json.loads(row["value"]) if row else None
             if (not isinstance(state, dict) or state_hash(state) != request["state_hash"]
-                    or state.get("level") not in ("L1", "L2", "L3")
+                    or state != request["state"] or state.get("level") not in ("L1", "L2", "L3")
                     or state.get("incident_tracking_failed") is not True):
                 raise PermissionError("kill state changed; signed recovery is stale")
             if conn.execute("SELECT 1 FROM kv WHERE key GLOB 'kill_incident_pending:*' LIMIT 1").fetchone():

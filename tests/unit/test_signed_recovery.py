@@ -177,3 +177,17 @@ def test_expiry_is_rechecked_after_database_lock(setup, monkeypatch):
         service.apply(request, sign(private, request))
     assert switch.state["incident_tracking_failed"] is True
     assert store.count_events("signed_tracking_fault_ack") == 0
+
+
+def test_signed_request_contains_reviewable_state_and_rejects_state_tampering(setup):
+    service, store, switch, private, fingerprint, _ = setup
+    request = service.request(fingerprint, "review")
+    assert request["state"] == switch.state
+    assert request["state"]["level"] == "L2"
+    assert request["state"]["reason"] == "emergency"
+    signature = sign(private, request)
+    request["state"]["reason"] = "changed"
+    with pytest.raises(ValueError, match="state hash mismatch"):
+        service.apply(request, signature)
+    assert switch.state["incident_tracking_failed"] is True
+    assert store.count_events("signed_tracking_fault_ack") == 0

@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest signed-request reviewability pass (working branch)
+
+- Tracking-fault acknowledgement requests now include the full signed kill-state snapshot, so the operator can review the actual state rather than only its hash. The verifier requires the snapshot and hash to match the current state. Earlier requests without the snapshot must be regenerated. The integration test exercises encrypted key creation, offline signing and the real CLI with a temporary test key.
+- Full suite **912 passed, 2 skipped**; Ruff (including tools), mypy and `git diff --check` passed. The acknowledgement still cannot reconstruct an incident or clear the resulting unverified-history hold, and it cannot reset a live/testnet kill switch.
+
 ## Latest kill-switch mode binding pass (working branch)
 
 - Kill-switch construction now requires an explicit mode; normal engine and CLI callers supply it. Order-manager and CCXT entry paths reject mismatched or replaced kill switches rather than trusting an unrelated paper-mode switch.

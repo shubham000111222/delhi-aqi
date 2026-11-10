@@ -68,7 +68,7 @@ Paths below are examples: adjust them to your own secure operator device and pap
    ```
 
    Check the command succeeded and inspect the JSON. Transfer the request file to the offline
-   operator device. Do not sign an unexpected action, database, mode, state hash, reason or expiry.
+   operator device. Do not sign an unexpected action, database, mode, complete kill-state snapshot, state hash, reason or expiry. The snapshot may contain operator-entered reasons; handle the request accordingly. Older requests without a snapshot are incompatible and must be regenerated.
 
 3. On the operator device, review the printed request, type `SIGN` only after review, and enter
    the private-key passphrase at the prompt. The signature output path must not already exist.
