@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest modeled cost-stress rerun pass (working branch)
+
+- Paper market fills can now model increased adverse slippage relative to the decision reference; the 2× stress configuration doubles fees and modeled adverse market slippage. Limit orders remain at their limit, zero modeled slippage is not invented, and old stop references can overstate stress. Walk-forward CLI runs a separate stressed sequence over the same configured windows/parameters and independently carried capital; robustness includes its rerun result in the cost gate. Backtests, walk-forward and robustness refuse live/testnet mode.
+- Full suite **1095 passed, 2 skipped**; Ruff (including tools), mypy and `git diff --check` passed. This is a simulated stress, not proof of venue costs, identical input coverage or independent OOS provenance; those gates remain unverified and live promotion remains blocked. The CLI walk-forward still does not refit. Historical results must not be retroactively treated as results of this new model. Dashboard process predates these changes.
+
 ## Latest venue/local diagnostic comparison pass (working branch)
 
 - `venue-observe --compare-local` now reads the existing mode-specific SQLite database in a read-only transaction, including committed WAL, and reports candidate differences between venue totals and local spot positions, and between observed and locally open orders. Missing, malformed or oversized local state fails rather than being treated as clean. This is diagnostic only; even matching observations explicitly remain unverified and unusable for reset.

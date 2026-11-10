@@ -365,7 +365,7 @@ class LiveGuardChecker:
 
     def _check_go_nogo(self, now: datetime) -> GuardResult:
         # Existing go/no-go rows are unverified mutable records, and the evidence
-        # pipeline does not yet authenticate provenance or the actual cost rerun.
+        # pipeline does not yet authenticate OOS provenance or venue cost assumptions.
         # Do not bootstrap or refresh a live gate from that self-reported result.
         return GuardResult("go_nogo_record", False, "promotion evidence provenance unverified")
 

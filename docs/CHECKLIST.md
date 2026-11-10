@@ -16,7 +16,7 @@ depends on.
 For the full Windows installation, implementation and validation procedure, see
 [`WINDOWS_LOCAL_LIVE_READINESS.md`](WINDOWS_LOCAL_LIVE_READINESS.md).
 
-**Last updated:** 2026-11-04 · **Suite:** 1085 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-04 · **Suite:** 1095 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -179,7 +179,7 @@ Tracked in detail in [`BUILD_PLAN_20_21.md`](BUILD_PLAN_20_21.md); this is the r
 - [ ] **Historical backfill duration** — fix `--months` arithmetic for 12+ months and
       test year and leap-day boundaries; until fixed, use explicit UTC `--from`/`--to`.
 - [ ] **Promotion evidence integration** — provenance is not verified by the current
-      metrics pipeline, and the 2×-cost rerun is not connected to its verdict; promotion
+      metrics pipeline. Walk-forward and robustness now run a separate modeled 2× fee/adverse-market-slippage replay and feed its result to their cost gate; input provenance, venue costs and identical input coverage remain unverified, and other metrics-only paths have no rerun. Promotion
       fails closed until both are supplied and independently validated.
 - [ ] **Dashboard exposure** — controls default to disabled and require a password if
       enabled; read endpoints are unauthenticated and require a protected deployment.

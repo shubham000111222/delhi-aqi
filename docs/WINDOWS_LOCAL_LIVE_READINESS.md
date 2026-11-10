@@ -158,7 +158,7 @@ python -m tradebot sensitivity --mode paper --feed archive --strategy S3_breakou
 ```
 
 2. [ ] Record the entire output and all unsuccessful or skipped research attempts. Protect the holdout; do not repeatedly tweak parameters until it passes. Examine fees, fill assumptions, exposure, regime breakdown, sample size, trade counts and the full equity path. Check that robustness actually ran the same strategy and period with doubled costs; the CLI's nominal gate verdict does not yet consume that evidence.
-3. [ ] Known limitations: the CLI walk-forward currently runs independent test windows without a training/refit callback; archive depth is modeled from candle closes; the current promotion gate intentionally fails OOS provenance because the pipeline cannot verify it, and cost-stress evidence is not wired into the verdict. `tradebot parity` as currently wired records a synthetic session; a zero-decision match proves no execution behavior. `tradebot slippage` runs a new session; it is **not** a report on your existing real-price paper database. All these limitations require implementation or separate verification, not a configuration workaround.
+3. [ ] Known limitations: the CLI walk-forward currently runs independent test windows without a training/refit callback; archive depth is modeled from candle closes; the promotion gate intentionally fails OOS provenance because the pipeline cannot verify it. Walk-forward and robustness include a separate modeled 2× fees/adverse-market-slippage rerun in their cost gate, but input coverage and real venue cost provenance are not verified; metrics-only commands lack a rerun. `tradebot parity` as currently wired records a synthetic session; a zero-decision match proves no execution behavior. `tradebot slippage` runs a new session; it is **not** a report on your existing real-price paper database. All these limitations require implementation or separate verification, not a configuration workaround.
 4. [ ] Formal requirements before promotion (see `docs/GO_NO_GO.md`): OOS profit factor strictly > 1.3 after costs; Sharpe > 1.0; maximum drawdown < 15%; at least 200 closed OOS trades; profitable after an independently verified 2×-cost rerun; Monte Carlo p95 drawdown < 20%. Assess multiple testing, parameter plateau, leakage, regime dependence and a genuinely untouched holdout. The learned-card requirement is approximately 10% net expectancy improvement across at least three windows (§19.2), as well as its other gates. Missing or invalid evidence means **NO GO**, even if a command prints a favorable number.
 5. [ ] No favorable result is guaranteed. If it fails, preserve the failure, reconsider the strategy, and use a new, properly separated validation protocol. Do not lower requirements or silently reuse the holdout.
 
@@ -292,7 +292,7 @@ PASS / FAIL / BLOCKED, reason, next action:
 A completed worksheet requires actual evidence, not only checked boxes. Update the project checklist and keep this procedure aligned with the code as the implementation evolves.
 
 > **Promotion preflight:** the live go/no-go gate intentionally fails while evidence provenance
-> and the actual 2× cost rerun are not integrated. Re-running `live-check` or editing a local
+> and actual venue costs are not independently verified. Re-running `live-check` or editing a local
 > `go_nogo` row cannot authorize live trading. The reconciliation requirement cannot be disabled
 > by configuration. The latest guard result is stored separately as `live_guard_latest`.
 

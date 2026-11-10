@@ -62,6 +62,8 @@ class PaperConfig(_Strict):
     reject_rate_min_notional: bool = True
     book_levels: int = 20
     book_depth_usdt: Decimal = D("250000")
+    # Simulated adverse market execution cost relative to the decision reference.
+    slippage_multiplier: Decimal = Field(default=D("1"), ge=D("1"), le=D("10"), allow_inf_nan=False)
 
     @field_validator("latency_ms")
     @classmethod

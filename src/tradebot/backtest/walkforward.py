@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from ..config import Config
+from ..config import Config, Mode
 from ..core.money import D, to_str
 from .metrics import (
     TradeRecord,
@@ -187,6 +187,8 @@ async def run_segment(
     from ..core.store import Store
     from ..engine import Engine
 
+    if config.mode is not Mode.PAPER:
+        raise ValueError("backtest segments require paper mode")
     cfg = copy.deepcopy(config)
     clock = SimClock(start)
     store = Store(":memory:")
@@ -290,6 +292,7 @@ async def run_walk_forward(
     seed: int | None = None,
     runner: SegmentRunner = run_segment,
     train_fn: Callable[[Window, dict[str, Any]], dict[str, Any]] | None = None,
+    cost_stress: bool = False,
 ) -> dict[str, Any]:
     """Run every window: fit on ``train``, trade ``test``, carry the capital forward.
 
@@ -298,7 +301,11 @@ async def run_walk_forward(
     parameters, which still produces a valid out-of-sample sequence — only the *choice* of
     parameters is not re-fitted, and the report says so.
     """
-    starting = capital or D(str(config.settings.starting_capital_usdt))
+    if config.mode is not Mode.PAPER:
+        raise ValueError("walk-forward requires paper mode")
+    starting = capital if capital is not None else D(str(config.settings.starting_capital_usdt))
+    if not starting.is_finite() or starting <= 0:
+        raise ValueError("walk-forward capital must be finite and positive")
     running = starting
     outcomes: list[WindowOutcome] = []
     overrides: dict[str, Any] = {}
@@ -330,7 +337,37 @@ async def run_walk_forward(
         tax_rate=config.risk.tax_reserve_pct,
     )
     mc = monte_carlo_drawdown([float(t.pnl) for t in trades], float(starting))
-    gates = acceptance_gates(metrics, mc=mc)
+    stress_result: dict[str, Any] | None = None
+    stress_metrics = None
+    if cost_stress and outcomes:
+        from .robustness import stress_config
+
+        stressed_config = stress_config(config, 2.0)
+        stressed_running = starting
+        stressed_outcomes: list[WindowOutcome] = []
+        for outcome in outcomes:
+            cfg = copy.deepcopy(stressed_config)
+            # Use the exact parameters selected for the corresponding nominal window;
+            # do not refit on the stressed test data or reuse nominal ending capital.
+            _apply_overrides(cfg, outcome.params)
+            test = await runner(cfg, outcome.window.test_start, outcome.window.test_end,
+                                capital=stressed_running, seed=seed)
+            stressed_running = test.end_equity
+            stressed_outcomes.append(WindowOutcome(window=outcome.window, test=test, params=dict(outcome.params)))
+        stress_metrics = compute_metrics(
+            stitched_curve(stressed_outcomes), pooled_trades(stressed_outcomes), starting_equity=starting,
+            ending_equity=stressed_running, tax_rate=config.risk.tax_reserve_pct,
+        )
+        stress_result = {
+            "multiplier": 2, "windows": [o.as_row() for o in stressed_outcomes],
+            "metrics": stress_metrics.to_dict(), "ending_equity": str(stressed_running),
+            "model": "2x fees and adverse modeled market slippage; limit fills remain at limit",
+            "runner_verified": runner is run_segment,
+            "venue_costs_verified": False,
+        }
+    # Injected runners are useful for tests but cannot constitute rerun evidence.
+    gates = acceptance_gates(metrics, mc=mc,
+                             cost_stress_metrics=stress_metrics if runner is run_segment else None)
 
     return {
         "windows": [o.as_row() for o in outcomes],
@@ -338,6 +375,7 @@ async def run_walk_forward(
         "metrics": metrics,
         "metrics_dict": metrics.to_dict(),
         "monte_carlo": mc,
+        "cost_stress": stress_result,
         "gates": gates,
         "passed": all_gates_passed(gates) and summary["verdict"] == "consistent",
         "outcomes": outcomes,
@@ -376,6 +414,10 @@ def format_walk_forward(result: dict[str, Any]) -> str:
         f"| compound {summary['compound_return'] * 100:+.2f}% "
         f"| dispersion {summary['return_dispersion'] * 100:.2f}% | {summary['verdict']}"
     )
+    stress = result.get("cost_stress")
+    if stress is not None:
+        lines.append(f"2x modeled cost rerun: return {stress['metrics']['total_return'] * 100:+.2f}% "
+                     f"| ending equity {stress['ending_equity']} | venue cost unverified")
     if not summary.get("parameters_refit", True):
         lines.append("note: parameters were held fixed (no in-sample re-fit)")
     return "\n".join(lines)

@@ -642,3 +642,36 @@ async def test_live_entry_accepts_current_sizing_assertion(cfg):
                     entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
     assert await manager.submit_entry(signal, D("0.001"), price=D("60000"), sized_ramp_multiplier=D("0.05"))
     store.close()
+
+
+@pytest.mark.parametrize("side", [Side.BUY, Side.SELL])
+async def test_stress_doubles_adverse_modeled_market_impact(cfg, side):
+    from dataclasses import replace
+
+    base_cfg = cfg
+    stress_cfg = replace(cfg, settings=cfg.settings.model_copy(deep=True))
+    stress_cfg.settings.paper.slippage_multiplier = D("2")
+    base = _adapter(base_cfg, _market(), SimClock(NOW), cash="100000")
+    stressed = _adapter(stress_cfg, _market(), SimClock(NOW), cash="100000")
+    if side is Side.SELL:
+        base.holdings["BTC"] = stressed.holdings["BTC"] = D("1")
+    request = OrderRequest(symbol="BTC/USDT", side=side, qty=D("0.75"), type=OrderType.MARKET,
+                           price=D("60000"), strategy="t", tag="stress-impact")
+    nominal = await base.place_order(request)
+    expensive = await stressed.place_order(request)
+    nominal_impact = abs(nominal.avg_fill_price - D("60000"))
+    stressed_impact = abs(expensive.avg_fill_price - D("60000"))
+    assert nominal_impact > 0
+    assert abs(stressed_impact - nominal_impact * 2) < D("1e-20")
+    assert expensive.avg_fill_price > nominal.avg_fill_price if side is Side.BUY else expensive.avg_fill_price < nominal.avg_fill_price
+
+
+async def test_stressed_invalid_market_price_rejects_order_without_filling(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock, cash="100000")
+    adapter.cfg.slippage_multiplier = D("NaN")
+    req = OrderRequest(symbol="BTC/USDT", side=Side.BUY, qty=D("0.01"), type=OrderType.MARKET, strategy="t")
+    with pytest.raises(PermanentExchangeError, match="slippage multiplier"):
+        await adapter.place_order(req)
+    assert adapter.orders[req.client_order_id].status is OrderStatus.REJECTED
+    assert not adapter.fills

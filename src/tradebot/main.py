@@ -186,6 +186,8 @@ async def _run_backtest(
 ) -> dict:
     from .engine import Engine
 
+    if cfg.mode is not Mode.PAPER:
+        raise ValueError("backtests require paper mode")
     start = _sim_start(cfg)
     clock = SimClock(start)
     store = Store(persist) if persist else Store(":memory:")
@@ -1243,7 +1245,7 @@ def cmd_walk_forward(args: argparse.Namespace) -> int:
         return 2
     capital = D(args.capital) if args.capital else None
     result = asyncio.run(
-        run_walk_forward(cfg, windows, capital=capital, seed=args.seed)
+        run_walk_forward(cfg, windows, capital=capital, seed=args.seed, cost_stress=True)
     )
     if args.json:
         _print(
@@ -1251,6 +1253,7 @@ def cmd_walk_forward(args: argparse.Namespace) -> int:
                 "windows": result["windows"],
                 "summary": result["summary"],
                 "metrics": result["metrics_dict"],
+                "cost_stress": result["cost_stress"],
                 "gates": [{"name": g.name, "passed": g.passed, "detail": g.detail} for g in result["gates"]],
                 "passed": result["passed"],
             }
@@ -1368,6 +1371,9 @@ async def _run_robustness(cfg: Config, days: int, seed: int | None, multiplier: 
     from .core.store import Store
     from .engine import Engine
 
+    if cfg.mode is not Mode.PAPER:
+        raise ValueError("robustness runs require paper mode")
+
     async def _session(this_cfg: Config) -> tuple[Any, Any, Any]:
         start = _sim_start(this_cfg)
         clock = SimClock(start)
@@ -1413,8 +1419,16 @@ async def _run_robustness(cfg: Config, days: int, seed: int | None, multiplier: 
         "sharpe": float(stressed_eval["metrics"].sharpe),
         "trades": stressed_eval["metrics"].trade_count,
     }
-    report["gates"] = [g.to_dict() for g in base["gates"]]
-    report["passed"] = base["passed"]
+    # A real second engine run is available here. It is modeled, not proof of
+    # untouched OOS data or venue costs, and only 2x satisfies the required gate.
+    from .backtest.metrics import acceptance_gates, all_gates_passed
+
+    stress_gate_metrics = stressed_eval["metrics"] if multiplier == 2.0 else None
+    gates = acceptance_gates(base["metrics"], mc=base["monte_carlo"], cost_stress_metrics=stress_gate_metrics)
+    report["gates"] = [g.to_dict() for g in gates]
+    report["passed"] = all_gates_passed(gates)
+    report["stress_model"] = ("modeled fees and adverse market slippage scaled; limit fills stay at limit; "
+                              "venue costs and out-of-sample provenance unverified")
     return report
 
 
