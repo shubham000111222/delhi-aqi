@@ -425,3 +425,20 @@ async def test_engine_risk_context_applies_durable_size_reduction(engine):
     engine.store.reduce_strategy_size("S1_ema_trend", Decimal("0.5"), now=engine.clock.now(), reason="losses")
     context = engine._risk_context("BTC/USDT", "S1_ema_trend")
     assert context.size_multiplier == Decimal("0.5")
+
+
+async def test_fill_ledger_error_keeps_durable_hold(engine):
+    from decimal import Decimal
+
+    from tradebot.core.models import Fill, Side
+
+    fill = Fill(order_id="no-position", symbol="BTC/USDT", side=Side.SELL, price=Decimal("100"),
+                qty=Decimal("1"), fee=Decimal("0"), ts=START, strategy="S1")
+    engine.enqueue_fill(fill)
+    assert engine.store.has_pending_fill()
+    assert not engine.killswitch.can_open_entries()
+    kind, payload = engine.queue.get_nowait()
+    await engine.dispatch(kind, payload)
+    assert engine.store.has_pending_fill()
+    assert engine.unapplied_fills == 1
+    assert not engine.store.fills()

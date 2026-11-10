@@ -90,6 +90,7 @@ class KillSwitch:
                 and not state.get("incident_tracking_failed")
                 and not self.flapping_hold_active()
                 and not self.store.has_pending_kill_incident()
+                and not self.store.has_pending_fill()
                 and not self.store.has_invalid_ramp_tracking())
 
     def must_flatten(self) -> bool:

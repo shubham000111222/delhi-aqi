@@ -68,6 +68,16 @@ def _finite_decimal(value: Any) -> bool:
         return False
 
 
+@dataclass(frozen=True, slots=True)
+class PendingFill:
+    fill: Fill
+    pending_id: str
+
+    @property
+    def ts(self) -> datetime:
+        return self.fill.ts
+
+
 @dataclass
 class EngineStats:
     events: int = 0
@@ -329,11 +339,18 @@ class Engine:
         compare the two ledgers in that window: it would report our own queue as a
         mismatch and pause trading.
         """
-        self.unapplied_fills += 1
         try:
-            self.queue.put_nowait(("fill", fill))
+            pending_id = self.store.journal_pending_fill(fill)
+        except Exception:  # noqa: BLE001 - already-executed fills must never be silently dropped
+            self.killswitch.trigger(KillLevel.L1, trigger="fill_journal_failed",
+                                    reason="could not persist incoming fill", actor="execution")
+            raise
+        self.unapplied_fills += 1
+        item = ("fill", PendingFill(fill, pending_id))
+        try:
+            self.queue.put_nowait(item)
         except asyncio.QueueFull:
-            self._deferred.append(("fill", fill))
+            self._deferred.append(item)
 
     @property
     def marks(self) -> dict[str, Decimal]:
@@ -367,7 +384,9 @@ class Engine:
         elif kind == "bar":
             await self._on_bar(payload)
         elif kind == "fill":
-            await self._on_fill(payload)
+            if not isinstance(payload, PendingFill):
+                raise ValueError("fill must be journaled before dispatch")
+            await self._on_fill(payload.fill, pending_id=payload.pending_id)
         elif kind == "regime":
             self._log("regime", payload, actor="market")
         else:  # pragma: no cover - defensive
@@ -778,14 +797,13 @@ class Engine:
     # ------------------------------------------------------------------
     # fills and position lifecycle
     # ------------------------------------------------------------------
-    async def _on_fill(self, fill: Fill) -> None:
+    async def _on_fill(self, fill: Fill, *, pending_id: str) -> None:
         self.stats.fills += 1
         try:
             self.slippage.observe(fill, book=self.market.book(fill.symbol))
             self._maybe_calibrate_slippage()
         except Exception as exc:  # noqa: BLE001 - measurement must never stop trading
             self._log("slippage_record_failed", {"error": str(exc)}, level="WARN", actor="execution")
-        self.unapplied_fills = max(self.unapplied_fills - 1, 0)
         key = (fill.symbol, fill.strategy)
         pos_before = self.ledger.get(fill.symbol, fill.strategy)
         qty_before = pos_before.qty if pos_before else ZERO
@@ -847,7 +865,8 @@ class Engine:
                     raise
                 await self._on_trade_closed(closed)
             self._exiting.pop(key, None)
-        self.om.record_fill(fill)
+        self.om.record_fill(fill, pending_id=pending_id)
+        self.unapplied_fills = max(self.unapplied_fills - 1, 0)
 
     async def _on_trade_closed(self, trade: ClosedTrade) -> None:
         self.stats.trades_closed += 1

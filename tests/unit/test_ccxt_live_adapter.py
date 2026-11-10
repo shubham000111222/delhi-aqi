@@ -279,6 +279,25 @@ class TestFillDetection:
         assert len(fills) == 2
         assert fills[1].qty == Decimal("0.002312"), "only the new quantity"
 
+    def test_terminal_order_fill_is_retried_after_callback_failure(self):
+        adapter, exchange = adapter_with()
+        order = asyncio.run(adapter.place_order(request()))
+        exchange.order_state["x1"].update({"status": "closed", "filled": 0.001, "average": 44000.5})
+
+        def fail(_fill):
+            raise RuntimeError("journal unavailable")
+
+        adapter.on_fill = fail
+        with pytest.raises(RuntimeError, match="journal unavailable"):
+            asyncio.run(adapter.drain_pending())
+        assert adapter.seen_fills.get(order.client_order_id, Decimal("0")) == 0
+        fills: list[Any] = []
+        adapter.on_fill = fills.append
+        asyncio.run(adapter.drain_pending())
+        assert len(fills) == 1 and fills[0].qty == Decimal("0.001")
+        asyncio.run(adapter.drain_pending())
+        assert len(fills) == 1
+
     def test_the_fee_comes_from_the_venue_taker_fee(self):
         adapter, exchange = adapter_with()
         asyncio.run(adapter.place_order(request()))

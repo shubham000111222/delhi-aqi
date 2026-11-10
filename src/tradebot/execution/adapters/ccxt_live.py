@@ -372,15 +372,21 @@ class CcxtLiveAdapter(ExchangeAdapter):
     async def drain_pending(self) -> None:
         """Poll tracked orders and emit fills the bot has not seen yet."""
         for cid, order in list(self.orders.items()):
-            if not order.status.is_open:
-                continue
-            try:
-                fresh = await self.get_order(cid)
-            except Exception:  # noqa: BLE001
-                continue
-            if fresh is None:
-                continue
             already = self.seen_fills.get(cid, ZERO)
+            if not order.status.is_open:
+                # A callback can fail after get_order cached a terminal status. Do not
+                # discard that observed delta just because the order is now closed.
+                if order.filled_qty <= already:
+                    continue
+                fresh = order
+            else:
+                try:
+                    observed = await self.get_order(cid)
+                except Exception:  # noqa: BLE001
+                    continue
+                if observed is None:
+                    continue
+                fresh = observed
             delta = fresh.filled_qty - already
             if delta <= 0:
                 continue
@@ -399,9 +405,9 @@ class CcxtLiveAdapter(ExchangeAdapter):
                 expected_price=fresh.price,
                 reason=fresh.reason,
             )
-            self.seen_fills[cid] = fresh.filled_qty
             if self.on_fill is not None:
                 self.on_fill(fill)
+                self.seen_fills[cid] = fresh.filled_qty
 
     # --- helpers ----------------------------------------------------------
     def _translate(self, exc: Exception) -> Exception:

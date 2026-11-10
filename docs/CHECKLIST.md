@@ -16,7 +16,7 @@ depends on.
 For the full Windows installation, implementation and validation procedure, see
 [`WINDOWS_LOCAL_LIVE_READINESS.md`](WINDOWS_LOCAL_LIVE_READINESS.md).
 
-**Last updated:** 2026-11-04 · **Suite:** 1135 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-04 · **Suite:** 1142 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -26,7 +26,8 @@ machine; this workspace has no real-price archive.
 - [x] Apply persisted loss-streak size reductions to engine sizing and recheck the asserted multiplier at order boundaries; never automatically clear a reduction after a win.
 - [x] Serialize consecutive-loss updates and threshold actions across engines with a single SQLite transaction; corrupt streak records block normal entries.
 - [x] Commit the normal persisted position closure and loss-streak controls in one SQLite transaction; refuse a repeated close of the same open row.
-- [ ] Add stable position/fill identities and durable fill ingestion/replay with verified venue reconciliation. The external fill and in-memory ledger are not atomic with SQLite; a crash before the transaction can still lose the close, same-time position identity is ambiguous, and earlier history is not independently reconstructed.
+- [x] Journal received fill callbacks before queueing; pending records block normal entries and resets after interruption.
+- [ ] Add stable position/fill identities and durable fill ingestion/replay with verified venue reconciliation. The external fill and in-memory ledger are not atomic with SQLite; a crash before journaling can still lose a callback, local callback IDs are not venue trade IDs, and a pending record may represent a partially applied fill. Same-time position identity is ambiguous and earlier history is not independently reconstructed. There is no safe pending-fill release or replay workflow: do not manually remove holds.
 - [ ] Build an authenticated, evidence-checked release workflow for latched strategy size reductions and other recovery holds; none exists yet. Do not manually clear a latch to bypass this limitation.
 - [ ] Complete Phase D's general authenticated action-bound approvals and all mutation boundaries, then Phases E–I and their real evidence; live promotion and live/testnet reset remain blocked. Reduce-only assertions, direct database/venue access, alternate adapters and in-flight orders remain outside these protections.
 

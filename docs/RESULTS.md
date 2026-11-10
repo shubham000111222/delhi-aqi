@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest fill callback journal pass (working branch)
+
+- Engine callbacks are journaled before queueing, with full-precision diagnostic fields and an event in one transaction. An outstanding record blocks normal entry checks and kill-switch resets, including after restart. A successful fill record and pending removal commit together; failures retain the hold. CCXT polling no longer marks a delta seen before the callback succeeds, and retries an observed terminal-order delta after callback failure.
+- Full suite **1142 passed, 2 skipped**; Ruff, mypy and `git diff --check` passed. This is a hold, **not automated replay or reconciliation**: a pending callback may have been partially applied, so no automatic or authenticated clearing workflow exists. Local UUIDs are not exchange trade IDs and do not deduplicate callbacks. Venue execution before the callback/journal, process-local CCXT polling state, direct SQL/adapters, in-flight orders and total database failure remain outside this boundary. The exchange, in-memory ledger and SQLite are not atomic; live promotion and live/testnet resets remain blocked. Dashboard process predates these edits.
+
 ## Latest atomic position-close pass (working branch)
 
 - The engine now commits the persisted position closure, shared loss streak, threshold size reduction/pause and risk audit in one transaction. Missing, stale-opened-at or already-closed positions refuse a second risk transition; failed audits roll back the close. An error attempts L1 and locally disables the strategy.

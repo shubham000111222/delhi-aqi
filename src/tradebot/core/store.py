@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta
@@ -843,8 +844,44 @@ class Store:
             ),
         )
 
-    def add_fill(self, fill: Fill) -> None:
+    @staticmethod
+    def _pending_fill_payload(fill: Fill) -> dict[str, Any]:
+        return {
+            "order_id": fill.order_id, "symbol": fill.symbol, "side": fill.side.value,
+            "price": str(fill.price), "qty": str(fill.qty), "fee": str(fill.fee),
+            "ts": iso(fill.ts), "strategy": fill.strategy, "liquidity": fill.liquidity,
+            "slippage_bps": str(fill.slippage_bps),
+            "expected_price": str(fill.expected_price) if fill.expected_price is not None else None,
+            "reason": fill.reason,
+        }
+
+    def journal_pending_fill(self, fill: Fill) -> str:
+        """Write a recovery hold before placing the adapter callback on the queue.
+
+        This local callback ID is not a venue trade ID and cannot deduplicate fills.
+        """
+        identifier = uuid.uuid4().hex
+        value = self._pending_fill_payload(fill)
         with self.transaction() as conn:
+            conn.execute("INSERT INTO kv(key,value,updated_at) VALUES(?,?,?)",
+                         (f"fill_pending:{identifier}", json.dumps(value), iso(utcnow())))
+            conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                         (iso(utcnow()), "WARN", "fill_pending", "execution", json.dumps({
+                             "id": identifier, "order_id": fill.order_id, "symbol": fill.symbol,
+                         })))
+        return identifier
+
+    def has_pending_fill(self) -> bool:
+        return bool(self._query("SELECT 1 FROM kv WHERE key GLOB 'fill_pending:*' LIMIT 1"))
+
+    def add_fill(self, fill: Fill, *, pending_id: str | None = None) -> None:
+        with self.transaction() as conn:
+            if pending_id is not None:
+                if len(pending_id) != 32 or any(c not in "0123456789abcdef" for c in pending_id):
+                    raise ValueError("invalid pending fill id")
+                row = conn.execute("SELECT value FROM kv WHERE key=?", (f"fill_pending:{pending_id}",)).fetchone()
+                if row is None or json.loads(row["value"]) != self._pending_fill_payload(fill):
+                    raise ValueError("pending fill missing or changed")
             conn.execute(
                 """INSERT INTO fills(ts,order_id,symbol,side,price,qty,fee,liquidity,payload)
                    VALUES(?,?,?,?,?,?,?,?,?)""",
@@ -864,6 +901,8 @@ class Store:
                 "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
                 (iso(fill.ts), "INFO", "fill", "execution", json.dumps(fill.to_dict(), default=str)),
             )
+            if pending_id is not None:
+                conn.execute("DELETE FROM kv WHERE key=?", (f"fill_pending:{pending_id}",))
 
     def fills(
         self,
@@ -1206,6 +1245,8 @@ class Store:
             if require_no_pending_incident and (
                 current.get("incident_tracking_failed") or conn.execute(
                     "SELECT 1 FROM kv WHERE key GLOB 'kill_incident_pending:*' LIMIT 1"
+                ).fetchone() is not None or conn.execute(
+                    "SELECT 1 FROM kv WHERE key GLOB 'fill_pending:*' LIMIT 1"
                 ).fetchone() is not None or conn.execute(
                     "SELECT 1 FROM kv WHERE key='ramp_incident_tracking_invalid'"
                 ).fetchone() is not None

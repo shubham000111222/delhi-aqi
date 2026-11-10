@@ -404,8 +404,8 @@ class OrderManager:
         if self.on_fill_callback is not None:
             self.on_fill_callback(fill)
 
-    def record_fill(self, fill: Fill) -> None:
-        self.store.add_fill(fill)
+    def record_fill(self, fill: Fill, *, pending_id: str | None = None) -> None:
+        self.store.add_fill(fill, pending_id=pending_id)
         self.stats.fills += 1
         self.stats.total_slippage_bps += fill.slippage_bps
         order = self.adapter_orders().get(fill.order_id)
