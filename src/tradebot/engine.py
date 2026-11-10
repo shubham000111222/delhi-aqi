@@ -923,8 +923,12 @@ class Engine:
             atr = atr_value(series, self.cfg.strategies.regime.adx_period) if series else 0.0
             if atr == atr and atr > 0:  # not NaN
                 trail = pos.highest_price - D(atr * self.cfg.strategies.exit_management.trail_atr_mult)
-                if pos.trailing_stop is None or trail > pos.trailing_stop:
-                    pos.trailing_stop = max(trail, pos.effective_stop)
+                if trail > pos.effective_stop:
+                    # Persist before changing the in-memory position; the DB ratchet and
+                    # audit event commit together and cannot lose a concurrent tightening.
+                    pos.trailing_stop = self.store.tighten_trailing_stop(
+                        pos.symbol, pos.strategy, trail, ts=self.clock.now()
+                    )
 
             stop = pos.effective_stop
             if price <= stop:

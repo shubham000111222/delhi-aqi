@@ -624,10 +624,39 @@ class Store:
         payload = json.dumps(_position_payload(pos), default=str)
         with self.transaction() as conn:
             row = conn.execute(
-                "SELECT id FROM positions WHERE symbol=? AND strategy=? AND closed_at IS NULL",
+                "SELECT id,payload FROM positions WHERE symbol=? AND strategy=? AND closed_at IS NULL",
                 (pos.symbol, pos.strategy),
             ).fetchone()
             if row:
+                # A later fill or stale writer must not overwrite a tightened stop. Keep
+                # accounting updates, but restore any persisted stronger protection.
+                try:
+                    prior = json.loads(row["payload"])
+                    old_base = D(prior["stop"])
+                    old_trailing = D(prior["trailing_stop"]) if prior.get("trailing_stop") is not None else None
+                    if (not old_base.is_finite() or old_base <= 0 or not pos.stop.is_finite()
+                            or pos.stop <= 0 or (old_trailing is not None
+                            and (not old_trailing.is_finite() or old_trailing <= 0))
+                            or (pos.trailing_stop is not None
+                            and (not pos.trailing_stop.is_finite() or pos.trailing_stop <= 0))):
+                        raise ValueError("invalid stop")
+                except (ArithmeticError, TypeError, ValueError, KeyError, AttributeError) as exc:
+                    raise ValueError("cannot update position with invalid stop") from exc
+                widened = pos.stop < old_base or (old_trailing is not None and (
+                    pos.trailing_stop is None or pos.trailing_stop < old_trailing
+                ))
+                if widened:
+                    pos.stop = max(pos.stop, old_base)
+                    if old_trailing is not None:
+                        pos.trailing_stop = max(pos.trailing_stop or old_trailing, old_trailing)
+                    payload = json.dumps(_position_payload(pos), default=str)
+                    conn.execute(
+                        "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                        (iso(utcnow()), "WARN", "autonomy_refused", "portfolio", json.dumps({
+                            "action": "widen_stop", "symbol": pos.symbol, "strategy": pos.strategy,
+                            "reason": "persisted stop ratchet cannot be widened",
+                        })),
+                    )
                 conn.execute(
                     "UPDATE positions SET qty=?, avg_entry=?, realized_pnl=?, fees=?, payload=? WHERE id=?",
                     (to_str(pos.qty), to_str(pos.avg_entry), to_str(pos.realized_pnl), to_str(pos.fees), payload, row["id"]),
@@ -648,6 +677,45 @@ class Store:
                 ),
             )
             return int(cur.lastrowid or 0)
+
+    def tighten_trailing_stop(
+        self, symbol: str, strategy: str, candidate: Decimal, *, ts: datetime | None = None,
+    ) -> Decimal:
+        """Atomically ratchet an open long's software stop and record the change.
+
+        Concurrent callers always receive the greatest committed effective stop. This
+        protects this mutation path, not arbitrary SQL or venue-side protective orders.
+        """
+        if not isinstance(candidate, Decimal) or not candidate.is_finite() or candidate <= 0:
+            raise ValueError("trailing stop must be a finite positive Decimal")
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT id,payload FROM positions WHERE symbol=? AND strategy=? AND closed_at IS NULL",
+                (symbol, strategy),
+            ).fetchone()
+            if row is None:
+                raise ValueError("cannot tighten stop without a persisted open position")
+            try:
+                payload = json.loads(row["payload"])
+                base = D(payload["stop"])
+                trailing = D(payload["trailing_stop"]) if payload.get("trailing_stop") is not None else base
+                if not base.is_finite() or not trailing.is_finite() or base <= 0 or trailing <= 0:
+                    raise ValueError("invalid persisted stop")
+            except (ArithmeticError, TypeError, ValueError, KeyError, AttributeError) as exc:
+                raise ValueError("cannot tighten invalid persisted stop") from exc
+            current = max(base, trailing)
+            if candidate <= current:
+                return current
+            payload["trailing_stop"] = to_str(candidate)
+            conn.execute("UPDATE positions SET payload=? WHERE id=?", (json.dumps(payload), row["id"]))
+            conn.execute(
+                "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                (iso(ts or utcnow()), "INFO", "trailing_stop_tightened", "portfolio", json.dumps({
+                    "symbol": symbol, "strategy": strategy, "previous": to_str(current),
+                    "stop": to_str(candidate),
+                })),
+            )
+            return candidate
 
     def close_position(
         self, pos: Position, exit_price: Decimal, exit_reason: str, closed_at: datetime | None = None

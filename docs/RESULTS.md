@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest software stop-ratchet boundary pass (working branch)
+
+- Trailing-stop tightening now commits its state and audit event together before changing engine memory. Independent SQLite writers cannot lower this ratchet; stale position saves preserve tighter persisted base and trailing stops while retaining quantity/accounting updates and auditing refused widening.
+- Regressions cover restart, stale writers, engine wiring, invalid values and audit-write rollback. Full rerun: **829 passed, 2 skipped**; Ruff, mypy and `git diff --check` passed. An earlier full run failed a backfill-history assertion when the wall-clock minute advanced during the run; the targeted rerun and subsequent full suite passed. The clock-sensitive backfill test remains to be fixed.
+- This is a software/database ratchet, **not** proof that a venue-side stop was updated or exists; direct SQL, arbitrary in-memory changes and live order races remain outside this boundary. Approval identity, action-bound consumption and comprehensive mutation enforcement remain open. The dashboard process must restart to load this change.
+
 ## Latest live-adapter and remote-reset boundary pass (working branch)
 
 - The CCXT adapter refuses direct exposure-increasing submissions without an attached kill switch or when entries are blocked, including a KILL file; it also rejects a buy falsely marked reduce-only. The engine supplies its persisted switch on normal CCXT construction. Dashboard remote resume is restricted to the exact reviewed L1 state, like Telegram.

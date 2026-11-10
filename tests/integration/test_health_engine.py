@@ -230,3 +230,35 @@ async def test_remote_engine_resume_only_clears_reviewed_l1(engine, monkeypatch)
     with pytest.raises(PermissionError, match="changed"):
         await engine.resume("reviewed", actor="dashboard", l1_only=True)
     assert engine.killswitch.level is KillLevel.L3
+
+
+async def test_engine_trailing_stop_ratchets_before_memory_update(engine, monkeypatch):
+    import sqlite3
+    from decimal import Decimal
+
+    import tradebot.engine as engine_module
+    from tradebot.core.models import Position
+
+    pos = Position(
+        symbol="BTC/USDT", strategy="S1_ema_trend", qty=Decimal("1"), avg_entry=Decimal("100"),
+        stop=Decimal("90"), target=Decimal("120"), initial_stop=Decimal("90"), opened_at=START,
+        highest_price=Decimal("100"),
+    )
+    engine.store.save_position(pos)
+    engine.ledger.positions[(pos.symbol, pos.strategy)] = pos
+    monkeypatch.setattr(engine.market, "price", lambda symbol: Decimal("110"))
+    monkeypatch.setattr(engine, "_strategy_series", lambda p: object())
+    monkeypatch.setattr(engine_module, "atr_value", lambda series, period: 2.0)
+    await engine._manage_positions(pos.symbol)
+    assert pos.effective_stop == Decimal("104")
+    assert engine.store.open_positions()[0].effective_stop == Decimal("104")
+    assert engine.store.count_events("trailing_stop_tightened") == 1
+    engine.store._exec(
+        "CREATE TRIGGER fail_stop BEFORE INSERT ON events WHEN NEW.kind='trailing_stop_tightened' "
+        "BEGIN SELECT RAISE(ABORT, 'audit failed'); END"
+    )
+    monkeypatch.setattr(engine.market, "price", lambda symbol: Decimal("112"))
+    with pytest.raises(sqlite3.IntegrityError, match="audit failed"):
+        await engine._manage_positions(pos.symbol)
+    assert pos.effective_stop == Decimal("104")
+    assert engine.store.open_positions()[0].effective_stop == Decimal("104")
