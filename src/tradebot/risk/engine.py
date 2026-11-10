@@ -97,12 +97,31 @@ class EntryDecision:
 class RiskEngine:
     def __init__(self, config: Config, killswitch: KillSwitch) -> None:
         self.cfg = config
-        self.limits: RiskLimits = config.risk
+        config.risk.validate_envelope()
+        self._limits: RiskLimits = config.risk
+        self._limits_snapshot = config.risk.model_dump(mode="json")
         self.killswitch = killswitch
         self.portfolio_cfg = config.settings.portfolio
 
+    @property
+    def limits(self) -> RiskLimits:
+        """The immutable limits loaded when this risk engine was constructed."""
+        return self._limits
+
     # --- main entry point -------------------------------------------------
     def approve_entry(self, signal: Signal, ctx: RiskContext, rules: MarketRules) -> EntryDecision:
+        if (self.limits.model_dump(mode="json") != self._limits_snapshot
+                or self.cfg.risk.model_dump(mode="json") != self._limits_snapshot):
+            reason = "runtime risk limits changed; restart and review required"
+            self.killswitch.store.log_event(
+                "autonomy_refused", {"actor": "risk", "action": "raise_risk_limit", "reason": reason},
+                level="CRIT", actor="risk", ts=ctx.now,
+            )
+            return EntryDecision(
+                verdict=RiskVerdict(approved=False, reason=reason,
+                                    checks=[RiskCheck("risk_limits_immutable", False, reason)]),
+                qty=ZERO,
+            )
         checks: list[RiskCheck] = []
 
         def add(name: str, passed: bool, detail: str = "") -> bool:

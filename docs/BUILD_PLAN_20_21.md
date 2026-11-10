@@ -133,7 +133,7 @@ shadow form; **fund** does not exist.
 | **A** | Health model, component checks, `tradebot health`, `/api/health`, report section, restart budget for strategies, audit events | ✅ merged |
 | **B** | Heal playbook table + circuit breaker (60 s, half-open probe) + stuck-**exit** sweep + verification, cooldowns, escalation + MTTR + one injection test per wired row | ✅ merged |
 | **C** | Watchdog v2: restart budget, dead man's switch and alert router | 🟡 merged implementation; live venue preflight is not verified and live restart is blocked |
-| **D** | Autonomy ledger + approval flow + forbidden-action tests (§21.7) + flapping forces L1 | 🟡 in progress; order-manager and CCXT entry checks, persisted software stop ratchet, fail-closed live ramp and critical-incident accounting and escalation outbox, L1 recovery identity checks and race-safe remote reset checks added; global boundaries and authenticated approvals remain |
+| **D** | Autonomy ledger + approval flow + forbidden-action tests (§21.7) + flapping forces L1 | 🟡 in progress; immutable risk-envelope and order-manager/CCXT runtime-boundary checks, persisted software stop ratchet, fail-closed live ramp and critical-incident accounting and escalation outbox, L1 recovery identity checks and race-safe remote reset checks added; global boundaries and authenticated approvals remain |
 | **E** | Market graph (§21.2) and the contagion exposure cut | ⬜ |
 | **F** | Allocator (§21.3) with the equal-weight backtest comparison as its gate | ⬜ |
 | **G** | Lifecycle manager (§21.4) with decay auto-disable | ⬜ |

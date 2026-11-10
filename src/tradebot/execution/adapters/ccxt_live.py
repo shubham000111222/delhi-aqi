@@ -69,6 +69,9 @@ class CcxtLiveAdapter(ExchangeAdapter):
         killswitch: KillSwitch | None = None,
     ) -> None:
         self.cfg = config
+        self._initial_mode = Mode.TESTNET if testnet else Mode.LIVE
+        config.risk.validate_envelope()
+        self._risk_snapshot = config.risk.model_dump(mode="json")
         self.market = market
         self.clock = clock
         self.mode = Mode.TESTNET if testnet else Mode.LIVE
@@ -190,6 +193,9 @@ class CcxtLiveAdapter(ExchangeAdapter):
         if request.reduce_only and request.side is not Side.SELL:
             self._refuse_order(request, "reduce-only buy is not a supported protective action")
         if not request.reduce_only:
+            if (self.cfg.mode != self._initial_mode or self.mode != self._initial_mode
+                    or self.cfg.risk.model_dump(mode="json") != self._risk_snapshot):
+                self._refuse_order(request, "runtime mode or risk configuration changed or mismatched")
             if self.killswitch is None:
                 self._refuse_order(request, "kill switch is not attached")
             if self.killswitch is None or not self.killswitch.can_open_entries():

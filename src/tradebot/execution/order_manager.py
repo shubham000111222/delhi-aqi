@@ -92,6 +92,11 @@ class OrderManager:
     ) -> None:
         self.cfg = config
         self.adapter = adapter
+        self._initial_adapter = adapter
+        self._initial_adapter_mode = adapter.mode
+        self._initial_mode = config.mode
+        config.risk.validate_envelope()
+        self._risk_snapshot = config.risk.model_dump(mode="json")
         self.store = store
         self.killswitch = killswitch
         self.clock = clock
@@ -195,12 +200,35 @@ class OrderManager:
             await self.clock.sleep(wait)
             self.bucket.try_acquire()
 
+        if request.reduce_only and request.side is not Side.SELL:
+            self.store.log_event(
+                "autonomy_refused", {"actor": "execution", "action": "increase_position_size",
+                                     "reason": "reduce-only buy is not a long-spot exit",
+                                     "client_order_id": request.client_order_id},
+                level="CRIT", actor="execution", ts=self.clock.now(),
+            )
+            return None
+
         attempt = 0
         while attempt < max(1, self.exec_cfg.retry_attempts):
             # Risk approval may have happened before a rate-limit wait or retry. Re-read
             # the persisted switch immediately before every exposure-increasing submit.
             # Reducing exits must remain possible at L1-L3. This is not a global adapter
             # boundary and cannot cancel a request already in flight at the venue.
+            if not request.reduce_only and (
+                self.cfg.mode != self._initial_mode
+                or self.adapter is not self._initial_adapter
+                or self.adapter.mode != self._initial_adapter_mode
+                or self._initial_adapter_mode != self._initial_mode
+                or self.cfg.risk.model_dump(mode="json") != self._risk_snapshot
+            ):
+                self.store.log_event(
+                    "autonomy_refused", {"actor": "execution", "action": "edit_runtime_config",
+                                         "reason": "runtime risk, mode or adapter changed",
+                                         "client_order_id": request.client_order_id},
+                    level="CRIT", actor="execution", ts=self.clock.now(),
+                )
+                return None
             if not request.reduce_only and not self.killswitch.can_open_entries():
                 self.store.log_event(
                     "autonomy_refused",

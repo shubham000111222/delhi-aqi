@@ -83,8 +83,11 @@ class TestCostBudget:
         )
         assert decision.approved, decision.verdict.reason
 
-    def test_the_check_is_off_at_ratio_zero(self, engine):
-        engine.limits.min_target_cost_ratio = D("0")
+    def test_the_check_is_off_at_ratio_zero(self, cfg):
+        from dataclasses import replace
+
+        limits = cfg.risk.model_copy(update={"min_target_cost_ratio": D("0")})
+        engine = RiskEngine(replace(cfg, risk=limits), KillSwitch(Store(), clock=SimClock(NOW)))
         decision = engine.approve_entry(
             _signal(target=D("60100")), _ctx(round_trip_cost_bps=D("100")), _rules()
         )
@@ -708,3 +711,60 @@ def test_corrupt_flapping_hold_blocks_reset(hold):
     assert switch.level is KillLevel.L1
     assert not store.set_kill_state("L0", expected_state=switch.state, require_no_flapping_hold=True, ts=NOW)
     store.close()
+
+
+@pytest.mark.parametrize("name,value", [
+    ("ABSOLUTE_MAX_RISK_PER_TRADE", D("1")),
+    ("ABSOLUTE_MAX_TOTAL_EXPOSURE", D("10")),
+    ("ABSOLUTE_MAX_OPEN_POSITIONS", 1000),
+])
+def test_hard_envelope_constants_cannot_be_supplied_as_config(name, value):
+    from pydantic import ValidationError
+
+    from tradebot.config import RiskLimits
+
+    with pytest.raises(ValidationError):
+        RiskLimits(**{name: value})
+
+
+def test_runtime_risk_and_config_bindings_are_immutable(cfg):
+    from dataclasses import FrozenInstanceError
+
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        cfg.risk.risk_per_trade = D("0.02")
+    with pytest.raises(FrozenInstanceError):
+        cfg.risk = cfg.risk.model_copy(update={"risk_per_trade": D("0.02")})
+    engine = RiskEngine(cfg, KillSwitch(Store(), clock=SimClock(NOW), kill_file=None))
+    with pytest.raises(AttributeError):
+        engine.limits = cfg.risk.model_copy(update={"risk_per_trade": D("0.02")})
+
+
+def test_risk_boundary_refuses_replaced_private_limits(cfg):
+    store = Store(":memory:")
+    engine = RiskEngine(cfg, KillSwitch(store, clock=SimClock(NOW), kill_file=None))
+    engine._limits = cfg.risk.model_copy(update={"risk_per_trade": D("0.02")})
+    result = engine.approve_entry(_signal(), _ctx(), _rules())
+    assert not result.approved
+    assert result.verdict.failed[0].name == "risk_limits_immutable"
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+def test_risk_engine_revalidates_preconstructed_limits(cfg):
+    from dataclasses import replace
+
+    too_large = cfg.risk.model_copy(update={"risk_per_trade": D("0.05")})
+    with pytest.raises(ValueError, match="hard envelope"):
+        RiskEngine(replace(cfg, risk=too_large), KillSwitch(Store(), kill_file=None))
+
+
+def test_model_copy_cannot_override_absolute_envelope(cfg):
+    from dataclasses import replace
+
+    spoofed = cfg.risk.model_copy(update={
+        "risk_per_trade": D("0.5"), "ABSOLUTE_MAX_RISK_PER_TRADE": D("1"),
+    })
+    with pytest.raises(ValueError, match="hard envelope"):
+        RiskEngine(replace(cfg, risk=spoofed), KillSwitch(Store(), kill_file=None))

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -208,6 +208,10 @@ class Settings(_Strict):
 
 
 class RiskLimits(_Strict):
+    # Risk limits are fixed after configuration loading. Changes require a new config
+    # and a process restart, not a mutation by the running strategy or healer.
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     risk_per_trade: Decimal = D("0.005")
     per_symbol_exposure: Decimal = D("0.20")
     total_exposure: Decimal = D("0.60")
@@ -258,19 +262,19 @@ class RiskLimits(_Strict):
 
     # Hard safety envelope: no config file may exceed these. Loosening requires
     # a code change plus review, not an edit of a YAML file (section 16, item 20).
-    ABSOLUTE_MAX_RISK_PER_TRADE: Decimal = D("0.02")
-    ABSOLUTE_MAX_TOTAL_EXPOSURE: Decimal = D("1.0")
-    ABSOLUTE_MAX_OPEN_POSITIONS: int = 10
+    ABSOLUTE_MAX_RISK_PER_TRADE: ClassVar[Decimal] = D("0.02")
+    ABSOLUTE_MAX_TOTAL_EXPOSURE: ClassVar[Decimal] = D("1.0")
+    ABSOLUTE_MAX_OPEN_POSITIONS: ClassVar[int] = 10
 
     def validate_envelope(self) -> None:
-        if self.risk_per_trade > self.ABSOLUTE_MAX_RISK_PER_TRADE:
+        if self.risk_per_trade > RiskLimits.ABSOLUTE_MAX_RISK_PER_TRADE:
             raise ValueError(
                 f"risk_per_trade {self.risk_per_trade} exceeds hard envelope "
-                f"{self.ABSOLUTE_MAX_RISK_PER_TRADE}"
+                f"{RiskLimits.ABSOLUTE_MAX_RISK_PER_TRADE}"
             )
-        if self.total_exposure > self.ABSOLUTE_MAX_TOTAL_EXPOSURE:
+        if self.total_exposure > RiskLimits.ABSOLUTE_MAX_TOTAL_EXPOSURE:
             raise ValueError("total_exposure exceeds hard envelope")
-        if self.max_open_positions > self.ABSOLUTE_MAX_OPEN_POSITIONS:
+        if self.max_open_positions > RiskLimits.ABSOLUTE_MAX_OPEN_POSITIONS:
             raise ValueError("max_open_positions exceeds hard envelope")
 
 
@@ -423,7 +427,7 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-@dataclass
+@dataclass(frozen=True)
 class Config:
     settings: Settings
     risk: RiskLimits

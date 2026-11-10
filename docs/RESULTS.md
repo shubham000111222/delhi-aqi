@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest immutable risk and runtime entry-boundary pass (working branch)
+
+- Risk-limit models and the outer config binding are frozen; hard envelope constants are class constants, cannot be configured, and are revalidated when constructing risk and order managers. Risk entry and order-manager/CCXT placement paths refuse detected runtime risk, mode or adapter changes; the order manager rejects reduce-only buys.
+- Full suite **887 passed, 2 skipped**; Ruff, mypy and `git diff --check` passed. Tests cover configuration spoofing, private replacement, adapter/mode changes and direct-entry bypass attempts.
+- This protects these normal Python execution paths, not against arbitrary code with process/database access, direct raw-exchange calls, in-flight requests or other adapters. Protective exits remain available, but venue reduce-only behavior remains unverified. Approval authentication and consumption remain unbuilt. The dashboard process must restart to load these changes.
+
 ## Latest kill-incident outbox pass (working branch)
 
 - Kill-switch and watchdog escalations commit a generation-bound incident outbox alongside the kill transition. Incident creation, ramp accounting, audit and removal of the matching pending record commit together. Pending records block entry and reset; kill-switch initialization retries their recording without changing the kill level. An incident-write failure no longer interrupts engine kill/flatten or watchdog continuation.

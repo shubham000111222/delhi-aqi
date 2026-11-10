@@ -10,12 +10,13 @@ covered is ccxt's own HTTP layer and the venue's real behaviour - the module say
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
 import pytest
 
-from tradebot.config import load_config
+from tradebot.config import Mode, load_config
 from tradebot.core.clock import Clock
 from tradebot.core.models import KillLevel, OrderRequest, OrderStatus, OrderType, Side
 from tradebot.core.store import Store
@@ -137,6 +138,7 @@ class FakeExchange:
 
 def build(exchange: FakeExchange) -> CcxtLiveAdapter:
     cfg = load_config()
+    cfg = replace(cfg, settings=cfg.settings.model_copy(update={"mode": Mode.LIVE}))
     market = MarketData(cfg.symbol_names(), timeframes=())
     return CcxtLiveAdapter(cfg, market, Clock(), exchange=exchange,
                            killswitch=KillSwitch(Store(":memory:"), kill_file=None))
@@ -379,6 +381,7 @@ class TestMarketData:
 
 def test_live_adapter_refuses_direct_entry_without_killswitch():
     cfg = load_config()
+    cfg = replace(cfg, settings=cfg.settings.model_copy(update={"mode": Mode.LIVE}))
     exchange = FakeExchange(symbols=cfg.symbol_names())
     adapter = CcxtLiveAdapter(cfg, MarketData(cfg.symbol_names(), timeframes=()), Clock(), exchange=exchange)
     asyncio.run(adapter.connect())
@@ -437,5 +440,19 @@ def test_live_adapter_fails_closed_if_kill_state_cannot_be_read(monkeypatch):
 
     monkeypatch.setattr(adapter.killswitch, "can_open_entries", broken)
     with pytest.raises(OSError, match="database unavailable"):
+        asyncio.run(adapter.place_order(request()))
+    assert not [call for call in exchange.calls if call[0] == "create_order"]
+
+
+@pytest.mark.parametrize("mutation", ["mode", "adapter_mode", "risk"])
+def test_live_adapter_refuses_direct_entries_after_runtime_changes(mutation):
+    adapter, exchange = adapter_with()
+    if mutation == "mode":
+        adapter.cfg.settings.mode = Mode.PAPER
+    elif mutation == "adapter_mode":
+        adapter.mode = Mode.PAPER
+    else:
+        adapter.cfg = replace(adapter.cfg, risk=adapter.cfg.risk.model_copy(update={"risk_per_trade": Decimal("0.02")}))
+    with pytest.raises(PermanentExchangeError, match="configuration"):
         asyncio.run(adapter.place_order(request()))
     assert not [call for call in exchange.calls if call[0] == "create_order"]

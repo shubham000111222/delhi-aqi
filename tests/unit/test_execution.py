@@ -185,10 +185,13 @@ class TestOrderManager:
     @pytest.mark.parametrize("lookup_fails", [True, False])
     async def test_ambiguous_order_is_not_blindly_retried(self, cfg, lookup_fails):
         clock = SimClock(NOW)
+        from dataclasses import replace
+
+        cfg = replace(cfg, settings=cfg.settings.model_copy(update={"mode": Mode.LIVE}))
         adapter = _adapter(cfg, _market(), clock)
-        manager, ks, store = self._manager(cfg, adapter, clock)
         # Simulate an adapter whose local lookup cannot prove venue absence.
         adapter.mode = Mode.LIVE
+        manager, ks, store = self._manager(cfg, adapter, clock)
         calls = []
 
         async def unknown_submit(request):
@@ -461,3 +464,58 @@ class TestSizing:
             limits=cfg.risk, rules=self._rules(),
         )
         assert size.qty == 0 and not size.ok
+
+
+@pytest.mark.parametrize("mutation", ["mode", "risk", "adapter_mode", "adapter"])
+async def test_order_boundary_refuses_runtime_risk_mode_or_adapter_changes(cfg, mutation):
+    from dataclasses import replace
+
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    if mutation == "mode":
+        cfg.settings.mode = Mode.LIVE
+    elif mutation == "risk":
+        manager.cfg = replace(cfg, risk=cfg.risk.model_copy(update={"risk_per_trade": D("0.02")}))
+    elif mutation == "adapter_mode":
+        adapter.mode = Mode.LIVE
+    else:
+        manager.adapter = _adapter(cfg, _market(), clock)
+    signal = Signal(id="immutable", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+async def test_entry_refused_when_initial_adapter_mode_does_not_match_config(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    adapter.mode = Mode.LIVE
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    signal = Signal(id="wrong-mode", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+async def test_reduce_only_buy_cannot_bypass_kill_check(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    switch.trigger(KillLevel.L2, trigger="test", reason="stop")
+    request = OrderRequest(symbol="BTC/USDT", side=Side.BUY, qty=D("0.001"),
+                           type=OrderType.MARKET, reduce_only=True)
+    assert await manager._place(request) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
