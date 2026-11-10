@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest venue/local diagnostic comparison pass (working branch)
+
+- `venue-observe --compare-local` now reads the existing mode-specific SQLite database in a read-only transaction, including committed WAL, and reports candidate differences between venue totals and local spot positions, and between observed and locally open orders. Missing, malformed or oversized local state fails rather than being treated as clean. This is diagnostic only; even matching observations explicitly remain unverified and unusable for reset.
+- Full suite **1085 passed, 2 skipped**; Ruff (including tools), mypy and `git diff --check` passed. Venue calls are mocked, not validated on a real exchange; source completeness, quote cash, pending fills, ownership, fees, protective orders and atomic cross-system state remain unverified. It does not alter orders, database records or holds; authenticated reset remains blocked. Dashboard process predates the change.
+
 ## Latest read-only venue observation pass (working branch)
 
 - Added `tradebot venue-observe --mode testnet` (also supports explicit live mode) to query CCXT total/free/used balances and the no-symbol open-orders endpoint directly, rather than relying on the in-process order cache. It checks explicit endpoint capabilities, validates response shapes/amounts, bounds results and timeouts, and performs no order mutation. Results explicitly mark completeness, atomicity and reset usability false.

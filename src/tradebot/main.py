@@ -315,6 +315,7 @@ def cmd_venue_observe(args: argparse.Namespace) -> int:
     """Read a venue account snapshot without trading, reconciliation or reset authority."""
     from .data.hub import MarketData
     from .execution.adapters.ccxt_live import CcxtLiveAdapter
+    from .execution.venue_comparison import compare_local
     from .execution.venue_observation import ObservationError, observe_account
 
     cfg = _config(args)
@@ -327,7 +328,14 @@ def cmd_venue_observe(args: argparse.Namespace) -> int:
         adapter = CcxtLiveAdapter(cfg, MarketData(cfg.symbol_names()), clock, testnet=cfg.mode is Mode.TESTNET)
         try:
             await adapter.connect()
-            return await observe_account(adapter.exchange, mode=cfg.mode.value, clock=clock)
+            observation = await observe_account(adapter.exchange, mode=cfg.mode.value, clock=clock)
+            if args.compare_local:
+                started = clock.now()
+                comparison = compare_local(observation, path=cfg.settings.db_path, quote=cfg.settings.quote_currency)
+                comparison["local_read_started_at"] = iso(started)
+                comparison["local_read_finished_at"] = iso(clock.now())
+                observation["local_comparison"] = comparison
+            return observation
         finally:
             await adapter.close()
 
@@ -980,7 +988,8 @@ def build_parser() -> argparse.ArgumentParser:
              "(the engine clock in a live session is real time, so minutes are real minutes)",
     )
 
-    sub.add_parser("venue-observe", help="read venue balances and open orders (not reset or safety evidence)")
+    venue_observe = sub.add_parser("venue-observe", help="read venue balances and open orders (not reset or safety evidence)")
+    venue_observe.add_argument("--compare-local", action="store_true", help="diagnose differences against local DB (read-only)")
 
     live_check = sub.add_parser("live-check", help="run every live-mode gate (never trades)")
     live_check.add_argument("--confirm", default=None)

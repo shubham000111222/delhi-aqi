@@ -314,3 +314,19 @@ command explicitly reports `orders_complete: false` and `usable_for_reset: false
 not compare against the local ledger, clear a hold, reset the kill switch, authorize trading,
 or replace an exchange-app review. `--mode live` would query the actual live account; do not
 run it against real money as a substitute for testnet validation and the remaining gates.
+
+To include a **diagnostic** comparison with the existing mode-specific local database:
+
+```powershell
+tradebot venue-observe --mode testnet --compare-local
+```
+
+This reads local positions and open orders in a read-only SQLite transaction (including
+committed WAL data) and reports differences against the separate venue observation. It
+requires an existing testnet database and prints sensitive order/account details. It sums
+spot positions by base asset, compares those quantities with reported total balances,
+flags unaccounted non-quote assets, and compares order identities and quantities. It does
+not verify quote cash, pending fills, external ownership, open-order pagination, fees, or
+venue-side protection. Timing differences and manual activity can cause discrepancies.
+Even an empty difference list is **not** verified reconciliation or permission to reset.
+No records are modified and no holds are cleared.

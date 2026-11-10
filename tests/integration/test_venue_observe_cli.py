@@ -49,3 +49,28 @@ def test_venue_observe_rejects_paper_before_connect(fast_cfg, capsys, monkeypatc
     assert cli.main(["venue-observe", "--config-dir", str(fast_cfg.settings.config_dir), "--mode", "paper"]) == 2
     assert "requires" in capsys.readouterr().err
     assert FAKE.calls == []
+
+
+def test_venue_observe_cli_compares_read_only_db(fast_cfg, tmp_path, capsys, monkeypatch):
+    import yaml
+
+    from tradebot.config import load_config
+    from tradebot.core.store import Store
+
+    cdir = fast_cfg.settings.config_dir
+    settings_file = cdir / "settings.yaml"
+    settings = yaml.safe_load(settings_file.read_text())
+    settings["data_dir"] = str(tmp_path / "data")
+    settings["report"]["dir"] = str(tmp_path / "reports")
+    settings_file.write_text(yaml.safe_dump(settings))
+    cfg = load_config(cdir, overrides={"mode": "testnet"}, environ={})
+    Store(cfg.settings.db_path).close()
+    FAKE.calls.clear()
+    monkeypatch.setattr(CcxtLiveAdapter, "connect", nothing)
+    monkeypatch.setattr(CcxtLiveAdapter, "close", close)
+    assert cli.main(["venue-observe", "--config-dir", str(cdir), "--mode", "testnet", "--compare-local"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    comparison = result["local_comparison"]
+    assert comparison["position_count"] == 0
+    assert comparison["comparison_verified"] is False and comparison["usable_for_reset"] is False
+    assert FAKE.calls == ["balance", "all-orders", "close"]
