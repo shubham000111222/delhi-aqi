@@ -227,9 +227,10 @@ def build_ops(
     def resume(reason: str) -> str:
         from ..core.models import KillLevel
 
-        if engine.killswitch.level is not KillLevel.L1:
+        reviewed = engine.killswitch.state
+        if reviewed.get("level") != KillLevel.L1.value:
             raise PermissionError("remote resume may only clear L1; L2/L3 require local review")
-        engine.killswitch.reset(reason=reason, actor="telegram")
+        engine.killswitch.reset(reason=reason, actor="telegram", expected_state=reviewed)
         return f"resumed to L0 ({reason})"
 
     def flatten(reason: str) -> str:

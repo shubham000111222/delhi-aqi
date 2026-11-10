@@ -384,7 +384,10 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
         if action == "pause":
             await state.engine.pause(reason or "dashboard pause")
         elif action == "resume":
-            await state.engine.resume(reason or "dashboard resume")
+            try:
+                await state.engine.resume(reason or "dashboard resume")
+            except PermissionError as exc:
+                raise HTTPException(409, str(exc)) from exc
         elif action == "flatten":
             # Block new entries before awaiting potentially slow order cancellation/closing.
             await state.engine.pause(reason or "dashboard flatten")

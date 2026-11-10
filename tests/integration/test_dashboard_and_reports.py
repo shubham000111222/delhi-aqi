@@ -266,3 +266,21 @@ def test_hosted_demo_refuses_non_paper_mode(fast_cfg):
     fast_cfg.settings.mode = Mode.LIVE
     with pytest.raises(RuntimeError, match="requires paper"), TestClient(create_app(fast_cfg, run_bot=True)):
         pass
+
+
+def test_dashboard_reports_refused_resume_as_conflict(fast_cfg):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    engine = SimpleNamespace(
+        store=Store(":memory:"), running=False,
+        resume=AsyncMock(side_effect=PermissionError("cannot reset while KILL file is present")),
+    )
+    fast_cfg = replace(fast_cfg, secrets=replace(fast_cfg.secrets, dashboard_password="test-password"))
+    with TestClient(create_app(fast_cfg, engine=engine, run_bot=False)) as c:
+        c.app.state.dashboard.controls_enabled = True
+        response = c.post("/api/control/resume", headers={"x-dashboard-token": "test-password"})
+        assert response.status_code == 409
+        assert "KILL file" in response.json()["detail"]
+    engine.store.close()

@@ -47,3 +47,25 @@ async def test_remote_resume_does_not_clear_l2_and_lockdown_reaches_l3(fast_cfg)
         assert engine.store.count_events("telegram_action_completed") == 1
     finally:
         engine.close()
+
+
+async def test_remote_resume_cannot_clear_escalation_after_review(fast_cfg, monkeypatch):
+    clock = SimClock(datetime(2024, 1, 1, tzinfo=UTC))
+    engine = await Engine.build(fast_cfg, clock=clock, store=Store(":memory:"))
+    router = CommandRouter(build_ops(engine=engine, store=engine.store, clock=clock), frozenset({1}))
+    try:
+        switch = engine.killswitch
+        switch.trigger(KillLevel.L1, trigger="manual", reason="pause")
+        original = switch.reset
+
+        def race(*args, **kwargs):
+            switch.trigger(KillLevel.L3, trigger="test", reason="concurrent lockdown")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(switch, "reset", race)
+        reply = router.handle(1, "/resume")
+        assert not reply.ok
+        assert switch.level is KillLevel.L3
+        assert engine.store.count_events("manual_reset_refused") == 1
+    finally:
+        engine.close()

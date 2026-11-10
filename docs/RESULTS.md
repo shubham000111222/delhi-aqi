@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest manual reset-boundary pass (working branch)
+
+- Telegram's L1-only reset now uses the exact reviewed kill-state generation, so a concurrent L2/L3 or replacement pause cannot be cleared by the stale request. Manual reset refuses a present KILL file, missing or corrupt L3 cooldown, and corrupt flapping holds; refusals are audited. Dashboard reset refusals return a conflict rather than a server error.
+- Race, corrupt-state and control-path tests pass; the complete suite passed **809 tests, with 2 skipped**, plus Ruff, mypy and `git diff --check`.
+- Reset caller names are not authenticated by the kill switch itself; direct store mutations bypass it. The KILL file and SQLite update cannot be atomically coordinated, and the running dashboard needs a restart to pick up changed code. This is not independent venue reconciliation or evidence that live operation is safe.
+
 ## Latest autonomy audit-foundation pass (working branch)
 
 - Approval requests capture independent finite JSON snapshots and durable request events. Decision transitions and their audit events commit or roll back together; failed API decisions are recorded as refusals. Nonempty durable storage, clock ordering, expiration and a self-approval check are enforced on these record paths. Ledger rows and corresponding audit events are also transactional.

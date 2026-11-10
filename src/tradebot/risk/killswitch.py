@@ -77,12 +77,17 @@ class KillSwitch:
         return self.level in (KillLevel.L2, KillLevel.L3)
 
     def blocks_reset(self) -> tuple[bool, str]:
-        if self.level is not KillLevel.L3:
+        state = self.state
+        if state.get("level") != KillLevel.L3.value:
             return False, ""
-        until = self.cooldown_until
-        if until is None:
-            return False, ""
-        return until > self.now(), f"lockdown cooldown until {iso(until)}"
+        raw = state.get("cooldown_until")
+        try:
+            if not isinstance(raw, str) or not raw:
+                raise ValueError("missing or invalid cooldown")
+            until = parse_iso(raw)
+            return until > self.now(), f"lockdown cooldown until {iso(until)}"
+        except (TypeError, ValueError, OverflowError):
+            return True, "invalid or missing lockdown cooldown"
 
     def flapping_hold_active(self) -> bool:
         """A durable pause survives engine restarts and applies to every L0 reset path."""
@@ -91,7 +96,7 @@ class KillSwitch:
             return False
         try:
             return self.now() <= parse_iso(hold["until"])
-        except (KeyError, TypeError, ValueError):
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
             # Corrupt safety state must never quietly authorize trading.
             return True
 
@@ -179,17 +184,43 @@ class KillSwitch:
         log.warning('{"event":"kill_switch_auto_resume","reason":"%s","actor":"%s"}', reason, actor)
         return True
 
-    def reset(self, *, reason: str, actor: str = "operator", level: KillLevel = KillLevel.L0) -> None:
-        """Manual reset. L3 requires a written reason and the cooldown to have expired."""
+    def reset(
+        self, *, reason: str, actor: str = "operator", level: KillLevel = KillLevel.L0,
+        expected_state: dict[str, Any] | None = None,
+    ) -> None:
+        """Reset against the reviewed state; caller identity is not authenticated here.
+
+        Remote callers must supply their reviewed snapshot. Filesystem stop requests can
+        still race this check; entry placement independently checks the KILL file.
+        """
+        def refuse(why: str) -> None:
+            self.store.log_event(
+                "manual_reset_refused", {"actor": actor, "reason": why},
+                level="WARN", actor=actor, ts=self.now(),
+            )
+            raise PermissionError(why)
+
+        if self.check_kill_file():
+            refuse("cannot reset while KILL file is present")
         current = self.state
+        if expected_state is not None and current != expected_state:
+            refuse("kill state changed; recheck before reset")
         if level is KillLevel.L0 and self.flapping_hold_active():
-            raise PermissionError("cannot resume while a critical component is flapping")
+            refuse("cannot resume while a critical component is flapping")
         if current.get("level") == KillLevel.L3.value:
-            blocked, why = self.blocks_reset()
+            try:
+                raw = current.get("cooldown_until")
+                if not isinstance(raw, str) or not raw:
+                    raise ValueError("missing or invalid cooldown")
+                until = parse_iso(raw)
+                blocked = until > self.now()
+            except (TypeError, ValueError, OverflowError):
+                refuse("cannot reset L3: invalid or missing cooldown")
+                return  # unreachable; helps type checkers understand control flow
             if blocked:
-                raise PermissionError(f"cannot reset L3 yet: {why}")
+                refuse(f"cannot reset L3 yet: lockdown cooldown until {iso(until)}")
             if not reason.strip():
-                raise PermissionError("L3 reset requires a written reason")
+                refuse("L3 reset requires a written reason")
         changed = self.store.set_kill_state(
             level.value,
             expected_state=current,
@@ -200,7 +231,7 @@ class KillSwitch:
             ts=self.now(),
         )
         if not changed:
-            raise PermissionError("kill state or flapping hold changed; recheck before reset")
+            refuse("kill state or flapping hold changed; recheck before reset")
         self.store.kv_set("last_reset", {"ts": iso(self.now()), "reason": reason, "actor": actor})
         log.warning('{"event":"kill_switch_reset","to":"%s","actor":"%s"}', level.value, actor)
 

@@ -809,7 +809,7 @@ class Store:
                         hold = json.loads(hold_row["value"])
                         if now <= parse_iso(hold["until"]):
                             return False
-                    except (KeyError, TypeError, ValueError):
+                    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
                         return False
             event = conn.execute(
                 """INSERT INTO kill_events(ts,level,previous,trigger,reason,actor,cooldown_until)

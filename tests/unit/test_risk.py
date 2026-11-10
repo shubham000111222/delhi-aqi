@@ -643,3 +643,67 @@ class TestAutoResume:
         clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds + 1)
         await engine._maybe_auto_resume(all_stale=False, error_rate=0, disk_used=0)
         assert engine.killswitch.level is KillLevel.L0
+
+
+def test_manual_reset_rejects_kill_file_and_audits(tmp_path):
+    store = Store(":memory:")
+    kill_file = tmp_path / "KILL"
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=kill_file)
+    switch.trigger(KillLevel.L1, trigger="manual", reason="pause")
+    kill_file.write_text("emergency")
+    with pytest.raises(PermissionError, match="KILL file"):
+        switch.reset(reason="reviewed")
+    assert switch.level is KillLevel.L2
+    assert store.count_events("manual_reset_refused") == 1
+    kill_file.unlink()
+    switch.reset(reason="reviewed")
+    assert switch.level is KillLevel.L0
+    store.close()
+
+
+@pytest.mark.parametrize("cooldown", [None, "invalid", 123])
+def test_manual_reset_fails_closed_on_bad_l3_cooldown(cooldown):
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch.trigger(KillLevel.L3, trigger="test", reason="lockdown")
+    state = switch.state
+    state["cooldown_until"] = cooldown
+    store.kv_set("kill_state", state)
+    with pytest.raises(PermissionError, match="cooldown"):
+        switch.reset(reason="reviewed")
+    assert switch.level is KillLevel.L3
+    assert store.count_events("manual_reset_refused") == 1
+    store.close()
+
+
+def test_manual_reset_cannot_clear_concurrent_escalation(tmp_path, monkeypatch):
+    one, two = Store(tmp_path / "state.db"), Store(tmp_path / "state.db")
+    switch = KillSwitch(one, clock=SimClock(NOW), kill_file=None)
+    other = KillSwitch(two, clock=SimClock(NOW), kill_file=None)
+    switch.trigger(KillLevel.L1, trigger="manual", reason="pause")
+    original = one.set_kill_state
+
+    def race(*args, **kwargs):
+        other.trigger(KillLevel.L3, trigger="test", reason="concurrent lockdown")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(one, "set_kill_state", race)
+    with pytest.raises(PermissionError, match="changed"):
+        switch.reset(reason="reviewed")
+    assert other.level is KillLevel.L3
+    assert one.count_events("manual_reset_refused") == 1
+    one.close()
+    two.close()
+
+
+@pytest.mark.parametrize("hold", [{"until": 123}, [], {"until": "invalid"}])
+def test_corrupt_flapping_hold_blocks_reset(hold):
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch.trigger(KillLevel.L1, trigger="manual", reason="pause")
+    store.kv_set("health_flapping_hold", hold)
+    with pytest.raises(PermissionError, match="flapping"):
+        switch.reset(reason="reviewed")
+    assert switch.level is KillLevel.L1
+    assert not store.set_kill_state("L0", expected_state=switch.state, require_no_flapping_hold=True, ts=NOW)
+    store.close()
