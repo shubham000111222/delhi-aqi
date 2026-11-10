@@ -335,12 +335,19 @@ class Store:
         detail: str = "",
         approved_by: str | None = None,
         outcome: str = "ok",
+        payload: dict[str, Any],
     ) -> None:
-        with self._lock:
-            self._conn.execute(
+        """Commit the ledger row and its event together, or commit neither."""
+        with self.transaction() as conn:
+            conn.execute(
                 "INSERT INTO autonomy (ts, actor, action, level, detail, approved_by, outcome)"
                 " VALUES (?,?,?,?,?,?,?)",
                 (ts, actor, action, int(level), detail, approved_by, outcome),
+            )
+            conn.execute(
+                "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                (ts, "WARN" if outcome != "ok" else "INFO", "autonomy", actor,
+                 json.dumps(payload, default=str)),
             )
 
     def autonomy_actions(self, limit: int = 100, actor: str | None = None) -> list[dict[str, Any]]:
@@ -369,38 +376,56 @@ class Store:
         return utc(value).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
     def save_approval(self, record: dict[str, Any]) -> None:
-        with self._lock:
-            self._conn.execute(
+        """Create a request and its audit event atomically; neither authorizes execution."""
+        created = self._approval_timestamp(parse_iso(record["created_at"]))
+        expires = self._approval_timestamp(parse_iso(record["expires_at"]))
+        with self.transaction() as conn:
+            conn.execute(
                 "INSERT INTO approvals (id, ts, actor, action, detail, numbers, state, expires_at,"
                 " decided_at, decided_by) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (
-                    record["id"],
-                    self._approval_timestamp(parse_iso(record["created_at"])),
-                    record["actor"],
-                    record["action"],
-                    record.get("detail", ""),
-                    json.dumps(record.get("numbers") or {}),
-                    record["state"],
-                    self._approval_timestamp(parse_iso(record["expires_at"])),
-                    record.get("decided_at"),
-                    record.get("decided_by"),
-                ),
+                (record["id"], created, record["actor"], record["action"], record.get("detail", ""),
+                 json.dumps(record.get("numbers") or {}, sort_keys=True, allow_nan=False),
+                 record["state"], expires, record.get("decided_at"), record.get("decided_by")),
+            )
+            conn.execute(
+                "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                (created, "INFO", "approval_requested", record["actor"], json.dumps({
+                    "id": record["id"], "action": record["action"], "numbers": record["numbers"],
+                    "expires_at": expires, "authentication": "not_verified",
+                }, sort_keys=True, allow_nan=False)),
             )
 
     def transition_approval(
         self, request_id: str, *, state: str, now: datetime, by: str | None = None,
         detail: str | None = None,
     ) -> bool:
-        """Atomically decide a pending request once; expired requests cannot be approved."""
+        """Atomically decide once and record it. Identity is not authenticated."""
         if state not in {"approved", "rejected", "expired"}:
             raise ValueError("invalid approval transition")
+        by = by.strip() if by else None
+        if state != "expired" and not by:
+            raise ValueError("decision actor is required")
         comparison = "<=" if state == "expired" else ">"
-        cursor = self._exec(
-            "UPDATE approvals SET state=?, decided_at=?, decided_by=?, detail=COALESCE(?, detail) "
-            f"WHERE id=? AND state='pending' AND expires_at {comparison} ?",
-            (state, self._approval_timestamp(now), by, detail, request_id, self._approval_timestamp(now)),
-        )
-        return cursor.rowcount == 1
+        now_str = self._approval_timestamp(now)
+        with self.transaction() as conn:
+            row = conn.execute("SELECT actor,action FROM approvals WHERE id=?", (request_id,)).fetchone()
+            if row is None or (state == "approved" and row["actor"] == by):
+                return False
+            cursor = conn.execute(
+                "UPDATE approvals SET state=?, decided_at=?, decided_by=?, detail=COALESCE(?, detail) "
+                f"WHERE id=? AND state='pending' AND ts<=? AND expires_at {comparison} ?",
+                (state, now_str, by, detail, request_id, now_str, now_str),
+            )
+            if cursor.rowcount != 1:
+                return False
+            conn.execute(
+                "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                (now_str, "WARN", f"approval_{state}", by or "autonomy", json.dumps({
+                    "id": request_id, "action": row["action"], "requester": row["actor"],
+                    "decided_by": by, "authentication": "not_verified",
+                })),
+            )
+            return True
 
     def approval(self, request_id: str) -> dict[str, Any] | None:
         rows = self._query("SELECT * FROM approvals WHERE id=?", (request_id,))

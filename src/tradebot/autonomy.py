@@ -28,6 +28,7 @@ unfinished. The approvals store is likewise not an authenticated operator interf
 
 from __future__ import annotations
 
+import json
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -294,13 +295,6 @@ class AutonomyLedger:
 
     def _write(self, entry: AutonomyAction) -> None:
         payload = entry.as_dict()
-        log.info(
-            '{"event":"autonomy","actor":"%s","action":"%s","level":%d,"outcome":"%s"}',
-            entry.actor,
-            entry.action,
-            int(entry.level),
-            entry.outcome,
-        )
         if self.store is None:
             return
         self.store.add_autonomy(
@@ -311,12 +305,14 @@ class AutonomyLedger:
             detail=entry.detail,
             approved_by=entry.approved_by,
             outcome=entry.outcome,
+            payload=payload,
         )
-        self.store.log_event(
-            "autonomy",
-            payload,
-            level="WARN" if entry.outcome != "ok" else "INFO",
-            actor=entry.actor,
+        log.info(
+            '{"event":"autonomy","actor":"%s","action":"%s","level":%d,"outcome":"%s"}',
+            entry.actor,
+            entry.action,
+            int(entry.level),
+            entry.outcome,
         )
 
     def _audit_refusal(self, actor: str, action: str, reason: str) -> None:
@@ -385,18 +381,65 @@ class Approvals:
         *,
         ttl: timedelta | None = None,
     ) -> ApprovalRequest:
+        try:
+            return self._request(actor, action, numbers, detail, ttl=ttl)
+        except (ValueError, ForbiddenAction) as exc:
+            if self.store is not None:
+                self.store.log_event(
+                    "approval_request_refused",
+                    {"actor": actor, "action": action, "error": type(exc).__name__,
+                     "authentication": "not_verified"},
+                    level="WARN", actor="autonomy", ts=self.now(),
+                )
+            raise
+
+    def _request(
+        self,
+        actor: str,
+        action: str,
+        numbers: dict[str, Any],
+        detail: str = "",
+        *,
+        ttl: timedelta | None = None,
+    ) -> ApprovalRequest:
+        if not actor.strip() or not action.strip():
+            raise ValueError("request actor and action are required")
+        actor, action = actor.strip(), action.strip()
         if action in FORBIDDEN_ACTIONS:
             raise ForbiddenAction(action)
         if (ttl if ttl is not None else self.default_ttl) <= timedelta(0):
             raise ValueError("approval TTL must be positive")
-        if not numbers:
-            raise ValueError("an approval request without numbers is a request to trust a mood")
+        if not isinstance(numbers, dict) or not numbers:
+            raise ValueError("an approval request needs a nonempty numbers mapping")
+        if self.store is None:
+            raise RuntimeError("approval requests require durable storage")
+
+        def check_keys(value: Any) -> None:
+            if isinstance(value, dict):
+                if any(not isinstance(key, str) for key in value):
+                    raise ValueError("approval data keys must be strings")
+                for item in value.values():
+                    check_keys(item)
+            elif isinstance(value, list):
+                for item in value:
+                    check_keys(item)
+
+        check_keys(numbers)
+        # Capture an independent JSON snapshot; later mutations of the caller's dict
+        # cannot silently change what the pending request means. Reject non-finite values.
+        try:
+            serialized = json.dumps(numbers, sort_keys=True, allow_nan=False)
+            snapshot = json.loads(serialized)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("approval numbers must be finite JSON data") from exc
+        if len(serialized.encode("utf-8")) > 16_384:
+            raise ValueError("approval numbers exceed 16 KiB")
         now = self.now()
         req = ApprovalRequest(
             id=f"ap-{secrets.token_hex(16)}",
             actor=actor,
             action=action,
-            numbers=numbers,
+            numbers=snapshot,
             detail=detail,
             created_at=now,
             expires_at=now + (ttl or self.default_ttl),
@@ -407,7 +450,15 @@ class Approvals:
         return req
 
     def approve(self, request_id: str, *, by: str) -> ApprovalRequest:
-        if not by.strip():
+        try:
+            return self._approve(request_id, by=by)
+        except (KeyError, ValueError, ForbiddenAction) as exc:
+            self._audit_decision_refusal(request_id, by=by, decision="approve", error=type(exc).__name__)
+            raise
+
+    def _approve(self, request_id: str, *, by: str) -> ApprovalRequest:
+        by = by.strip()
+        if not by:
             raise ValueError("approver is required")
         req = self._load(request_id)
         if req.actor == by:
@@ -428,6 +479,14 @@ class Approvals:
         return req
 
     def reject(self, request_id: str, *, by: str, reason: str = "") -> ApprovalRequest:
+        try:
+            return self._reject(request_id, by=by, reason=reason)
+        except (KeyError, ValueError, ForbiddenAction) as exc:
+            self._audit_decision_refusal(request_id, by=by, decision="reject", error=type(exc).__name__)
+            raise
+
+    def _reject(self, request_id: str, *, by: str, reason: str = "") -> ApprovalRequest:
+        by = by.strip()
         req = self._load(request_id)
         if req.state != "pending":
             raise ValueError(f"approval {request_id} is already {req.state}")
@@ -472,17 +531,18 @@ class Approvals:
         return ApprovalRequest(**row)
 
     def _expire(self, req: ApprovalRequest) -> bool:
-        if self.store is not None and self.store.transition_approval(
+        return bool(self.store is not None and self.store.transition_approval(
             req.id, state="expired", now=self.now()
-        ):
+        ))
+
+    def _audit_decision_refusal(self, request_id: str, *, by: str, decision: str, error: str) -> None:
+        if self.store is not None:
             self.store.log_event(
-                "approval_expired",
-                {"id": req.id, "action": req.action, "actor": req.actor},
-                level="WARN",
-                actor="autonomy",
+                "approval_decision_refused",
+                {"id": request_id, "claimed_actor": by, "decision": decision, "error": error,
+                 "authentication": "not_verified"},
+                level="WARN", actor="autonomy", ts=self.now(),
             )
-            return True
-        return False
 
     def _refuse_self_approval(self, req: ApprovalRequest, by: str) -> None:
         if self.store is not None:

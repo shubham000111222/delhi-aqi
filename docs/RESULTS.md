@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest autonomy audit-foundation pass (working branch)
+
+- Approval requests capture independent finite JSON snapshots and durable request events. Decision transitions and their audit events commit or roll back together; failed API decisions are recorded as refusals. Nonempty durable storage, clock ordering, expiration and a self-approval check are enforced on these record paths. Ledger rows and corresponding audit events are also transactional.
+- Tests inject database audit failures and race independent SQLite connections; the complete suite passed **799 tests, with 2 skipped**. Ruff, mypy and `git diff --check` passed.
+- These are **unverified records only**. Claimed identities are not authenticated, no action-bound approval consumer or global mutation enforcement is wired, and old approval decisions may lack the newly added events. No approved record authorizes a trade. Audit attempts at all direct store or adapter boundaries are not yet guaranteed.
+
 ## Latest L1 recovery-boundary pass (working branch)
 
 - Automatic L1 resume is now restricted at the kill-switch method to an allowed pause cause and the exact evaluated persisted transition. Each new transition carries a unique event generation, so recovery from an old L1 cannot clear a newer identical L1 at the same timestamp. A KILL file blocks and escalates recovery, and refused calls are audited.

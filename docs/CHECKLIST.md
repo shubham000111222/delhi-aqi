@@ -16,7 +16,7 @@ depends on.
 For the full Windows installation, implementation and validation procedure, see
 [`WINDOWS_LOCAL_LIVE_READINESS.md`](WINDOWS_LOCAL_LIVE_READINESS.md).
 
-**Last updated:** 2026-11-04 · **Suite:** 786 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-04 · **Suite:** 799 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -164,7 +164,7 @@ Tracked in detail in [`BUILD_PLAN_20_21.md`](BUILD_PLAN_20_21.md); this is the r
 - [ ] **Watchdog v2, the part a host must do** — `ProcessSpawner` starts a child of the
       watchdog, so surviving a reboot needs systemd/Docker. Until then, supervision dies with
       its parent and says so.
-- [ ] **Autonomy ledger + approvals + forbidden-action tests** (§21.7): initial audit table and approval records exist on the working branch; integrate every decision path, authenticate and atomically consume action-bound approvals (approval decisions are atomic, but no authorization consumer is wired), and enforce/test actual mutation boundaries before treating this as complete. The refusal helpers alone do not enforce policy. The kill-switch auto-resume boundary now restricts eligible causes and binds recovery to the evaluated transition; the complete independent post-heal checklist and authorization of manual reset remain open. The order manager now re-checks the persisted kill level immediately before each non-reduce-only placement and refuses unknown-outcome retries, with boundary tests. This is not global enforcement: direct adapter calls, in-flight requests, and independently proving reduce-only venue behavior remain unresolved.
+- [ ] **Autonomy ledger + approvals + forbidden-action tests** (§21.7): initial audit table and approval records exist on the working branch. Request snapshots, decision events and autonomy ledger events now have transactional audit coverage; approval decisions remain unverified, and historical decisions may lack those events. Integrate every decision path, authenticate and atomically consume action-bound approvals (no authorization consumer is wired), and enforce/test actual mutation boundaries before treating this as complete. The refusal helpers alone do not enforce policy. The kill-switch auto-resume boundary now restricts eligible causes and binds recovery to the evaluated transition; the complete independent post-heal checklist and authorization of manual reset remain open. The order manager now re-checks the persisted kill level immediately before each non-reduce-only placement and refuses unknown-outcome retries, with boundary tests. This is not global enforcement: direct adapter calls, in-flight requests, and independently proving reduce-only venue behavior remain unresolved.
 - [x] **Flapping**: critical flapping holds L1, persists its deadline and recent health transitions across restart, and blocks automatic or manual L0 reset until the window settles.
 - [ ] **Market graph** (§21.2) — persistent asset/strategy/source relationships, lead-lag,
       beta and contagion cuts; test against recorded data.
