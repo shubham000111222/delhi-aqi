@@ -205,8 +205,9 @@ class CcxtLiveAdapter(ExchangeAdapter):
                 self._refuse_order(request, "kill switch mode does not match adapter mode")
             if self.killswitch is None or not self.killswitch.can_open_entries():
                 self._refuse_order(request, "kill switch blocks entry")
-            if self.killswitch.store.strategy_disabled(request.strategy):
-                self._refuse_order(request, "strategy is durably disabled")
+            if (self.killswitch.store.strategy_disabled(request.strategy)
+                    or self.killswitch.store.strategy_fault_paused(request.strategy, now=self.clock.now())):
+                self._refuse_order(request, "strategy is durably disabled or fault-paused")
         rules = self.get_market_rules(request.symbol)
         qty = round_qty(request.qty, rules.lot_step)
         price = round_price(request.price, rules.tick_size, request.side.value) if request.price else None

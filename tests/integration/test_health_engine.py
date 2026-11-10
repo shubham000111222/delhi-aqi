@@ -347,3 +347,34 @@ async def test_disable_audit_failure_rolls_back_and_pauses_entries(engine):
     assert not [row for row in engine.store.autonomy_actions() if row["action"] == "disable_strategy"]
     assert engine.killswitch.level is KillLevel.L1
     assert engine._strategy_blocked("S1_ema_trend")
+
+
+async def test_fault_budget_survives_restart_before_disable(fast_cfg, tmp_path):
+    name = "S1_ema_trend"
+    path = tmp_path / "fault-budget.db"
+    fast_cfg.ensure_dirs()
+    engine = await Engine.build(fast_cfg, clock=SimClock(START), store=Store(path))
+    for _ in range(3):
+        engine._handle_strategy_fault(name, reason="fault")
+    engine.close()
+    restarted = await Engine.build(fast_cfg, clock=SimClock(START + timedelta(minutes=5)), store=Store(path))
+    try:
+        assert restarted.strategy_faults.used(name, now=restarted.clock.now()) == 3
+        assert restarted._strategy_blocked(name)
+        restarted._handle_strategy_fault(name, reason="fourth fault")
+        assert restarted.store.strategy_disabled(name)
+        assert restarted.store.count_events("strategy_disabled") == 1
+    finally:
+        restarted.close()
+
+
+async def test_fault_pause_audit_failure_rolls_back_and_attempts_l1(engine):
+    import sqlite3
+
+    engine.store._exec("CREATE TRIGGER fail_pause BEFORE INSERT ON events WHEN NEW.kind='strategy_paused' "
+                       "BEGIN SELECT RAISE(ABORT, 'pause audit failed'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="pause audit failed"):
+        engine._handle_strategy_fault("S1_ema_trend", reason="fault")
+    assert not engine.store.strategy_fault_attempts("S1_ema_trend", now=START)
+    assert not [row for row in engine.store.autonomy_actions() if row["action"] == "pause_strategy"]
+    assert engine.killswitch.level is KillLevel.L1

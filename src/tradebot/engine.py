@@ -197,6 +197,8 @@ class Engine:
         self.ramp = RampController(config, store)
         self._load_state()
         self._disabled_strategies.update(self.store.disabled_strategies())
+        for name in config.enabled_strategies:
+            self.strategy_faults.attempts[name].extend(self.store.strategy_fault_attempts(name, now=self.clock.now()))
         # Close the crash window between persisting a sixth transition and setting L1.
         self._hold_on_flapping(now=self.clock.now())
 
@@ -1023,7 +1025,8 @@ class Engine:
     # strategy pausing / decay
     # ------------------------------------------------------------------
     def _strategy_blocked(self, name: str) -> bool:
-        if name in self._disabled_strategies or self.store.strategy_disabled(name):
+        if (name in self._disabled_strategies or self.store.strategy_disabled(name)
+                or self.store.strategy_fault_paused(name, now=self.clock.now())):
             return True
         paused = self.store.kv_get("paused_strategies", {}) or {}
         info = paused.get(name)
@@ -1044,16 +1047,17 @@ class Engine:
         the strategy.
         """
         now = self.clock.now()
-        if self.strategy_faults.allow(name, now=now):
-            self.strategy_faults.record(name, now=now)
-            self._pause_strategy(name, hours=1, reason=reason)
-            return
-        self._disabled_strategies[name] = reason
         try:
-            self.store.disable_strategy(name, reason, faults=self.strategy_faults.used(name, now=now), ts=now)
-        except Exception:  # noqa: BLE001 - protect entries when the durable disable cannot be written
+            disabled = self.store.record_strategy_fault(name, reason, now=now)
+            # The in-memory budget is a dashboard view; SQLite is the authority.
+            self.strategy_faults.attempts[name].clear()
+            self.strategy_faults.attempts[name].extend(self.store.strategy_fault_attempts(name, now=now))
+            if disabled:
+                self._disabled_strategies[name] = reason
+        except Exception:  # noqa: BLE001 - protect entries when fault tracking cannot be persisted
+            self._disabled_strategies[name] = reason
             self.killswitch.trigger(KillLevel.L1, trigger="strategy_disable_failed",
-                                    reason=f"could not persist disable for {name}", actor="supervisor")
+                                    reason=f"could not persist strategy fault for {name}", actor="supervisor")
             raise
 
     def _pause_strategy(self, name: str, *, hours: int, reason: str) -> None:

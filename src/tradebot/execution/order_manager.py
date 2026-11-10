@@ -232,10 +232,13 @@ class OrderManager:
                     level="CRIT", actor="execution", ts=self.clock.now(),
                 )
                 return None
-            if not request.reduce_only and self.store.strategy_disabled(request.strategy):
+            if not request.reduce_only and (
+                self.store.strategy_disabled(request.strategy)
+                or self.store.strategy_fault_paused(request.strategy, now=self.clock.now())
+            ):
                 self.store.log_event(
                     "autonomy_refused", {"action": "re_enable_strategy", "strategy": request.strategy,
-                                         "reason": "strategy is durably disabled",
+                                         "reason": "strategy is durably disabled or fault-paused",
                                          "client_order_id": request.client_order_id},
                     level="CRIT", actor="execution", ts=self.clock.now(),
                 )

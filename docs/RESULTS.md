@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest durable strategy fault-budget pass (working branch)
+
+- The first three strategy faults now atomically persist a one-hour entry pause and autonomy/event records; the fourth within the window atomically latches the disable. Multiple processes share the same serialized budget, backward clock movement does not discard future-dated faults, and engine restarts restore the dashboard view. The order-manager and CCXT entry boundaries recheck the durable pause. Audit-write failures roll back the fault transaction and attempt L1.
+- Full suite **933 passed, 2 skipped**; Ruff (including tools), mypy and `git diff --check` passed. Older process-local fault budgets and historical disables are not reconstructed; raw SQL/exchange access, caller-misrepresented strategy names, in-flight orders and total database failure remain outside the boundary. Fault attempt records are retained; retention policy remains open.
+
 ## Latest durable strategy-disable pass (working branch)
 
 - A repeated-fault strategy disable is now a durable latch committed together with an autonomy record and event. Engine restart restores it; order manager and CCXT entry paths reject that strategy, while protective exits remain possible. If persisting the disable fails, the engine attempts L1 and retains its in-process block.

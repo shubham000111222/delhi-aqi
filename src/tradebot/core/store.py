@@ -12,7 +12,7 @@ import sqlite3
 import threading
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -193,6 +193,13 @@ CREATE TABLE IF NOT EXISTS autonomy (
     outcome TEXT NOT NULL DEFAULT 'ok'
 );
 
+CREATE TABLE IF NOT EXISTS strategy_fault_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy TEXT NOT NULL,
+    ts TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_fault_attempts ON strategy_fault_attempts(strategy,ts);
+
 CREATE TABLE IF NOT EXISTS disabled_strategies (
     strategy TEXT PRIMARY KEY,
     ts TEXT NOT NULL,
@@ -338,29 +345,75 @@ class Store:
             for r in rows
         ]
 
+    @staticmethod
+    def _disable_strategy_tx(conn: sqlite3.Connection, name: str, reason: str,
+                             faults: int, timestamp: str) -> bool:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO disabled_strategies(strategy,ts,reason) VALUES(?,?,?)",
+            (name, timestamp, reason),
+        )
+        if not cursor.rowcount:
+            return False
+        conn.execute(
+            "INSERT INTO autonomy(ts,actor,action,level,detail,outcome) VALUES(?,?,?,?,?,?)",
+            (timestamp, "supervisor", "disable_strategy", 3, reason, "ok"),
+        )
+        conn.execute(
+            "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+            (timestamp, "CRIT", "strategy_disabled", "supervisor", json.dumps({
+                "strategy": name, "reason": reason, "faults_last_hour": faults,
+            })),
+        )
+        return True
+
     def disable_strategy(self, name: str, reason: str, *, faults: int, ts: datetime) -> bool:
         """Latch a strategy disabled, with its autonomy record and event in one transaction."""
-        if not name or not isinstance(name, str):
+        if not isinstance(name, str) or not name:
             raise ValueError("strategy name is required")
-        timestamp = iso(ts)
         with self.transaction() as conn:
-            cursor = conn.execute(
-                "INSERT OR IGNORE INTO disabled_strategies(strategy,ts,reason) VALUES(?,?,?)",
-                (name, timestamp, reason),
-            )
-            if not cursor.rowcount:
-                return False
-            conn.execute(
-                "INSERT INTO autonomy(ts,actor,action,level,detail,outcome) VALUES(?,?,?,?,?,?)",
-                (timestamp, "supervisor", "disable_strategy", 3, reason, "ok"),
-            )
-            conn.execute(
-                "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
-                (timestamp, "CRIT", "strategy_disabled", "supervisor", json.dumps({
-                    "strategy": name, "reason": reason, "faults_last_hour": faults,
-                })),
-            )
-        return True
+            return self._disable_strategy_tx(conn, name, reason, faults, iso(ts))
+
+    @staticmethod
+    def _fault_timestamp(ts: datetime) -> str:
+        return utc(ts).isoformat(timespec="microseconds")
+
+    def strategy_fault_attempts(self, name: str, *, now: datetime) -> list[datetime]:
+        cutoff = self._fault_timestamp(now - timedelta(hours=1))
+        rows = self._query("SELECT ts FROM strategy_fault_attempts WHERE strategy=? AND ts>=? ORDER BY ts",
+                           (name, cutoff))
+        return [parse_iso(row["ts"]) for row in rows]
+
+    def strategy_fault_paused(self, name: str, *, now: datetime) -> bool:
+        cutoff = self._fault_timestamp(now - timedelta(hours=1))
+        return bool(self._query("SELECT 1 FROM strategy_fault_attempts WHERE strategy=? AND ts>=? LIMIT 1",
+                                (name, cutoff)))
+
+    def record_strategy_fault(self, name: str, reason: str, *, now: datetime) -> bool:
+        """Atomically pause the first three faults and latch disabled on the fourth.
+
+        Future-dated attempts also count, so a backward clock cannot erase the budget.
+        Returns whether the strategy is disabled. No automatic deletion/re-enable occurs.
+        """
+        if not isinstance(name, str) or not name:
+            raise ValueError("strategy name is required")
+        timestamp = self._fault_timestamp(now)
+        cutoff = self._fault_timestamp(now - timedelta(hours=1))
+        with self.transaction() as conn:
+            if conn.execute("SELECT 1 FROM disabled_strategies WHERE strategy=?", (name,)).fetchone():
+                return True
+            count = conn.execute("SELECT COUNT(*) FROM strategy_fault_attempts WHERE strategy=? AND ts>=?",
+                                 (name, cutoff)).fetchone()[0]
+            if count >= 3:
+                self._disable_strategy_tx(conn, name, reason, count, timestamp)
+                return True
+            conn.execute("INSERT INTO strategy_fault_attempts(strategy,ts) VALUES(?,?)", (name, timestamp))
+            conn.execute("INSERT INTO autonomy(ts,actor,action,level,detail,outcome) VALUES(?,?,?,?,?,?)",
+                         (timestamp, "supervisor", "pause_strategy", 3, reason, "ok"))
+            conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                         (timestamp, "WARN", "strategy_paused", "supervisor", json.dumps({
+                             "strategy": name, "hours": 1, "reason": reason, "faults_last_hour": count + 1,
+                         })))
+        return False
 
     def disabled_strategies(self) -> dict[str, str]:
         return {row["strategy"]: row["reason"] for row in

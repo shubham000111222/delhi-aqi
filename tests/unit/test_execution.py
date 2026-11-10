@@ -588,3 +588,19 @@ async def test_disabled_strategy_cannot_submit_entry_but_exit_path_remains_avail
     await manager.submit_exit("BTC/USDT", D("0.001"), "S1", "protect")
     assert len(calls) == 1 and calls[0].reduce_only
     store.close()
+
+
+async def test_fault_pause_blocks_direct_entry_but_expires(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    manager = OrderManager(cfg, adapter, store, KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER), clock)
+    store.record_strategy_fault("S1", "fault", now=NOW)
+    signal = Signal(id="paused-entry", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    clock.advance(timedelta(hours=1, seconds=1))
+    assert not store.strategy_fault_paused("S1", now=clock.now())
+    store.close()
