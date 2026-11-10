@@ -16,7 +16,7 @@ depends on.
 For the full Windows installation, implementation and validation procedure, see
 [`WINDOWS_LOCAL_LIVE_READINESS.md`](WINDOWS_LOCAL_LIVE_READINESS.md).
 
-**Last updated:** 2026-11-04 · **Suite:** 1118 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-04 · **Suite:** 1131 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -24,7 +24,8 @@ machine; this workspace has no real-price archive.
 
 - [x] Serialize ordinary risk/decay strategy pause extensions with their audit; refuse malformed holds and recheck at normal order boundaries.
 - [x] Apply persisted loss-streak size reductions to engine sizing and recheck the asserted multiplier at order boundaries; never automatically clear a reduction after a win.
-- [ ] Make consecutive-loss counting shared/atomic across engines; its current in-memory read-modify-write can miss thresholds under concurrency or restart.
+- [x] Serialize consecutive-loss updates and threshold actions across engines with a single SQLite transaction; corrupt streak records block normal entries.
+- [ ] Atomically link persisted position closures/fills to uniquely identified loss-streak transitions, with replay and reconciliation after crashes; current callbacks can be lost or repeated, and preexisting history is not independently reconstructed.
 - [ ] Build an authenticated, evidence-checked release workflow for latched strategy size reductions and other recovery holds; none exists yet. Do not manually clear a latch to bypass this limitation.
 - [ ] Complete Phase D's general authenticated action-bound approvals and all mutation boundaries, then Phases E–I and their real evidence; live promotion and live/testnet reset remain blocked. Reduce-only assertions, direct database/venue access, alternate adapters and in-flight orders remain outside these protections.
 

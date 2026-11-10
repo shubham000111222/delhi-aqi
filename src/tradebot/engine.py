@@ -158,7 +158,6 @@ class Engine:
         self._exiting: dict[tuple[str, str], datetime] = {}
         self._cooldowns: dict[str, datetime] = {}
         self._last_regime: dict[tuple[str, str], Regime] = {}
-        self._consecutive_losses: dict[str, int] = {}
         self._last_day: str = ""
         self._last_health = 0.0
         self._last_health_check: datetime | None = None
@@ -312,7 +311,6 @@ class Engine:
         peak = self.store.kv_get("peak_equity")
         if peak is None:
             self.store.kv_set("peak_equity", to_str(self.starting_capital, 8))
-        self._consecutive_losses = self.store.kv_get("consecutive_losses", {}) or {}
         self._last_day = str(self.store.kv_get("last_day", ""))
 
     # ------------------------------------------------------------------
@@ -856,28 +854,19 @@ class Engine:
                 },
                 actor="risk",
             )
-        streak = self._consecutive_losses.get(trade.strategy, 0)
-        streak = streak + 1 if trade.pnl < 0 else 0
-        self._consecutive_losses[trade.strategy] = streak
-        self.store.kv_set("consecutive_losses", self._consecutive_losses)
-        if trade.pnl < 0:
-            if streak >= self.cfg.risk.consecutive_losses_pause:
-                self._pause_strategy(
-                    trade.strategy,
-                    hours=self.cfg.risk.consecutive_losses_pause_hours,
-                    reason=f"{streak} consecutive losses",
-                )
-            elif streak >= self.cfg.risk.consecutive_losses_halve:
-                try:
-                    self.store.reduce_strategy_size(trade.strategy, D("0.5"), now=self.clock.now(),
-                                                    reason=f"{streak} consecutive losses")
-                except Exception:  # noqa: BLE001 - preserve protection when persistence/audit fails
-                    self._disabled_strategies[trade.strategy] = "strategy size reduction failed"
-                    self.killswitch.trigger(KillLevel.L1, trigger="strategy_size_reduction_failed",
-                                            reason=f"could not persist reduction for {trade.strategy}", actor="risk")
-                    raise
-        # A profitable trade is not authenticated authorization to increase future risk.
-        # Existing reductions remain latched until a safe operator release is implemented.
+        try:
+            self.store.record_strategy_trade_risk(
+                trade.strategy, loss=trade.pnl < 0, closed_at=trade.closed_at, now=self.clock.now(),
+                halve_at=self.cfg.risk.consecutive_losses_halve,
+                pause_at=self.cfg.risk.consecutive_losses_pause,
+                pause_hours=self.cfg.risk.consecutive_losses_pause_hours,
+            )
+        except Exception:  # noqa: BLE001 - risk and audit must commit together
+            self._disabled_strategies[trade.strategy] = "strategy trade risk persistence failed"
+            self.killswitch.trigger(KillLevel.L1, trigger="strategy_trade_risk_failed",
+                                    reason=f"could not persist risk for {trade.strategy}", actor="risk")
+            raise
+        # Profitable trades cannot release a latched size reduction.
         self._reserve_tax()
 
     def _reserve_tax(self) -> None:

@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest concurrent loss-streak pass (working branch)
+
+- Shared loss-streak updates, threshold size reductions, pause extensions and their action audits now commit together. Corrupt streak state blocks normal entries; an older or equal-time win cannot reset a newer streak, and a late loss is conservatively counted. Existing stored streaks are retained. Size reductions stay latched after a win.
+- Full suite **1131 passed, 2 skipped**; Ruff, mypy and `git diff --check` passed. The ledger position close and risk callback are not atomic or uniquely deduplicated: a crash can miss a callback and a duplicate can overcount; old state and trade order are not verified. Raw database/exchange access, caller assertions and in-flight orders remain outside the protection. Dashboard process predates these edits. Earlier performance results predate these sizing changes; live promotion and live/testnet resets remain blocked.
+
 ## Latest strategy risk-boundary pass (working branch)
 
 - Risk/decay pause extensions now serialize and preserve longer or malformed holds, with pause and audit in one transaction; normal manager and CCXT entry paths recheck them. Loss-streak size reductions now feed engine risk sizing, are monotonic and audited, and are rechecked as caller-supplied assertions at placement. A win no longer automatically removes the reduction. There is no authenticated release workflow yet.
