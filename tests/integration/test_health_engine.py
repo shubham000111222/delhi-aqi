@@ -378,3 +378,30 @@ async def test_fault_pause_audit_failure_rolls_back_and_attempts_l1(engine):
     assert not engine.store.strategy_fault_attempts("S1_ema_trend", now=START)
     assert not [row for row in engine.store.autonomy_actions() if row["action"] == "pause_strategy"]
     assert engine.killswitch.level is KillLevel.L1
+
+
+@pytest.mark.parametrize("mode", [Mode.LIVE, Mode.TESTNET])
+async def test_venue_reconciliation_cannot_report_ok_from_local_cache(engine, mode):
+    engine.cfg.settings.mode = mode
+    # The paper adapter's balances and local orders may look consistent but are not
+    # independent venue-wide evidence, even if fills are still queued.
+    assert "unverified" in await engine.reconcile()
+    engine.unapplied_fills = 1
+    assert "unverified" in await engine.reconcile()
+
+
+@pytest.mark.parametrize("mode", [Mode.LIVE, Mode.TESTNET])
+async def test_venue_engine_does_not_initialize_reconciliation_to_ok(fast_cfg, mode):
+    from dataclasses import replace
+
+    cfg = replace(fast_cfg, settings=fast_cfg.settings.model_copy(update={"mode": mode}))
+    # Inject paper feed/adapter to inspect venue-mode startup without network access.
+    paper_engine = await Engine.build(fast_cfg, clock=SimClock(START), store=Store(":memory:"))
+    store = Store(":memory:")
+    try:
+        venue_engine = await Engine.build(cfg, clock=SimClock(START), store=store,
+                                          feed=paper_engine.feed, adapter=paper_engine.adapter)
+        assert venue_engine._reconcile_state == "venue reconciliation unverified"
+    finally:
+        store.close()
+        paper_engine.close()

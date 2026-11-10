@@ -811,3 +811,16 @@ def test_kill_switch_requires_explicit_mode():
     with pytest.raises(TypeError, match="mode"):
         KillSwitch(store)
     store.close()
+
+
+@pytest.mark.parametrize("response", [None, [], {}, {"passed": "false"}, {"passed": "true"},
+                                      {"passed": 1}, {"passed": []}])
+async def test_api_permission_guard_rejects_malformed_results(cfg, response):
+    class Adapter:
+        async def verify_permissions(self, **kwargs):
+            return response
+
+    store = Store(":memory:")
+    result = await LiveGuardChecker(cfg, store)._check_api_key(Adapter())
+    assert result.passed is False
+    store.close()

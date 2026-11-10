@@ -523,3 +523,38 @@ def test_cap_reduction_between_manager_and_adapter_blocks_venue_call():
     assert not [call for call in exchange.calls if call[0] == "create_order"]
     assert store.count_events("order_rejected") == 1
     store.close()
+
+
+@pytest.mark.parametrize("invalid", [None, "unknown", "garbage", "disabled", "yes", "", 2, -1, [], {}, 0.0, 1.0])
+@pytest.mark.parametrize("field", ["enableWithdrawals", "ipRestrict"])
+def test_unknown_permission_values_never_mean_safe(invalid, field):
+    adapter, exchange = adapter_with()
+    flags = {"enableWithdrawals": False, "ipRestrict": True}
+    flags[field] = invalid
+    exchange.permissions = {"info": flags}
+    assert asyncio.run(adapter.verify_permissions())["passed"] is False
+    assert asyncio.run(adapter.verify_permissions(require_ip_whitelist=False))["passed"] is False
+    adapter.killswitch.store.close()
+
+
+@pytest.mark.parametrize("false", [False, 0, "0", "false", " FALSE "])
+@pytest.mark.parametrize("true", [True, 1, "1", "true", " TRUE "])
+def test_explicit_permission_values(false, true):
+    adapter, exchange = adapter_with()
+    exchange.permissions = {"info": {"enableWithdrawals": false, "ipRestrict": true}}
+    assert asyncio.run(adapter.verify_permissions())["passed"] is True
+    exchange.permissions = {"info": {"enableWithdrawals": false, "ipRestrict": false}}
+    assert asyncio.run(adapter.verify_permissions())["passed"] is False
+    assert asyncio.run(adapter.verify_permissions(require_ip_whitelist=False))["passed"] is True
+    adapter.killswitch.store.close()
+
+
+def test_failed_permission_refresh_replaces_previous_pass_without_exposing_error():
+    adapter, exchange = adapter_with()
+    assert asyncio.run(adapter.verify_permissions())["passed"] is True
+    exchange.permissions = NetworkError("secret-error-token")
+    result = asyncio.run(adapter.verify_permissions())
+    assert result["passed"] is False
+    assert adapter._key_permissions == result
+    assert "secret-error-token" not in result["detail"]
+    adapter.killswitch.store.close()

@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest fail-closed venue-preflight pass (working branch)
+
+- Permission checks now accept only explicit boolean or 0/1 values for withdrawal and IP restriction fields; unknown, malformed and missing responses fail closed. A failed refresh replaces an earlier cached pass, and the guard requires an actual boolean result. Live/testnet engine reconciliation starts and stays unverified instead of treating process-local open orders or free balances as independent venue evidence. Paper reconciliation is unchanged.
+- Full suite **1023 passed, 2 skipped**; Ruff (including tools), mypy and `git diff --check` passed. Actual venue-wide balances/open-order reconciliation, verified post-heal evidence and authenticated live/testnet reset are still unbuilt. No real exchange was contacted; the dashboard process predates this change.
+
 ## Latest live sizing-cap placement recheck (working branch)
 
 - Normal engine entries carry the risk-sizing multiplier into the order request. The order manager and CCXT adapter recheck the multiplier against the current live cap immediately before a non-reducing placement, refusing missing, invalid or stale assertions. A test reduces the cap between manager and adapter checks and verifies no venue call; protective sells remain available.

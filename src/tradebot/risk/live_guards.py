@@ -392,9 +392,11 @@ class LiveGuardChecker:
             perms = await checker(require_ip_whitelist=self.guards.require_ip_whitelist)
         except Exception as exc:  # noqa: BLE001
             return GuardResult("api_key_permissions", False, f"permission check failed: {exc}")
+        if not isinstance(perms, dict) or type(perms.get("passed")) is not bool:
+            return GuardResult("api_key_permissions", False, "malformed permission response")
         return GuardResult(
             "api_key_permissions",
-            bool(perms.get("passed")),
+            perms["passed"] is True,
             str(perms.get("detail", "")),
         )
 

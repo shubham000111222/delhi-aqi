@@ -142,33 +142,46 @@ class CcxtLiveAdapter(ExchangeAdapter):
 
     async def verify_permissions(self, require_ip_whitelist: bool = True) -> dict[str, Any]:
         """Withdrawals must be off and an IP whitelist must be in place, or we refuse."""
-        detail = []
-        passed = True
+        def parse_flag(value: Any) -> bool | None:
+            # Only explicit representations are evidence. Unknown, null, nested and
+            # numeric values other than integer 0/1 must not be interpreted as safe.
+            if isinstance(value, bool):
+                return value
+            if type(value) is int and value in (0, 1):
+                return bool(value)
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in ("true", "1"):
+                    return True
+                if lowered in ("false", "0"):
+                    return False
+            return None
+
         try:
             permissions = await self.exchange.fetch_permissions()
-            info = permissions.get("info", permissions) if isinstance(permissions, dict) else {}
-            withdraw = str(info.get("enableWithdrawals", "unknown")).lower()
-            if withdraw in ("true", "1"):
-                passed = False
-                detail.append("withdrawals are ENABLED on this API key")
-            elif withdraw == "unknown":
-                passed = False
-                detail.append("cannot verify withdrawal permission")
+            info = permissions.get("info", permissions) if isinstance(permissions, dict) else None
+            if not isinstance(info, dict):
+                return {"passed": False, "detail": "cannot verify permission response"}
+            withdraw = parse_flag(info.get("enableWithdrawals"))
+            restricted = parse_flag(info.get("ipRestrict"))
+            if withdraw is None:
+                withdrawal_detail = "cannot verify withdrawal permission"
+            elif withdraw:
+                withdrawal_detail = "withdrawals are ENABLED on this API key"
             else:
-                detail.append("withdrawals disabled")
-            ip_restrict = str(info.get("ipRestrict", "unknown")).lower()
-            if ip_restrict in ("false", "0"):
-                passed = passed and not require_ip_whitelist
-                detail.append("IP whitelist is NOT enforced")
-            elif ip_restrict == "unknown":
-                passed = False
-                detail.append("cannot verify IP whitelist")
+                withdrawal_detail = "withdrawals disabled"
+            if restricted is None:
+                restriction_detail = "cannot verify IP whitelist"
+            elif restricted:
+                restriction_detail = "IP whitelist enforced"
             else:
-                detail.append("IP whitelist enforced")
-        except Exception as exc:  # noqa: BLE001 - unverifiable means fail closed
-            return {"passed": False, "detail": f"permission check unavailable: {exc}"}
-        self._key_permissions = {"passed": passed, "detail": "; ".join(detail)}
-        return self._key_permissions
+                restriction_detail = "IP whitelist is NOT enforced"
+            passed = withdraw is False and (restricted is True or (restricted is False and not require_ip_whitelist))
+            result = {"passed": passed, "detail": f"{withdrawal_detail}; {restriction_detail}"}
+        except Exception:  # noqa: BLE001 - unverifiable means fail closed; avoid leaking venue error details
+            result = {"passed": False, "detail": "permission check unavailable"}
+        self._key_permissions = result
+        return result
 
     async def close(self) -> None:
         if self.exchange is not None:

@@ -185,7 +185,8 @@ class Engine:
         self.unapplied_fills = 0
         self._last_snapshot: datetime | None = None
         self._equity_points = 0
-        self._reconcile_state = "ok"
+        # Live/testnet cannot assume reconciliation before independent venue evidence.
+        self._reconcile_state = "ok" if config.mode is Mode.PAPER else "venue reconciliation unverified"
         # Partial audit coverage: this ledger does not intercept every action or enforce
         # permissions at trading and configuration boundaries.
         self.autonomy = AutonomyLedger(store=store, clock=clock)
@@ -1845,7 +1846,11 @@ class Engine:
         return errors / attempts if attempts else 0.0
 
     async def reconcile(self) -> str:
-        """Compare the ledger with the venue. Any mismatch is an incident."""
+        """Compare paper state; venue reconciliation is not yet independently verified."""
+        if self.cfg.mode is not Mode.PAPER:
+            # CCXT open orders are process-local and balances are free, not total.
+            # Neither proves the venue/account matches the ledger after a restart.
+            return "venue reconciliation unverified: independent orders and total balances required"
         if self.unapplied_fills > 0:
             # the venue is ahead of us by design: our own fill queue has not drained
             return "ok"
