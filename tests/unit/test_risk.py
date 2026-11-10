@@ -390,7 +390,8 @@ class TestLiveGuards:
         store.kv_set("go_nogo", {"ts": "2024-01-01T00:00:00Z", "passed": True})
         fresh = checker._check_go_nogo(datetime(2024, 1, 5, tzinfo=UTC))
         stale = checker._check_go_nogo(datetime(2024, 3, 1, tzinfo=UTC))
-        assert fresh.passed and not stale.passed
+        assert not fresh.passed and not stale.passed
+        assert "provenance unverified" in fresh.detail
 
     async def test_clock_guard_rejects_large_drift_in_either_direction(self, cfg):
         for drift in (-100.0, 100.0, float("nan")):
@@ -823,4 +824,58 @@ async def test_api_permission_guard_rejects_malformed_results(cfg, response):
     store = Store(":memory:")
     result = await LiveGuardChecker(cfg, store)._check_api_key(Adapter())
     assert result.passed is False
+    store.close()
+
+
+@pytest.mark.parametrize("value", ["NOTLIVE 250", "LIVE -250", "LIVE +250", "LIVE 250 EXTRA", "x LIVE 250",
+                                  "LIVE 2 50", "LIVE 250 USD", "250 LIVE 1", "", None])
+def test_live_confirmation_rejects_ambiguous_or_misleading_input(cfg, value):
+    store = Store(":memory:")
+    assert not LiveGuardChecker(cfg, store)._check_confirmation(value, D("250"))[0]
+    store.close()
+
+
+@pytest.mark.parametrize("bad", ["true", "false", 1, [], {}, None])
+async def test_live_guard_rejects_non_boolean_feed_and_reconciliation(cfg, bad):
+    store = Store(":memory:")
+    checks = await LiveGuardChecker(cfg, store).check(feed_fresh=bad, reconciliation_clean=bad)
+    assert not next(row for row in checks if row.name == "preflight_feed").passed
+    assert not next(row for row in checks if row.name == "preflight_reconciliation").passed
+    store.close()
+
+
+async def test_live_guard_does_not_overwrite_or_extend_unverified_go_nogo(cfg):
+    store = Store(":memory:")
+    old = {"ts": "2024-01-01T00:00:00Z", "passed": True}
+    store.kv_set("go_nogo", old)
+    checker = LiveGuardChecker(cfg, store)
+    checks = await checker.check(now=NOW, feed_fresh=True, reconciliation_clean=True)
+    assert not next(row for row in checks if row.name == "go_nogo_record").passed
+    assert store.kv_get("go_nogo") == old
+    assert store.kv_get("live_guard_latest")["passed"] is False
+    store.close()
+
+
+@pytest.mark.parametrize("drift", [True, False, "0", [], {}, None, float("inf"), float("nan")])
+async def test_live_guard_rejects_unverified_clock_drift(cfg, drift):
+    store = Store(":memory:")
+    checks = await LiveGuardChecker(cfg, store).check(clock_drift_seconds=drift)
+    assert not next(row for row in checks if row.name == "preflight_clock").passed
+    store.close()
+
+
+@pytest.mark.parametrize("hold", ["health_flapping_hold", "ramp_incident_tracking_invalid", "kill_incident_pending:7"])
+async def test_preflight_kill_gate_blocks_durable_holds_at_l0(cfg, hold):
+    store = Store(":memory:")
+    store.kv_set(hold, {"until": "bad"} if hold == "health_flapping_hold" else None)
+    checks = await LiveGuardChecker(cfg, store).check()
+    assert not next(row for row in checks if row.name == "preflight_killswitch").passed
+    store.close()
+
+
+async def test_live_reconciliation_requirement_cannot_be_configured_away(cfg):
+    store = Store(":memory:")
+    cfg.settings.live_guards.require_reconciliation_clean = False
+    checks = await LiveGuardChecker(cfg, store).check(reconciliation_clean=None)
+    assert not next(row for row in checks if row.name == "preflight_reconciliation").passed
     store.close()

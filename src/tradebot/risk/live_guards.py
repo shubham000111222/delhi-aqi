@@ -7,15 +7,16 @@ exchange does not report API-key permissions), it counts as failed.
 from __future__ import annotations
 
 import json
+import math
+import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
 from ..config import Config, Mode
 from ..core.clock import iso, utc, utcnow
 from ..core.logging import get_logger
-from ..core.models import KillLevel
 from ..core.money import D, to_str
 from ..core.store import Store
 
@@ -286,16 +287,21 @@ class LiveGuardChecker:
         )
 
         # preflight checks
-        ks = KillLevel(self.store.kill_level())
-        results.append(GuardResult("preflight_killswitch", ks is KillLevel.L0, f"kill level {ks.value}"))
+        from .killswitch import KillSwitch
+
+        ks = KillSwitch(self.store, mode=self.cfg.mode)
+        open_allowed = ks.can_open_entries()
+        results.append(GuardResult("preflight_killswitch", open_allowed, f"kill level {ks.level.value}; "
+                                   + ("entry permitted" if open_allowed else "entry blocked")))
         results.append(
             GuardResult(
                 "preflight_feed",
-                bool(feed_fresh),
-                "feeds fresh" if feed_fresh else "feeds stale or unverified",
+                feed_fresh is True,
+                "feeds fresh (caller assertion)" if feed_fresh is True else "feeds stale or unverified",
             )
         )
-        if clock_drift_seconds is None:
+        if (isinstance(clock_drift_seconds, bool) or not isinstance(clock_drift_seconds, (int, float))
+                or not math.isfinite(clock_drift_seconds)):
             results.append(GuardResult("preflight_clock", False, "clock drift unverified"))
         else:
             drift_ok = abs(clock_drift_seconds) <= self.cfg.settings.data_quality.ntp_max_drift_seconds
@@ -305,8 +311,8 @@ class LiveGuardChecker:
         results.append(
             GuardResult(
                 "preflight_reconciliation",
-                bool(reconciliation_clean) if self.guards.require_reconciliation_clean else True,
-                "reconciliation clean" if reconciliation_clean else "reconciliation not clean",
+                reconciliation_clean is True,
+                "reconciliation clean (caller assertion)" if reconciliation_clean is True else "reconciliation not clean",
             )
         )
         results.append(
@@ -333,7 +339,7 @@ class LiveGuardChecker:
             actor="startup",
         )
         self.store.kv_set(
-            "go_nogo",
+            "live_guard_latest",
             {
                 "ts": iso(now),
                 "passed": not failed,
@@ -344,39 +350,24 @@ class LiveGuardChecker:
 
     # --- individual gates -------------------------------------------------
     def _check_confirmation(self, confirmation: str | None, expected_capital: Decimal | None) -> tuple[bool, str]:
-        if not confirmation:
+        if not isinstance(confirmation, str):
             return False, "no typed confirmation supplied"
-        text = confirmation.strip()
-        if "LIVE" not in text.upper():
-            return False, "confirmation must contain the word LIVE"
-        if expected_capital is None:
-            return False, "confirmation must include the capital amount"
-        digits = "".join(ch for ch in text if ch.isdigit() or ch == ".")
-        try:
-            typed = Decimal(digits)
-        except Exception:  # noqa: BLE001
-            return False, "could not parse the typed capital amount"
+        match = re.fullmatch(r"\s*(?:LIVE\s+([0-9]+(?:\.[0-9]+)?)|([0-9]+(?:\.[0-9]+)?)\s+LIVE)\s*",
+                             confirmation, flags=re.IGNORECASE)
+        if match is None:
+            return False, "confirmation must be LIVE and the exact positive capital amount"
+        if not isinstance(expected_capital, Decimal) or not expected_capital.is_finite() or expected_capital <= 0:
+            return False, "configured capital amount is invalid"
+        typed = Decimal(match.group(1) or match.group(2))
         if typed != expected_capital:
             return False, f"typed capital {typed} != configured {expected_capital}"
         return True, "typed confirmation ok"
 
     def _check_go_nogo(self, now: datetime) -> GuardResult:
-        record = self.store.kv_get("go_nogo")
-        if not record:
-            return GuardResult("go_nogo_record", False, "no go/no-go record in the database")
-        if not record.get("passed"):
-            return GuardResult("go_nogo_record", False, "last go/no-go record failed")
-        try:
-            ts = utc(datetime.fromisoformat(str(record["ts"]).replace("Z", "+00:00")))
-        except (KeyError, TypeError, ValueError):
-            return GuardResult("go_nogo_record", False, "go/no-go timestamp invalid or missing")
-        age = now - ts
-        fresh = timedelta(0) <= age <= timedelta(days=self.guards.go_nogo_max_age_days)
-        return GuardResult(
-            "go_nogo_record",
-            fresh,
-            f"record from {iso(ts)} ({age.days} days old, max {self.guards.go_nogo_max_age_days})",
-        )
+        # Existing go/no-go rows are unverified mutable records, and the evidence
+        # pipeline does not yet authenticate provenance or the actual cost rerun.
+        # Do not bootstrap or refresh a live gate from that self-reported result.
+        return GuardResult("go_nogo_record", False, "promotion evidence provenance unverified")
 
     async def _check_api_key(self, adapter: Any) -> GuardResult:
         if adapter is None:
@@ -390,8 +381,8 @@ class LiveGuardChecker:
             )
         try:
             perms = await checker(require_ip_whitelist=self.guards.require_ip_whitelist)
-        except Exception as exc:  # noqa: BLE001
-            return GuardResult("api_key_permissions", False, f"permission check failed: {exc}")
+        except Exception:  # noqa: BLE001
+            return GuardResult("api_key_permissions", False, "permission check failed")
         if not isinstance(perms, dict) or type(perms.get("passed")) is not bool:
             return GuardResult("api_key_permissions", False, "malformed permission response")
         return GuardResult(

@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest promotion-preflight integrity pass (working branch)
+
+- The live go/no-go gate now fails closed because current promotion evidence has no verified provenance and the actual 2× rerun is not integrated. A guard check no longer overwrites/refreshes the legacy `go_nogo` record; its result goes to `live_guard_latest`. Typed confirmation requires the exact amount and a standalone LIVE token. Feed/reconciliation caller assertions must be booleans, unverified clock inputs fail, reconciliation cannot be disabled via config, and the kill preflight includes KILL and durable holds.
+- Full suite **1052 passed, 2 skipped**; Ruff (including tools), mypy and `git diff --check` passed. These checks do not create verified evidence or make caller assertions independent. The live gate intentionally cannot pass until the evidence pipeline is built; live/testnet resets remain blocked. Dashboard process predates this change.
+
 ## Latest fail-closed venue-preflight pass (working branch)
 
 - Permission checks now accept only explicit boolean or 0/1 values for withdrawal and IP restriction fields; unknown, malformed and missing responses fail closed. A failed refresh replaces an earlier cached pass, and the guard requires an actual boolean result. Live/testnet engine reconciliation starts and stays unverified instead of treating process-local open orders or free balances as independent venue evidence. Paper reconciliation is unchanged.

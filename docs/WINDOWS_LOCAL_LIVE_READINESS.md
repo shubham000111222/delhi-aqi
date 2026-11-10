@@ -290,3 +290,8 @@ PASS / FAIL / BLOCKED, reason, next action:
 ```
 
 A completed worksheet requires actual evidence, not only checked boxes. Update the project checklist and keep this procedure aligned with the code as the implementation evolves.
+
+> **Promotion preflight:** the live go/no-go gate intentionally fails while evidence provenance
+> and the actual 2× cost rerun are not integrated. Re-running `live-check` or editing a local
+> `go_nogo` row cannot authorize live trading. The reconciliation requirement cannot be disabled
+> by configuration. The latest guard result is stored separately as `live_guard_latest`.
