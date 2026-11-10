@@ -214,7 +214,8 @@ def test_auto_resume_cannot_clear_a_concurrent_escalation(tmp_path, monkeypatch)
     one, two = Store(path), Store(path)
     switch = KillSwitch(one, clock=SimClock(NOW))
     other = KillSwitch(two, clock=SimClock(NOW))
-    switch.trigger(KillLevel.L1, trigger="test", reason="pause")
+    switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+    expected = switch.state
     original = one.set_kill_state
 
     def race(*args, **kwargs):
@@ -222,7 +223,7 @@ def test_auto_resume_cannot_clear_a_concurrent_escalation(tmp_path, monkeypatch)
         return original(*args, **kwargs)
 
     monkeypatch.setattr(one, "set_kill_state", race)
-    assert not switch.auto_resume(reason="recovered")
+    assert not switch.auto_resume(reason="recovered", expected_state=expected)
     assert two.kill_level() == "L3"
     one.close()
     two.close()
@@ -232,7 +233,8 @@ def test_auto_resume_cannot_clear_a_new_flapping_hold(tmp_path, monkeypatch):
     path = tmp_path / "state.db"
     one, two = Store(path), Store(path)
     switch = KillSwitch(one, clock=SimClock(NOW))
-    switch.trigger(KillLevel.L1, trigger="test", reason="pause")
+    switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+    expected = switch.state
     original = one.set_kill_state
 
     def race(*args, **kwargs):
@@ -240,10 +242,57 @@ def test_auto_resume_cannot_clear_a_new_flapping_hold(tmp_path, monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(one, "set_kill_state", race)
-    assert not switch.auto_resume(reason="recovered")
+    assert not switch.auto_resume(reason="recovered", expected_state=expected)
     assert two.kill_level() == "L1"
     one.close()
     two.close()
+
+
+@pytest.mark.parametrize("trigger", ["manual", "weekly_loss", "order_outcome_unknown", "flapping"])
+def test_auto_resume_boundary_refuses_non_whitelisted_l1_cause(trigger):
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch.trigger(KillLevel.L1, trigger=trigger, reason="pause")
+    assert not switch.auto_resume(reason="untrusted caller", expected_state=switch.state)
+    assert switch.level is KillLevel.L1
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+def test_auto_resume_needs_evaluated_snapshot():
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+    assert not switch.auto_resume(reason="caller supplied no state")
+    assert switch.level is KillLevel.L1
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+def test_auto_resume_refuses_new_identical_pause_even_at_same_clock_time():
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+    old_pause = switch.state
+    switch.reset(reason="manual review")
+    switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+    assert old_pause["generation"] != switch.state["generation"]
+    assert not switch.auto_resume(reason="stale evidence", expected_state=old_pause)
+    assert switch.level is KillLevel.L1
+    store.close()
+
+
+def test_auto_resume_honours_kill_file(tmp_path):
+    store = Store(":memory:")
+    kill_file = tmp_path / "KILL"
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=kill_file)
+    switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+    pause = switch.state
+    kill_file.write_text("emergency stop")
+    assert not switch.auto_resume(reason="recovered", expected_state=pause)
+    assert switch.level is KillLevel.L2
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
 
 
 class TestKillSwitch:
@@ -514,14 +563,83 @@ class TestAutoResume:
             engine._resume_daily_limit_at_day_boundary(clock.now())
         assert engine.killswitch.level is KillLevel.L2
 
+    async def test_sustained_health_is_not_reused_for_a_new_pause(self, cfg):
+        clock = SimClock(NOW)
+        engine = await self._engine(cfg, clock)
+        ks = engine.killswitch
+        ks.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+        old = ks.state
+        await engine._maybe_auto_resume(all_stale=False, error_rate=0, disk_used=0)
+        clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds + 1)
+        ks.reset(reason="operator review")
+        ks.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+        assert old["generation"] != ks.state["generation"]
+        await engine._maybe_auto_resume(all_stale=False, error_rate=0, disk_used=0)
+        assert ks.level is KillLevel.L1
+        clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds + 1)
+        await engine._maybe_auto_resume(all_stale=False, error_rate=0, disk_used=0)
+        assert ks.level is KillLevel.L0
+        engine.close()
+
+    async def test_old_recovery_cannot_clear_different_new_pause(self, cfg):
+        clock = SimClock(NOW)
+        engine = await self._engine(cfg, clock)
+        ks = engine.killswitch
+        ks.trigger(KillLevel.L1, trigger="stale_feeds", reason="feed")
+        old = ks.state
+        ks.reset(reason="operator review")
+        ks.trigger(KillLevel.L1, trigger="exchange_error_rate", reason="api")
+        engine._resume(reason="feed recovered", now=clock.now(), expected_state=old)
+        assert ks.level is KillLevel.L1
+        assert ks.state["trigger"] == "exchange_error_rate"
+        engine.close()
+
+    @pytest.mark.parametrize("fault", ["feed", "reconciliation", "errors", "disk"])
+    async def test_other_unhealthy_conditions_block_auto_resume(self, cfg, fault):
+        clock = SimClock(NOW)
+        engine = await self._engine(cfg, clock)
+        engine.killswitch.trigger(KillLevel.L1, trigger="stale_feeds", reason="feed")
+        engine._reconcile_state = "mismatch" if fault == "reconciliation" else "ok"
+        args = {
+            "all_stale": fault == "feed",
+            "error_rate": 1.0 if fault == "errors" else 0.0,
+            "disk_used": 1.0 if fault == "disk" else 0.0,
+        }
+        await engine._maybe_auto_resume(**args)
+        clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds + 1)
+        await engine._maybe_auto_resume(**args)
+        assert engine.killswitch.level is KillLevel.L1
+        engine.close()
+
+    async def test_auto_resume_does_not_clear_a_concurrent_weekly_loss(self, cfg):
+        clock = SimClock(NOW)
+        engine = await self._engine(cfg, clock)
+        engine.killswitch.trigger(KillLevel.L1, trigger="stale_feeds", reason="feed")
+        await engine._maybe_auto_resume(all_stale=False, error_rate=0, disk_used=0)
+        engine.store.kv_set("week_start_equity", str(engine.ledger.cash * D("1.10")))
+        clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds + 1)
+        await engine._maybe_auto_resume(all_stale=False, error_rate=0, disk_used=0)
+        assert engine.killswitch.level is KillLevel.L1
+        engine.close()
+
+    async def test_daily_resume_does_not_clear_a_concurrent_weekly_loss(self, cfg):
+        clock = SimClock(NOW)
+        engine = await self._engine(cfg, clock)
+        engine.killswitch.trigger(KillLevel.L1, trigger="daily_loss", reason="daily")
+        engine.store.kv_set("day_start_equity", str(engine.ledger.cash))
+        engine.store.kv_set("week_start_equity", str(engine.ledger.cash * D("1.10")))
+        engine._resume_daily_limit_at_day_boundary(clock.now())
+        assert engine.killswitch.level is KillLevel.L1
+        engine.close()
+
     async def test_infrastructure_pause_lifts_after_sustained_health(self, cfg):
         clock = SimClock(NOW)
         engine = await self._engine(cfg, clock)
         engine.killswitch.trigger(KillLevel.L1, trigger="exchange_error_rate", reason="storm")
         engine._reconcile_state = "ok"
-        # one instant of health is not enough
-        await engine.health_check()
+        # one instant of confirmed health is not enough
+        await engine._maybe_auto_resume(all_stale=False, error_rate=0, disk_used=0)
         assert engine.killswitch.level is KillLevel.L1
         clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds + 1)
-        await engine.health_check()
+        await engine._maybe_auto_resume(all_stale=False, error_rate=0, disk_used=0)
         assert engine.killswitch.level is KillLevel.L0

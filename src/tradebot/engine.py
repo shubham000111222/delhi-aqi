@@ -164,6 +164,7 @@ class Engine:
         self._last_health_check: datetime | None = None
         # when the L1 pause condition was first observed as cleared (sustained health)
         self._healthy_since: datetime | None = None
+        self._healthy_pause_state: dict[str, Any] | None = None
         # Venue seams (§18.8). Defaults describe a crypto venue: always open, no square-off.
         from .venues.calendar import AlwaysOpenCalendar
         from .venues.squareoff import SquareOffScheduler
@@ -1100,8 +1101,8 @@ class Engine:
         self._check_account_limits(snap.equity)
         await self._check_day_boundary(snap.equity)
 
-    def _check_account_limits(self, equity: Decimal) -> None:
-        ctx = RiskContext(
+    def _account_risk_context(self, equity: Decimal) -> RiskContext:
+        return RiskContext(
             now=self.clock.now(),
             equity=equity,
             starting_capital=self.starting_capital,
@@ -1109,7 +1110,8 @@ class Engine:
             week_start_equity=D(str(self.store.kv_get("week_start_equity", to_str(equity)))),
             peak_equity=D(str(self.store.kv_get("peak_equity", to_str(equity)))),
         )
-        for reason, level in self.risk.account_alerts(ctx):
+    def _check_account_limits(self, equity: Decimal) -> None:
+        for reason, level in self.risk.account_alerts(self._account_risk_context(equity)):
             if self.killswitch.level.rank < level.rank:
                 self.killswitch.trigger(level, trigger=_limit_trigger(reason), reason=reason)
                 if level.rank >= KillLevel.L2.rank:
@@ -1279,6 +1281,7 @@ class Engine:
         if until is not None:
             self.store.kv_set("health_flapping_hold", {"until": iso(until), "components": critical}, ts=now)
         self._healthy_since = None
+        self._healthy_pause_state = None
         if self.killswitch.trigger(KillLevel.L1, trigger="flapping", reason=reason, actor="health"):
             self.autonomy.record("health", "hold_for_flapping", AutonomyLevel.PROTECT, reason, ts=now)
         self._log("health_flapping", {"components": critical}, level="WARN", actor="health")
@@ -1731,12 +1734,15 @@ class Engine:
         pause this engine does not recognise is left to the operator. The evidence can
         be passed in (the health check already computed it) or measured here.
         """
-        if self.killswitch.level is not KillLevel.L1:
+        pause_state = self.killswitch.state
+        if pause_state.get("level") != KillLevel.L1.value:
             self._healthy_since = None
+            self._healthy_pause_state = None
             return
-        trigger = str(self.killswitch.state.get("trigger", ""))
+        trigger = str(pause_state.get("trigger", ""))
         if trigger not in self.AUTO_RESUME_TRIGGERS:
             self._healthy_since = None
+            self._healthy_pause_state = None
             return
 
         now = now or self.clock.now()
@@ -1748,24 +1754,34 @@ class Engine:
             disk = shutil.disk_usage(str(self.cfg.settings.data_dir))
             disk_used = disk.used / disk.total if disk.total else 0.0
 
-        healthy = {
-            "stale_feeds": not all_stale,
-            "exchange_error_rate": error_rate < float(self.cfg.risk.exchange_error_rate_limit),
-            "reconciliation": self._reconcile_state == "ok",
-            "disk_full": disk_used < self.cfg.risk.disk_warn_pct,
-        }[trigger]
+        # Recovery of the original cause is insufficient if another incident arose
+        # while already at L1 (same-level escalation does not replace its trigger).
+        # Unknown/unhealthy reconciliation, stale feeds, errors, or disk block recovery.
+        equity = self.equity()
+        healthy = (
+            not all_stale
+            and error_rate < float(self.cfg.risk.exchange_error_rate_limit)
+            and self._reconcile_state == "ok"
+            and disk_used < self.cfg.risk.disk_warn_pct
+            and equity > 0
+            and not self.risk.account_alerts(self._account_risk_context(equity))
+        )
         if not healthy:
             self._healthy_since = None
+            self._healthy_pause_state = None
             return
 
-        if self._healthy_since is None:
+        if (self._healthy_since is None or self._healthy_pause_state != pause_state
+                or now < self._healthy_since):
             self._healthy_since = now
+            self._healthy_pause_state = pause_state
             return
         required = float(self.cfg.settings.execution.auto_resume_min_healthy_seconds)
         held = (now - self._healthy_since).total_seconds()
         if held < required:
             return
-        self._resume(reason=f"{trigger} cleared; health held {held / 60:.0f} min", now=now)
+        self._resume(reason=f"{trigger} cleared; health held {held / 60:.0f} min", now=now,
+                     expected_state=pause_state)
 
     def _resume_daily_limit_at_day_boundary(self, now: datetime) -> None:
         """The daily loss limit is scoped to a day, so a new day lifts it.
@@ -1775,25 +1791,39 @@ class Engine:
         human, which is why only the `daily_loss` trigger is handled here. This runs off
         market time, so it behaves identically in a backtest and in a paced demo.
         """
-        if self.killswitch.level is not KillLevel.L1:
+        pause_state = self.killswitch.state
+        if pause_state.get("level") != KillLevel.L1.value:
             return
-        trigger = str(self.killswitch.state.get("trigger", ""))
+        trigger = str(pause_state.get("trigger", ""))
         if trigger != "daily_loss":
             return
         equity = self.equity()
         day_start = D(str(self.store.kv_get("day_start_equity", to_str(equity))))
         if day_start > 0 and (equity - day_start) / day_start <= self.cfg.risk.daily_loss_stop_new_entries:
             return
-        self._resume(reason="new trading day; daily loss limit reset", now=now)
+        self._resume(reason="new trading day; daily loss limit reset", now=now, expected_state=pause_state)
 
-    def _resume(self, *, reason: str, now: datetime) -> None:
+    def _resume(self, *, reason: str, now: datetime, expected_state: dict[str, Any]) -> None:
         # A pre-existing L1 may have a different trigger; never lift it while a
         # critical component is flapping, even at the daily-loss boundary.
         if any(self.health.components[name].critical for name in self.health.flapping(now=now)):
             self._healthy_since = None
+            self._healthy_pause_state = None
             return
-        trigger = str(self.killswitch.state.get("trigger", ""))
-        if self.killswitch.auto_resume(reason=reason):
+        # An L1 from infrastructure can mask a later same-level weekly/daily loss.
+        # Recheck all account limits immediately before attempting any automatic L0.
+        equity = self.equity()
+        if equity <= 0 or self.risk.account_alerts(self._account_risk_context(equity)):
+            self._healthy_since = None
+            self._healthy_pause_state = None
+            self._log("autonomy_refused", {"actor": "engine", "action": "auto_resume",
+                                         "reason": "account risk remains or equity unavailable"},
+                      level="WARN", actor="engine", ts=now)
+            return
+        trigger = str(expected_state.get("trigger", ""))
+        if self.killswitch.auto_resume(reason=reason, expected_state=expected_state):
+            self._healthy_since = None
+            self._healthy_pause_state = None
             self.autonomy.record(
                 "engine", "auto_resume", AutonomyLevel.PROTECT, f"L1 {trigger} lifted: {reason}", ts=now
             )
@@ -1801,7 +1831,7 @@ class Engine:
             self._log(
                 "kill_switch_auto_resume",
                 {
-                    "trigger": self.killswitch.state.get("trigger", ""),
+                    "trigger": trigger,
                     "reason": reason,
                     "equity": to_str(self.equity(), 2),
                     "market_time": iso(now),

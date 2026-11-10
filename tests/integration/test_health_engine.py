@@ -112,7 +112,7 @@ async def test_critical_flapping_pauses_and_prevents_existing_l1_auto_resume(eng
         )
     now = START + timedelta(seconds=7)
     assert engine._hold_on_flapping(now=now) == ["feed"]
-    engine._resume(reason="feed recovered", now=now)
+    engine._resume(reason="feed recovered", now=now, expected_state=engine.killswitch.state)
     assert engine.killswitch.level is KillLevel.L1
 
 

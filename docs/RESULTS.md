@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest L1 recovery-boundary pass (working branch)
+
+- Automatic L1 resume is now restricted at the kill-switch method to an allowed pause cause and the exact evaluated persisted transition. Each new transition carries a unique event generation, so recovery from an old L1 cannot clear a newer identical L1 at the same timestamp. A KILL file blocks and escalates recovery, and refused calls are audited.
+- Infrastructure recovery now tracks the pause identity throughout its sustained-health window and requires aggregate feed, order errors, reconciliation flag, disk and account limits to be healthy together. Both recovery paths recheck account limits before L0, preventing a stale-feed pause from hiding a concurrent weekly loss.
+- Full suite: **786 passed, 2 skipped**; Ruff, mypy and `git diff --check` passed. Tests use simulated time and paper components.
+- This is not an authentication boundary: direct state writes and manual reset authorization remain open. It is not the full post-heal gate: independent venue state, complete per-symbol freshness, clock verification and the daily-loss path's infrastructure checks are not proven. Live trading remains blocked.
+
 ## Latest order-boundary safety pass (working branch)
 
 - The order manager rechecks the persisted kill switch immediately before each non-reduce-only submission, including after a rate-limit wait and before a retry. Denials are audited; paper exits remain possible at L1–L3.

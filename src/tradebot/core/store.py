@@ -786,7 +786,7 @@ class Store:
                             return False
                     except (KeyError, TypeError, ValueError):
                         return False
-            conn.execute(
+            event = conn.execute(
                 """INSERT INTO kill_events(ts,level,previous,trigger,reason,actor,cooldown_until)
                    VALUES(?,?,?,?,?,?,?)""",
                 (
@@ -805,6 +805,9 @@ class Store:
                     json.dumps(
                         {
                             "level": level,
+                            # A unique transition identity prevents ABA: L1 -> L0 -> L1
+                            # can otherwise look identical at the same clock instant.
+                            "generation": event.lastrowid,
                             "trigger": trigger,
                             "reason": reason,
                             "actor": actor,

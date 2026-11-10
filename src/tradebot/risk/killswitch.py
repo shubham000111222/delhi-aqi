@@ -3,8 +3,8 @@
 L0 normal | L1 pause entries | L2 flatten everything | L3 lockdown (L2 + manual reset
 with a written reason and a 1-hour cooldown).
 
-Escalation is automatic and immediate. De-escalation never happens by itself: a
-human has to reset it, and every transition is written to the append-only event log.
+Escalation is automatic and immediate. De-escalation requires an operator except for
+the narrowly scoped L1 recovery paths; every transition is written to the event log.
 """
 
 from __future__ import annotations
@@ -21,6 +21,10 @@ from ..core.store import Store
 log = get_logger(__name__)
 
 LOCKDOWN_COOLDOWN = timedelta(hours=1)
+# The daily-loss exception is checked separately at the day boundary by the engine.
+AUTO_RESUME_TRIGGERS = frozenset(
+    {"stale_feeds", "exchange_error_rate", "reconciliation", "disk_full", "daily_loss"}
+)
 
 
 class KillSwitch:
@@ -134,21 +138,36 @@ class KillSwitch:
         )
         return True
 
-    def auto_resume(self, *, reason: str, actor: str = "engine") -> bool:
-        """Return to L0 from L1 only.
+    def auto_resume(
+        self, *, reason: str, expected_state: dict[str, Any] | None = None, actor: str = "engine"
+    ) -> bool:
+        """Narrow L1 exception; engine must supply the exact pause it evaluated.
 
-        L2 and L3 are never cleared automatically: a flatten or a lockdown is a
-        decision a human made (or must review), and healing infrastructure must never
-        quietly re-arm trading. This exists so that a *time-boxed* pause (a bad day, a
-        recovered feed, a transient API storm) can lift once its condition is gone,
-        with the transition recorded like any other.
+        This boundary checks the cause and transition identity, not the quality of the
+        health evidence. The engine remains responsible for verifying recovery. Direct
+        store writes and untrusted callers are not an authenticated authorization boundary.
         """
-        current = self.state
-        if current.get("level") != KillLevel.L1.value or self.flapping_hold_active():
+        def refuse(why: str) -> bool:
+            self.store.log_event(
+                "autonomy_refused", {"actor": actor, "action": "auto_resume", "reason": why},
+                level="WARN", actor=actor, ts=self.now(),
+            )
             return False
+
+        if expected_state is None:
+            return refuse("missing evaluated pause state")
+        # A kill file is an independent stop request; honor it before attempting L0.
+        if self.check_kill_file():
+            return refuse("KILL file present")
+        if expected_state.get("level") != KillLevel.L1.value:
+            return refuse("only L1 can auto-resume")
+        if expected_state.get("trigger") not in AUTO_RESUME_TRIGGERS:
+            return refuse("pause cause is not eligible for auto-resume")
+        if self.flapping_hold_active():
+            return refuse("critical flapping hold active")
         changed = self.store.set_kill_state(
             KillLevel.L0.value,
-            expected_state=current,
+            expected_state=expected_state,
             require_no_flapping_hold=True,
             trigger="auto_resume",
             reason=reason,
@@ -156,7 +175,7 @@ class KillSwitch:
             ts=self.now(),
         )
         if not changed:
-            return False
+            return refuse("pause state or flapping hold changed")
         log.warning('{"event":"kill_switch_auto_resume","reason":"%s","actor":"%s"}', reason, actor)
         return True
 
