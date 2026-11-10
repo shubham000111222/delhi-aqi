@@ -342,6 +342,7 @@ class Engine:
         try:
             pending_id = self.store.journal_pending_fill(fill)
         except Exception:  # noqa: BLE001 - already-executed fills must never be silently dropped
+            self.killswitch.latch_local_entry_hold()
             self.killswitch.trigger(KillLevel.L1, trigger="fill_journal_failed",
                                     reason="could not persist incoming fill", actor="execution")
             raise
@@ -860,6 +861,7 @@ class Engine:
                     )
                 except Exception:  # noqa: BLE001 - ledger and risk no longer agree
                     self._disabled_strategies[closed.strategy] = "position close persistence failed"
+                    self.killswitch.latch_local_entry_hold()
                     self.killswitch.trigger(KillLevel.L1, trigger="position_close_persistence_failed",
                                             reason=f"could not persist close for {closed.strategy}", actor="risk")
                     raise
@@ -1062,6 +1064,7 @@ class Engine:
                 self._disabled_strategies[name] = reason
         except Exception:  # noqa: BLE001 - protect entries when fault tracking cannot be persisted
             self._disabled_strategies[name] = reason
+            self.killswitch.latch_local_entry_hold()
             self.killswitch.trigger(KillLevel.L1, trigger="strategy_disable_failed",
                                     reason=f"could not persist strategy fault for {name}", actor="supervisor")
             raise
@@ -1072,6 +1075,7 @@ class Engine:
             self.store.extend_strategy_pause(name, until=now + timedelta(hours=hours), reason=reason, now=now)
         except Exception:  # noqa: BLE001 - pause or audit failure must not enable entries
             self._disabled_strategies[name] = reason
+            self.killswitch.latch_local_entry_hold()
             self.killswitch.trigger(KillLevel.L1, trigger="strategy_pause_failed",
                                     reason=f"could not persist strategy pause for {name}", actor="risk")
             raise

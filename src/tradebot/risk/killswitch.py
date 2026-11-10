@@ -40,6 +40,7 @@ class KillSwitch:
         if not isinstance(mode, Mode):
             raise ValueError("kill switch mode must be a Mode value")
         self._mode = mode
+        self._local_entry_hold = False
         self.store = store
         self.clock = clock
         self.kill_file = Path(kill_file) if kill_file is not None else None
@@ -83,7 +84,13 @@ class KillSwitch:
         return parse_iso(raw)
 
     # --- queries ----------------------------------------------------------
+    def latch_local_entry_hold(self) -> None:
+        """Process-local last resort when durable safety writes fail; never auto-cleared."""
+        self._local_entry_hold = True
+
     def can_open_entries(self) -> bool:
+        if self._local_entry_hold:
+            return False
         self.check_kill_file()
         state = self.state
         return (state.get("level") == KillLevel.L0.value
@@ -186,6 +193,8 @@ class KillSwitch:
             )
             return False
 
+        if self._local_entry_hold:
+            return refuse("local safety hold active")
         if self.mode is not Mode.PAPER:
             return refuse("live/testnet auto-resume requires independent recovery evidence; not implemented")
         if expected_state is None:
@@ -230,6 +239,8 @@ class KillSwitch:
             )
             raise PermissionError(why)
 
+        if self._local_entry_hold:
+            refuse("cannot reset while local safety hold is active")
         if self.check_kill_file():
             refuse("cannot reset while KILL file is present")
         if self.mode is not Mode.PAPER:

@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest pending-fill inspection and local failure hold (working branch)
+
+- `tradebot pending-fills --mode paper` (or testnet/live) reads bounded pending callback records from a read-only SQLite/WAL snapshot; malformed records fail inspection. Results are explicitly unverified and unusable for reset. Journal or key safety-persistence failures latch an additional non-clearing process-local entry hold before attempting L1.
+- Full suite **1152 passed, 2 skipped**; Ruff, mypy and `git diff --check` passed. The local hold does not survive process restart or protect other processes if the database is unavailable. Inspection is not replay, exchange evidence or permission to clear a hold; no safe release exists. Direct SQL, raw/custom venue calls and in-flight requests bypass these checks. Live promotion and live/testnet resets remain blocked. Dashboard process predates these changes.
+
 ## Latest fill callback journal pass (working branch)
 
 - Engine callbacks are journaled before queueing, with full-precision diagnostic fields and an event in one transaction. An outstanding record blocks normal entry checks and kill-switch resets, including after restart. A successful fill record and pending removal commit together; failures retain the hold. CCXT polling no longer marks a delta seen before the callback succeeds, and retries an observed terminal-order delta after callback failure.

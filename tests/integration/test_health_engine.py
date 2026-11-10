@@ -442,3 +442,23 @@ async def test_fill_ledger_error_keeps_durable_hold(engine):
     assert engine.store.has_pending_fill()
     assert engine.unapplied_fills == 1
     assert not engine.store.fills()
+
+
+async def test_fill_journal_and_kill_write_failure_still_latches_local_hold(engine, monkeypatch):
+    from decimal import Decimal
+
+    from tradebot.core.models import Fill, Side
+
+    fill = Fill(order_id="o", symbol="BTC/USDT", side=Side.BUY, price=Decimal("100"), qty=Decimal("1"),
+                fee=Decimal("0"), ts=START, strategy="S1")
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("storage unavailable")
+
+    monkeypatch.setattr(engine.store, "journal_pending_fill", fail)
+    monkeypatch.setattr(engine.store, "set_kill_state", fail)
+    with pytest.raises(RuntimeError, match="storage unavailable"):
+        engine.enqueue_fill(fill)
+    assert not engine.killswitch.can_open_entries()
+    with pytest.raises(PermissionError, match="local safety hold"):
+        engine.killswitch.reset(reason="test")

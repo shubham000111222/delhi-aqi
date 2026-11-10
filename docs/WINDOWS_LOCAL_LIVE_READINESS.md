@@ -330,3 +330,11 @@ not verify quote cash, pending fills, external ownership, open-order pagination,
 venue-side protection. Timing differences and manual activity can cause discrepancies.
 Even an empty difference list is **not** verified reconciliation or permission to reset.
 No records are modified and no holds are cleared.
+
+### Inspecting pending fill callbacks (diagnostic only)
+
+```powershell
+tradebot pending-fills --mode paper
+```
+
+Choose `testnet` or `live` only to inspect the corresponding configured database. This reads a bounded, read-only SQLite snapshot including committed WAL, and may contain sensitive trading data. A pending callback may have been partly or fully applied; local callback IDs are not venue trade IDs. An empty list does not prove venue reconciliation. **Do not manually delete a hold or replay its fill.** No authenticated release or verified replay workflow exists yet. If inspection fails, leave entries stopped, preserve the database and WAL, and independently inspect the venue; live/testnet resets remain blocked. A process-local emergency hold cannot survive a restart or protect another process if storage is unavailable.
