@@ -465,3 +465,14 @@ def test_live_adapter_refuses_kill_switch_with_wrong_mode():
         asyncio.run(adapter.place_order(request()))
     assert not [call for call in exchange.calls if call[0] == "create_order"]
     adapter.killswitch.store.close()
+
+
+def test_direct_live_adapter_refuses_disabled_strategy():
+    adapter, exchange = adapter_with()
+    store = adapter.killswitch.store
+    store.disable_strategy("S1", "fault", faults=3, ts=adapter.clock.now())
+    order = replace(request(), strategy="S1")
+    with pytest.raises(PermanentExchangeError, match="durably disabled"):
+        asyncio.run(adapter.place_order(order))
+    assert not [call for call in exchange.calls if call[0] == "create_order"]
+    store.close()

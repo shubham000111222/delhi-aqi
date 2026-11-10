@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest durable strategy-disable pass (working branch)
+
+- A repeated-fault strategy disable is now a durable latch committed together with an autonomy record and event. Engine restart restores it; order manager and CCXT entry paths reject that strategy, while protective exits remain possible. If persisting the disable fails, the engine attempts L1 and retains its in-process block.
+- Full suite **928 passed, 2 skipped**; Ruff (including tools), mypy and `git diff --check` passed. Fault budgets before a disable remain process-local; old disable events are not migrated; authenticated re-enable is not implemented. Direct SQL, misrepresented strategy identifiers, raw exchange access and in-flight orders bypass this boundary. A total database failure may prevent the fallback L1 transition.
+
 ## Latest critical flapping hold pass (working branch)
 
 - Serialize hold deadline extensions in SQLite so concurrent observers cannot shorten the hold or replace malformed safety state. Normal kill-switch entry checks now refuse active or corrupt holds even if failure occurs after hold persistence but before the L1 transition. Tests cover concurrency, malformed/null values, an interrupted transition and the actual order-manager entry boundary.

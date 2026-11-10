@@ -563,3 +563,28 @@ async def test_durable_flapping_hold_blocks_entry_before_l1(cfg):
     assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
     assert not adapter.orders
     store.close()
+
+
+async def test_disabled_strategy_cannot_submit_entry_but_exit_path_remains_available(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    manager = OrderManager(cfg, adapter, store, KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER), clock)
+    store.disable_strategy("S1", "fault", faults=3, ts=NOW)
+    signal = Signal(id="disabled-entry", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    # A disabled strategy's exit must reach the adapter, even if paper rejects it for no position.
+    calls = []
+    original = adapter.place_order
+
+    async def capture(request):
+        calls.append(request)
+        return await original(request)
+
+    adapter.place_order = capture
+    await manager.submit_exit("BTC/USDT", D("0.001"), "S1", "protect")
+    assert len(calls) == 1 and calls[0].reduce_only
+    store.close()

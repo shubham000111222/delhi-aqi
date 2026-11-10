@@ -313,3 +313,37 @@ async def test_corrupt_flapping_hold_blocks_entries_at_l0(engine, invalid):
     engine.store.kv_set("health_flapping_hold", invalid)
     assert engine.killswitch.level is KillLevel.L0
     assert not engine.killswitch.can_open_entries()
+
+
+async def test_disabled_strategy_survives_restart_and_does_not_expire(fast_cfg, tmp_path):
+    name = "S1_ema_trend"
+    path = tmp_path / "strategy-state.db"
+    fast_cfg.ensure_dirs()
+    engine = await Engine.build(fast_cfg, clock=SimClock(START), store=Store(path))
+    for _ in range(4):
+        engine._handle_strategy_fault(name, reason="repeated failure")
+    assert engine.store.strategy_disabled(name)
+    assert engine.store.autonomy_actions()[-1]["action"] == "disable_strategy"
+    engine.close()
+    restarted = await Engine.build(fast_cfg, clock=SimClock(START + timedelta(days=400)), store=Store(path))
+    try:
+        assert restarted._strategy_blocked(name)
+        assert name in restarted._disabled_strategies
+        assert restarted.store.count_events("strategy_disabled") == 1
+    finally:
+        restarted.close()
+
+
+async def test_disable_audit_failure_rolls_back_and_pauses_entries(engine):
+    import sqlite3
+
+    engine.store._exec("CREATE TRIGGER fail_disable BEFORE INSERT ON events WHEN NEW.kind='strategy_disabled' "
+                       "BEGIN SELECT RAISE(ABORT, 'disable audit failure'); END")
+    for _ in range(3):
+        engine._handle_strategy_fault("S1_ema_trend", reason="fault")
+    with pytest.raises(sqlite3.IntegrityError, match="disable audit failure"):
+        engine._handle_strategy_fault("S1_ema_trend", reason="fault")
+    assert not engine.store.strategy_disabled("S1_ema_trend")
+    assert not [row for row in engine.store.autonomy_actions() if row["action"] == "disable_strategy"]
+    assert engine.killswitch.level is KillLevel.L1
+    assert engine._strategy_blocked("S1_ema_trend")

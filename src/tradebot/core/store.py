@@ -193,6 +193,12 @@ CREATE TABLE IF NOT EXISTS autonomy (
     outcome TEXT NOT NULL DEFAULT 'ok'
 );
 
+CREATE TABLE IF NOT EXISTS disabled_strategies (
+    strategy TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    reason TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS approvals (
     id TEXT PRIMARY KEY,
     ts TEXT NOT NULL,
@@ -331,6 +337,37 @@ class Store:
             }
             for r in rows
         ]
+
+    def disable_strategy(self, name: str, reason: str, *, faults: int, ts: datetime) -> bool:
+        """Latch a strategy disabled, with its autonomy record and event in one transaction."""
+        if not name or not isinstance(name, str):
+            raise ValueError("strategy name is required")
+        timestamp = iso(ts)
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO disabled_strategies(strategy,ts,reason) VALUES(?,?,?)",
+                (name, timestamp, reason),
+            )
+            if not cursor.rowcount:
+                return False
+            conn.execute(
+                "INSERT INTO autonomy(ts,actor,action,level,detail,outcome) VALUES(?,?,?,?,?,?)",
+                (timestamp, "supervisor", "disable_strategy", 3, reason, "ok"),
+            )
+            conn.execute(
+                "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                (timestamp, "CRIT", "strategy_disabled", "supervisor", json.dumps({
+                    "strategy": name, "reason": reason, "faults_last_hour": faults,
+                })),
+            )
+        return True
+
+    def disabled_strategies(self) -> dict[str, str]:
+        return {row["strategy"]: row["reason"] for row in
+                self._query("SELECT strategy,reason FROM disabled_strategies")}
+
+    def strategy_disabled(self, name: str) -> bool:
+        return bool(self._query("SELECT 1 FROM disabled_strategies WHERE strategy=?", (name,)))
 
     # --- autonomy ledger and approvals (§21.7) ----------------------------
     def add_autonomy(

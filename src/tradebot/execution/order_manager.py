@@ -232,6 +232,14 @@ class OrderManager:
                     level="CRIT", actor="execution", ts=self.clock.now(),
                 )
                 return None
+            if not request.reduce_only and self.store.strategy_disabled(request.strategy):
+                self.store.log_event(
+                    "autonomy_refused", {"action": "re_enable_strategy", "strategy": request.strategy,
+                                         "reason": "strategy is durably disabled",
+                                         "client_order_id": request.client_order_id},
+                    level="CRIT", actor="execution", ts=self.clock.now(),
+                )
+                return None
             if not request.reduce_only and not self.killswitch.can_open_entries():
                 self.store.log_event(
                     "autonomy_refused",

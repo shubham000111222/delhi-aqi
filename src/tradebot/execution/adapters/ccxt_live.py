@@ -18,7 +18,7 @@ Safety choices baked in here:
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any
+from typing import Any, NoReturn
 
 from ...config import Config, Mode
 from ...core.clock import Clock, utcnow
@@ -174,7 +174,7 @@ class CcxtLiveAdapter(ExchangeAdapter):
             await self.exchange.close()
 
     # --- orders -----------------------------------------------------------
-    def _refuse_order(self, request: OrderRequest, reason: str) -> None:
+    def _refuse_order(self, request: OrderRequest, reason: str) -> NoReturn:
         if self._initial_killswitch is not None:
             self._initial_killswitch.store.log_event(
                 "autonomy_refused",
@@ -205,6 +205,8 @@ class CcxtLiveAdapter(ExchangeAdapter):
                 self._refuse_order(request, "kill switch mode does not match adapter mode")
             if self.killswitch is None or not self.killswitch.can_open_entries():
                 self._refuse_order(request, "kill switch blocks entry")
+            if self.killswitch.store.strategy_disabled(request.strategy):
+                self._refuse_order(request, "strategy is durably disabled")
         rules = self.get_market_rules(request.symbol)
         qty = round_qty(request.qty, rules.lot_step)
         price = round_price(request.price, rules.tick_size, request.side.value) if request.price else None

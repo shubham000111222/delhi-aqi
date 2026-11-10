@@ -196,6 +196,7 @@ class Engine:
         self.starting_capital = config.settings.starting_capital_usdt
         self.ramp = RampController(config, store)
         self._load_state()
+        self._disabled_strategies.update(self.store.disabled_strategies())
         # Close the crash window between persisting a sixth transition and setting L1.
         self._hold_on_flapping(now=self.clock.now())
 
@@ -1022,7 +1023,7 @@ class Engine:
     # strategy pausing / decay
     # ------------------------------------------------------------------
     def _strategy_blocked(self, name: str) -> bool:
-        if name in self._disabled_strategies:
+        if name in self._disabled_strategies or self.store.strategy_disabled(name):
             return True
         paused = self.store.kv_get("paused_strategies", {}) or {}
         info = paused.get(name)
@@ -1038,8 +1039,8 @@ class Engine:
 
         Restarting a strategy that raises deterministically looks like recovery from the
         outside: it comes back, trades nothing, and raises again. The budget is what makes
-        the third failure the last one for the session, and the disable is what a human
-        reads later. Open positions are untouched - their stops live in the ledger, not in
+        the third failure the last one for the session, and the durable disable is what a human
+        reads later; restart cannot re-enable it. Open positions are untouched - their stops live in the ledger, not in
         the strategy.
         """
         now = self.clock.now()
@@ -1048,18 +1049,12 @@ class Engine:
             self._pause_strategy(name, hours=1, reason=reason)
             return
         self._disabled_strategies[name] = reason
-        self._pause_strategy(name, hours=24 * 365, reason=f"disabled after 3 faults: {reason}")
-        self._log(
-            "strategy_disabled",
-            {
-                "strategy": name,
-                "reason": reason,
-                "faults_last_hour": self.strategy_faults.used(name, now=now),
-            },
-            level="CRIT",
-            actor="supervisor",
-            ts=now,
-        )
+        try:
+            self.store.disable_strategy(name, reason, faults=self.strategy_faults.used(name, now=now), ts=now)
+        except Exception:  # noqa: BLE001 - protect entries when the durable disable cannot be written
+            self.killswitch.trigger(KillLevel.L1, trigger="strategy_disable_failed",
+                                    reason=f"could not persist disable for {name}", actor="supervisor")
+            raise
 
     def _pause_strategy(self, name: str, *, hours: int, reason: str) -> None:
         paused = self.store.kv_get("paused_strategies", {}) or {}
