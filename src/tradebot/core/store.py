@@ -849,6 +849,24 @@ class Store:
     def kv_delete(self, key: str) -> None:
         self._exec("DELETE FROM kv WHERE key=?", (key,))
 
+    def extend_flapping_hold(self, until: datetime, components: list[str], *, ts: datetime) -> None:
+        """Atomically extend the hold; never overwrite malformed safety state."""
+        with self.transaction() as conn:
+            row = conn.execute("SELECT value FROM kv WHERE key='health_flapping_hold'").fetchone()
+            if row is not None:
+                try:
+                    existing = json.loads(row["value"])
+                    previous = parse_iso(existing["until"])
+                    if previous >= until:
+                        return
+                except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+                    return
+            conn.execute(
+                "INSERT INTO kv(key,value,updated_at) VALUES('health_flapping_hold',?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                (json.dumps({"until": iso(until), "components": components}), iso(ts)),
+            )
+
     # --- kill switch ------------------------------------------------------
     def set_kill_state(
         self,

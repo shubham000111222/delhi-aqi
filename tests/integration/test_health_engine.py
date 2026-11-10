@@ -288,3 +288,28 @@ async def test_kill_continues_flatten_when_incident_write_fails(engine, monkeypa
     assert engine.killswitch.level is KillLevel.L2
     assert engine.store.has_pending_kill_incident()
     flatten.assert_awaited_once_with("emergency")
+
+
+async def test_flapping_hold_blocks_entries_if_l1_transition_fails(engine, monkeypatch):
+    from tradebot.health import Check
+
+    for step in range(1, 7):
+        engine.health.report("feed", now=START + timedelta(seconds=step),
+                             ticks=Check(readiness=step % 2 == 0))
+    engine.clock.set(START + timedelta(seconds=7))
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("interrupted before L1")
+
+    monkeypatch.setattr(engine.killswitch, "trigger", fail)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        engine._hold_on_flapping(now=engine.clock.now())
+    assert engine.killswitch.level is KillLevel.L0
+    assert not engine.killswitch.can_open_entries()
+
+
+@pytest.mark.parametrize("invalid", [{"until": "bad"}, None, [], {}])
+async def test_corrupt_flapping_hold_blocks_entries_at_l0(engine, invalid):
+    engine.store.kv_set("health_flapping_hold", invalid)
+    assert engine.killswitch.level is KillLevel.L0
+    assert not engine.killswitch.can_open_entries()

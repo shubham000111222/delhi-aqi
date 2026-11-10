@@ -548,3 +548,18 @@ async def test_order_boundary_refuses_replaced_kill_switch(cfg):
     assert store.count_events("autonomy_refused") == 1
     store.close()
     other.close()
+
+
+async def test_durable_flapping_hold_blocks_entry_before_l1(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    store.extend_flapping_hold(NOW + timedelta(minutes=10), ["feed"], ts=NOW)
+    signal = Signal(id="hold-entry", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert switch.level is KillLevel.L0
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert not adapter.orders
+    store.close()

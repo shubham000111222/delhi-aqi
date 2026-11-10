@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest critical flapping hold pass (working branch)
+
+- Serialize hold deadline extensions in SQLite so concurrent observers cannot shorten the hold or replace malformed safety state. Normal kill-switch entry checks now refuse active or corrupt holds even if failure occurs after hold persistence but before the L1 transition. Tests cover concurrency, malformed/null values, an interrupted transition and the actual order-manager entry boundary.
+- Full suite **924 passed, 2 skipped**; Ruff (including tools), mypy and `git diff --check` passed. This does not cancel in-flight orders, protect direct exchange/SQL access or make the hold and L1 transition a single transaction; complete authenticated recovery remains open.
+
 ## Latest signed-request reviewability pass (working branch)
 
 - Tracking-fault acknowledgement requests now include the full signed kill-state snapshot, so the operator can review the actual state rather than only its hash. The verifier requires the snapshot and hash to match the current state. Earlier requests without the snapshot must be regenerated. The integration test exercises encrypted key creation, offline signing and the real CLI with a temporary test key.

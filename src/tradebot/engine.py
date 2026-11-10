@@ -1271,19 +1271,11 @@ class Engine:
         reason = f"flapping: {', '.join(critical)} changed state more than 5 times in 10 min"
         # The sixth newest transition ages out last. Persist its deadline before
         # returning so a restart or a separate CLI process cannot bypass the hold.
-        until: datetime | None = max(
+        until = max(
             sorted(self.health.components[name].transitions, reverse=True)[5] + timedelta(minutes=10)
             for name in critical
         )
-        existing = self.store.kv_get("health_flapping_hold")
-        if existing and until is not None:
-            try:
-                until = max(until, parse_iso(existing["until"]))
-            except (KeyError, TypeError, ValueError):
-                # Leave corrupt safety state in place: the kill switch fails closed.
-                until = None
-        if until is not None:
-            self.store.kv_set("health_flapping_hold", {"until": iso(until), "components": critical}, ts=now)
+        self.store.extend_flapping_hold(until, critical, ts=now)
         self._healthy_since = None
         self._healthy_pause_state = None
         if self.killswitch.trigger(KillLevel.L1, trigger="flapping", reason=reason, actor="health"):

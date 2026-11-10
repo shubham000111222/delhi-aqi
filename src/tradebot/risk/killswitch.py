@@ -9,6 +9,7 @@ the narrowly scoped L1 recovery paths; every transition is written to the event 
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -87,6 +88,7 @@ class KillSwitch:
         state = self.state
         return (state.get("level") == KillLevel.L0.value
                 and not state.get("incident_tracking_failed")
+                and not self.flapping_hold_active()
                 and not self.store.has_pending_kill_incident()
                 and not self.store.has_invalid_ramp_tracking())
 
@@ -108,10 +110,11 @@ class KillSwitch:
 
     def flapping_hold_active(self) -> bool:
         """A durable pause survives engine restarts and applies to every L0 reset path."""
-        hold = self.store.kv_get("health_flapping_hold")
-        if hold is None:
+        rows = self.store._query("SELECT value FROM kv WHERE key='health_flapping_hold'")
+        if not rows:
             return False
         try:
+            hold = json.loads(rows[0]["value"])
             return self.now() <= parse_iso(hold["until"])
         except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
             # Corrupt safety state must never quietly authorize trading.
