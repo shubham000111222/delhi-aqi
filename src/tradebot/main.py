@@ -311,6 +311,38 @@ def cmd_live_check(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def cmd_venue_observe(args: argparse.Namespace) -> int:
+    """Read a venue account snapshot without trading, reconciliation or reset authority."""
+    from .data.hub import MarketData
+    from .execution.adapters.ccxt_live import CcxtLiveAdapter
+    from .execution.venue_observation import ObservationError, observe_account
+
+    cfg = _config(args)
+    if cfg.mode not in (Mode.LIVE, Mode.TESTNET):
+        print("venue-observe requires --mode testnet or --mode live", file=sys.stderr)
+        return 2
+
+    async def _go() -> dict[str, Any]:
+        clock = Clock()
+        adapter = CcxtLiveAdapter(cfg, MarketData(cfg.symbol_names()), clock, testnet=cfg.mode is Mode.TESTNET)
+        try:
+            await adapter.connect()
+            return await observe_account(adapter.exchange, mode=cfg.mode.value, clock=clock)
+        finally:
+            await adapter.close()
+
+    try:
+        result = asyncio.run(_go())
+    except ObservationError as exc:
+        print(f"venue observation failed: {exc}", file=sys.stderr)
+        return 1
+    except Exception:  # noqa: BLE001 - do not expose credentials or raw venue responses
+        print("venue observation failed: could not connect to venue", file=sys.stderr)
+        return 1
+    _print(result)
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     cfg = _config(args)
     if cfg.mode is Mode.LIVE:
@@ -947,6 +979,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="stop after N minutes of wall clock instead of running until interrupted "
              "(the engine clock in a live session is real time, so minutes are real minutes)",
     )
+
+    sub.add_parser("venue-observe", help="read venue balances and open orders (not reset or safety evidence)")
 
     live_check = sub.add_parser("live-check", help="run every live-mode gate (never trades)")
     live_check.add_argument("--confirm", default=None)
@@ -2852,6 +2886,7 @@ def main(argv: list[str] | None = None) -> int:
         "backtest": cmd_backtest,
         "run": cmd_run,
         "live-check": cmd_live_check,
+        "venue-observe": cmd_venue_observe,
         "status": cmd_status,
         "metrics": cmd_metrics,
         "report": cmd_report,

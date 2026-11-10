@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest read-only venue observation pass (working branch)
+
+- Added `tradebot venue-observe --mode testnet` (also supports explicit live mode) to query CCXT total/free/used balances and the no-symbol open-orders endpoint directly, rather than relying on the in-process order cache. It checks explicit endpoint capabilities, validates response shapes/amounts, bounds results and timeouts, and performs no order mutation. Results explicitly mark completeness, atomicity and reset usability false.
+- Full suite **1076 passed, 2 skipped**; Ruff (including tools), mypy and `git diff --check` passed. Tests use fakes only; no real exchange was contacted. Pagination, account coverage, venue semantics, independent ledger comparison and authenticated reset remain unverified/unbuilt. Output contains sensitive account data; the Windows procedure warns about its handling. The dashboard process predates the change.
+
 ## Latest promotion-preflight integrity pass (working branch)
 
 - The live go/no-go gate now fails closed because current promotion evidence has no verified provenance and the actual 2× rerun is not integrated. A guard check no longer overwrites/refreshes the legacy `go_nogo` record; its result goes to `live_guard_latest`. Typed confirmation requires the exact amount and a standalone LIVE token. Feed/reconciliation caller assertions must be booleans, unverified clock inputs fail, reconciliation cannot be disabled via config, and the kill preflight includes KILL and durable holds.

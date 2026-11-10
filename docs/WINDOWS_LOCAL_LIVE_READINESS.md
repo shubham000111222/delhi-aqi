@@ -295,3 +295,22 @@ A completed worksheet requires actual evidence, not only checked boxes. Update t
 > and the actual 2× cost rerun are not integrated. Re-running `live-check` or editing a local
 > `go_nogo` row cannot authorize live trading. The reconciliation requirement cannot be disabled
 > by configuration. The latest guard result is stored separately as `live_guard_latest`.
+
+### Read-only venue observation (diagnostic, not reset evidence)
+
+After you have independently configured a testnet account and its credentials locally,
+`venue-observe` queries CCXT's balance endpoint and its no-symbol open-orders endpoint:
+
+```powershell
+tradebot venue-observe --mode testnet
+```
+
+This prints sensitive account balances and order identifiers to your terminal. Protect any
+copy or redirected file; do not paste credentials or account output into chat. The command
+places and cancels no orders. It requires both endpoints to be reported as supported and
+fails on malformed responses or timeouts. The requests are separate, not an atomic snapshot;
+results may be paginated or incomplete and no venue behavior has been verified. A successful
+command explicitly reports `orders_complete: false` and `usable_for_reset: false`. It does
+not compare against the local ledger, clear a hold, reset the kill switch, authorize trading,
+or replace an exchange-app review. `--mode live` would query the actual live account; do not
+run it against real money as a substitute for testnet validation and the remaining gates.
