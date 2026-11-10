@@ -944,23 +944,57 @@ class Store:
         payload: dict[str, Any] | None = None,
         ts: datetime | None = None,
     ) -> int:
+        """Persist an incident and its audit atomically; track critical ramp incidents.
+
+        A corrupt ramp cannot be repaired here: record a durable invalid marker instead,
+        so live ramp sizing remains blocked without suppressing the incident.
+        """
+        from ..risk.live_guards import RampController
+
         payload = payload or {}
-        cur = self._exec(
-            "INSERT INTO incidents(ts,level,trigger,summary,payload) VALUES(?,?,?,?,?)",
-            (iso(ts or utcnow()), level, trigger, summary, json.dumps(payload, default=str)),
-        )
+        now = ts or utcnow()
+        timestamp = iso(now)
+        critical = level in ("L2", "L3", "CRIT")
         with self.transaction() as conn:
+            cur = conn.execute(
+                "INSERT INTO incidents(ts,level,trigger,summary,payload) VALUES(?,?,?,?,?)",
+                (timestamp, level, trigger, summary, json.dumps(payload, default=str)),
+            )
+            incident_id = int(cur.lastrowid or 0)
             conn.execute(
                 "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
-                (
-                    iso(ts or utcnow()),
-                    "CRIT" if level in ("L2", "L3") else "WARN",
-                    "incident",
-                    "system",
-                    json.dumps({"level": level, "trigger": trigger, "summary": summary} | payload, default=str),
-                ),
+                (timestamp, "CRIT" if critical else "WARN", "incident", "system",
+                 json.dumps({"level": level, "trigger": trigger, "summary": summary} | payload, default=str)),
             )
-        return int(cur.lastrowid or 0)
+            if critical:
+                try:
+                    state = RampController._state_in_transaction(conn)
+                except (ValueError, TypeError, OverflowError):
+                    conn.execute(
+                        "INSERT INTO kv(key,value,updated_at) VALUES('ramp_incident_tracking_invalid',?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                        (json.dumps({"incident_id": incident_id, "reason": "invalid ramp state"}), timestamp),
+                    )
+                    conn.execute(
+                        "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                        (timestamp, "CRIT", "ramp_incident_tracking_invalid", "ramp",
+                         json.dumps({"incident_id": incident_id, "trigger": trigger})),
+                    )
+                else:
+                    state.critical_incidents += 1
+                    conn.execute(
+                        "INSERT INTO kv(key,value,updated_at) VALUES('ramp',?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                        (json.dumps(state.to_dict()), timestamp),
+                    )
+                    conn.execute(
+                        "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                        (timestamp, "WARN", "ramp_incident", "ramp", json.dumps({
+                            "incident_id": incident_id, "stage": state.stage,
+                            "critical_incidents": state.critical_incidents,
+                        })),
+                    )
+        return incident_id
 
     def incidents(self, limit: int = 50, since: datetime | None = None) -> list[dict[str, Any]]:
         if since:

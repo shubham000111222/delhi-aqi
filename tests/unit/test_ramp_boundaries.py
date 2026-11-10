@@ -52,7 +52,7 @@ def test_elapsed_time_does_not_authorize_ramp(cfg):
 
 
 @pytest.mark.parametrize("raw", [{"stage": 4}, {"stage": -1}, {"stage": "3"},
-                                  {"critical_incidents": -1}, {"stage_started": "bad"}, []])
+                                  {"critical_incidents": -1}, {"stage_started": "bad"}, [], None])
 def test_corrupt_ramp_blocks_live_sizing(cfg, raw):
     store = Store(":memory:")
     store.kv_set("ramp", raw)
@@ -125,3 +125,84 @@ def test_sizing_rejects_invalid_risk_increasing_multipliers(cfg, field, value):
                         limits=cfg.risk, rules=rules, **{field: value})
     assert result.qty == 0
     assert result.binding == f"invalid_{field}"
+
+
+def test_critical_incidents_register_automatically(cfg):
+    store = Store(":memory:")
+    ramp = RampController(live(cfg), store)
+    store.add_incident("L1", "feed", "pause", ts=NOW)
+    assert ramp.load().critical_incidents == 0
+    for level in ("L2", "L3", "CRIT"):
+        store.add_incident(level, "test", "critical", ts=NOW)
+    assert ramp.load().critical_incidents == 3
+    assert len(store.incidents()) == 4
+    assert store.count_events("incident") == 4
+    assert store.count_events("ramp_incident") == 3
+    store.close()
+
+
+def test_real_kill_escalation_registers_incident(cfg):
+    from tradebot.core.clock import SimClock
+    from tradebot.core.models import KillLevel
+    from tradebot.risk.killswitch import KillSwitch
+
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    switch.trigger(KillLevel.L2, trigger="test", reason="critical")
+    assert RampController(live(cfg), store).load().critical_incidents == 1
+    assert store.incidents()[0]["trigger"] == "test"
+    assert store.count_events("ramp_incident") == 1
+    store.close()
+
+
+def test_corrupt_ramp_does_not_prevent_escalation_but_blocks_live_even_after_repair(cfg):
+    from tradebot.core.clock import SimClock
+    from tradebot.core.models import KillLevel
+    from tradebot.risk.killswitch import KillSwitch
+
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None)
+    store.kv_set("ramp", {"stage": "corrupt"})
+    assert switch.trigger(KillLevel.L2, trigger="test", reason="critical")
+    assert switch.level is KillLevel.L2
+    assert len(store.incidents()) == 1
+    assert store.count_events("ramp_incident_tracking_invalid") == 1
+    store.kv_set("ramp", {"stage": 0})
+    with pytest.raises(ValueError, match="incident tracking"):
+        RampController(live(cfg), store).multiplier()
+    store.close()
+
+
+def test_critical_incident_and_ramp_audit_fail_atomically(cfg):
+    import sqlite3
+
+    store = Store(":memory:")
+    store._exec("CREATE TRIGGER fail_ramp BEFORE INSERT ON events WHEN NEW.kind='ramp_incident' "
+                "BEGIN SELECT RAISE(ABORT, 'audit failed'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="audit failed"):
+        store.add_incident("L2", "test", "failure", ts=NOW)
+    assert not store.incidents()
+    assert store.count_events("incident") == 0
+    assert RampController(live(cfg), store).load().critical_incidents == 0
+    store.close()
+
+
+def test_critical_incident_counter_does_not_lose_concurrent_writes(tmp_path, cfg):
+    path = tmp_path / "incidents.db"
+    root = Store(path)
+    root.close()
+
+    def write(index):
+        store = Store(path)
+        try:
+            store.add_incident("CRIT", f"test-{index}", "critical", ts=NOW)
+        finally:
+            store.close()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(write, range(16)))
+    store = Store(path)
+    assert len(store.incidents()) == 16
+    assert RampController(live(cfg), store).load().critical_incidents == 16
+    assert store.count_events("ramp_incident") == 16
+    store.close()

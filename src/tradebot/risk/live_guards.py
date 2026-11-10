@@ -97,10 +97,21 @@ class RampController:
     @classmethod
     def _state_in_transaction(cls, conn: Any) -> RampState:
         row = conn.execute("SELECT value FROM kv WHERE key='ramp'").fetchone()
-        return cls._state(json.loads(row["value"]) if row else None)
+        if row is None:
+            return cls._state(None)
+        raw = json.loads(row["value"])
+        if raw is None:
+            raise ValueError("invalid persisted ramp state")
+        return cls._state(raw)
 
     def load(self) -> RampState:
-        return self._state(self.store.kv_get("ramp"))
+        rows = self.store._query("SELECT value FROM kv WHERE key='ramp'")
+        if not rows:
+            return self._state(None)
+        raw = json.loads(rows[0]["value"])
+        if raw is None:
+            raise ValueError("invalid persisted ramp state")
+        return self._state(raw)
 
     def save(self, state: RampState) -> None:
         """Save only a non-escalating, non-clearing state; no approval consumer exists."""
@@ -178,6 +189,8 @@ class RampController:
         # Existing database stages predate authentication. Do not trust them to raise
         # exposure; cap at the initial 10% until a real authorization path is built.
         self.load()
+        if self.store.kv_get("ramp_incident_tracking_invalid") is not None:
+            raise ValueError("live ramp incident tracking is invalid; operator investigation required")
         if not self.guards.ramp_multipliers:
             raise ValueError("live ramp requires an initial multiplier")
         initial = self.guards.ramp_multipliers[0]

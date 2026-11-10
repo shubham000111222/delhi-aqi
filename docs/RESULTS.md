@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest critical-incident ramp accounting pass (working branch)
+
+- L2, L3 and CRIT records written through `Store.add_incident` now atomically commit incident, audit events and ramp counter; watchdog and kill-switch paths use that method. A corrupt ramp records the incident and a durable invalid-tracking marker instead of preventing the already-issued escalation. Live ramp sizing remains blocked even if the ramp row alone is repaired. A present JSON null ramp is now treated as corrupt, not as an absent default.
+- Regression coverage includes kill switch, watchdog, concurrent writers, corrupt state and injected audit failure. Full suite **862 passed, 2 skipped**; Ruff, mypy and `git diff --check` passed.
+- Kill escalation and its incident record are **separate transactions**. A crash or incident-write failure between them can leave tracking incomplete, and the propagated error can interrupt subsequent protective actions. Other unrecorded incidents and legacy records are not backfilled. The marker is not an authenticated recovery mechanism, and direct database writes can bypass it. The dashboard process must restart to load this change.
+
 ## Latest live-ramp allocation boundary pass (working branch)
 
 - Live ramp advancement now records a refusal instead of raising allocation; direct ramp saves cannot increase stages or clear incidents, and concurrent incident increments commit with audit events. Legacy unverified stages are capped to the initial 10% live sizing multiplier (or a stricter configured initial cap). Risk-sizing multipliers outside 0–1 or non-finite are refused; status distinguishes recorded stage from effective multiplier.

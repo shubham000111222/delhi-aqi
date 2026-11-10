@@ -506,3 +506,16 @@ async def test_changed_stale_db_pulse_cannot_validate_unchanged_fresh_file(fast_
     result = await watch.act_async()
     assert result["restart"]["verified"] is False
     store.close()
+
+
+def test_watchdog_escalation_registers_critical_ramp_incident(fast_cfg):
+    from tradebot.core.models import KillLevel
+    from tradebot.risk.live_guards import RampController
+
+    store = Store(":memory:")
+    watchdog = Watchdog(fast_cfg, store, clock=SimClock(T0), kill_file=None)
+    watchdog._escalate(KillLevel.L2, "watchdog_test", "critical")
+    assert store.kill_level() == "L2"
+    assert RampController(fast_cfg, store).load().critical_incidents == 1
+    assert store.incidents()[0]["trigger"] == "watchdog_test"
+    store.close()
