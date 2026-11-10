@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest signed strategy reduction pass (working branch)
+
+- An offline-signed, database/mode/strategy/current-state-bound, single-use action can now reduce the durable multiplier of an enabled strategy. The mutation, signature consumption and audit are atomic; expiry and trust are rechecked under lock. The existing offline signer and CLI support the action. No multiplier increase, hold release or live-readiness authorization is provided.
+- Full suite **1166 passed, 2 skipped**; Ruff, mypy and `git diff --check` passed. Key possession is not human identity, and actual submitted quantity is not proven by the multiplier assertion. Raw SQL, custom/direct venue calls, misconfigured processes and in-flight orders remain bypasses. Live promotion and live/testnet resets remain blocked; the dashboard process predates these changes.
+
 ## Latest pending-fill inspection and local failure hold (working branch)
 
 - `tradebot pending-fills --mode paper` (or testnet/live) reads bounded pending callback records from a read-only SQLite/WAL snapshot; malformed records fail inspection. Results are explicitly unverified and unusable for reset. Journal or key safety-persistence failures latch an additional non-clearing process-local entry hold before attempting L1.

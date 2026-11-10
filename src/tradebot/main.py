@@ -659,6 +659,36 @@ def cmd_allocation_apply(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_strategy_reduction_request(args: argparse.Namespace) -> int:
+    from .signed_strategy import SignedStrategyReduction
+
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    try:
+        _print(SignedStrategyReduction(cfg, store).request(args.key_id, args.reason, args.strategy, args.multiplier))
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_strategy_reduction_apply(args: argparse.Namespace) -> int:
+    from .signed_strategy import SignedStrategyReduction
+
+    request_path, signature_path = Path(args.request), Path(args.signature)
+    if request_path.stat().st_size > 16384 or signature_path.stat().st_size > 1024:
+        raise ValueError("strategy reduction input file is too large")
+    request = json.loads(request_path.read_text(encoding="utf-8-sig"))
+    signature = signature_path.read_text(encoding="utf-8-sig").strip()
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    try:
+        SignedStrategyReduction(cfg, store).apply(request, signature)
+        print("strategy size reduced; live readiness and kill level unchanged")
+    finally:
+        store.close()
+    return 0
+
+
 def cmd_health(args: argparse.Namespace) -> int:
     """One health check, printed: what each component answered and what the model made of it.
 
@@ -1168,6 +1198,15 @@ def build_parser() -> argparse.ArgumentParser:
     alloc_apply = sub.add_parser("allocation-apply", help="consume a signed live allocation cap reduction")
     alloc_apply.add_argument("--request", required=True)
     alloc_apply.add_argument("--signature", required=True)
+
+    strat_req = sub.add_parser("strategy-reduction-request", help="request a signed strategy size reduction")
+    strat_req.add_argument("--key-id", required=True)
+    strat_req.add_argument("--reason", required=True)
+    strat_req.add_argument("--strategy", required=True)
+    strat_req.add_argument("--multiplier", required=True, help="new multiplier as a decimal fraction")
+    strat_apply = sub.add_parser("strategy-reduction-apply", help="consume a signed strategy size reduction")
+    strat_apply.add_argument("--request", required=True)
+    strat_apply.add_argument("--signature", required=True)
 
     hlth = sub.add_parser("health", help="run one health check and print component state")
     hlth.add_argument("--json", action="store_true")
@@ -2957,6 +2996,8 @@ def main(argv: list[str] | None = None) -> int:
         "recovery-apply": cmd_recovery_apply,
         "allocation-request": cmd_allocation_request,
         "allocation-apply": cmd_allocation_apply,
+        "strategy-reduction-request": cmd_strategy_reduction_request,
+        "strategy-reduction-apply": cmd_strategy_reduction_apply,
         "alerts": cmd_alerts,
         "watchdog": cmd_watchdog,
         "experiments": cmd_experiments,

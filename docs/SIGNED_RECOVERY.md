@@ -127,3 +127,29 @@ missing, invalid or stale live sizing after a cap reduction. This is a caller as
 proof of the quantity or sizing calculation; it can be misrepresented and the cap can change
 after the final check. Real venue behavior has not been tested. An invalid cap blocks normal live sizing. Live ramp
 increases and live/testnet kill resets remain blocked.
+
+## Signed strategy size reduction
+
+This separate, action-bound workflow can **only lower** the durable sizing multiplier for
+an enabled strategy in the selected mode; it cannot clear it, increase risk, remove a
+pause, reset the kill switch, or certify live readiness. It uses the same provisioned
+key bundle and offline signer described above. The signing key proves key possession,
+not a person's identity. The configuration, key bundle and SQLite database require
+independent OS protection. Example PowerShell, using an already-provisioned key:
+
+```powershell
+$KeyId = '<public-key-fingerprint>'
+tradebot strategy-reduction-request --mode paper --key-id $KeyId --reason 'Reduce strategy risk' --strategy 'S1_ema_trend' --multiplier '0.30' | Set-Content -Encoding UTF8 "$env:TEMP\strategy-request.json"
+python tools/sign_recovery.py --private-key 'C:\secure\operator-key.pem' --request "$env:TEMP\strategy-request.json" --signature "$env:TEMP\strategy.sig"
+tradebot strategy-reduction-apply --mode paper --request "$env:TEMP\strategy-request.json" --signature "$env:TEMP\strategy.sig"
+```
+
+Review the complete request on the offline signer. It binds mode, database ID, strategy,
+previous and new multiplier, reason, key, nonce and expiry. Applying rechecks current
+state, key trust and expiry within the SQLite transaction, and records the action and
+single-use consumption atomically. A concurrently changed multiplier makes it stale.
+Normal engine sizing uses this value and manager/CCXT paths recheck a caller-supplied
+assertion, **not the actual quantity**. Direct SQL, raw/custom adapters, untrusted callers,
+misconfigured independent processes and already in-flight orders can bypass the control.
+No authenticated multiplier increase/release workflow exists. Never edit SQLite to
+remove a reduction as a substitute for the missing recovery workflow.
