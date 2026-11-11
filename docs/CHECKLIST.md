@@ -19,7 +19,7 @@ For the full Windows installation, implementation and validation procedure, see
 For the consolidated item-by-item implementation and external-evidence backlog, see
 [`REMAINING_WORK.md`](REMAINING_WORK.md). It does not mark unfinished work complete.
 
-**Last updated:** 2026-11-02 · **Suite:** 1226 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-02 · **Suite:** 1231 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -30,6 +30,7 @@ machine; this workspace has no real-price archive.
 - [x] Add action-bound, single-use offline-signed reductions of an enabled strategy size; this cannot authorize increases or release holds.
 - [x] Serialize consecutive-loss updates and threshold actions across engines with a single SQLite transaction; corrupt streak records block normal entries.
 - [x] Commit the normal persisted position closure and loss-streak controls in one SQLite transaction; refuse a repeated close of the same open row.
+- [x] Reserve durable CCXT client identities before submission and retain unresolved-submission holds across restart; normal entries/resets block, and cached identity loss cannot cause same-ID resubmission through this path. Not authenticated recovery or trade replay.
 - [x] Expose read-only execution recovery hold counts in dashboard snapshot/autonomy API and panel, including corrupt markers; empty counts never certify reconciliation or entry permission.
 - [x] Query post-cancellation order state before reporting CCXT success; emit final observed partial fills and durably hold entries on failed/unconfirmed cancellation instead of inventing canceled status.
 - [x] Persist the first invalid execution-observation hold with audit; ordinary entries and transactional resets block across restart, with a local fallback on storage failure. No authenticated release workflow yet.

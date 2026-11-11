@@ -7,6 +7,7 @@ day-start equity, peak equity, loss streaks, ramp stage and the audit chain.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -871,6 +872,38 @@ class Store:
                          })))
         return identifier
 
+    def claim_order_submission(self, venue: str, client_id: str) -> str:
+        """Reserve a client identity before network I/O; never reused or auto-expired."""
+        if not client_id or len(client_id) > 256:
+            raise ValueError("invalid submission client ID")
+        identifier = hashlib.sha256(json.dumps([venue, client_id]).encode()).hexdigest()
+        payload = json.dumps({"venue": venue, "client_id": client_id})
+        now = iso(utcnow())
+        with self.transaction() as conn:
+            if conn.execute("SELECT 1 FROM kv WHERE key=?", (f"order_identity:{identifier}",)).fetchone():
+                raise ValueError("client ID already reserved; outcome requires recovery")
+            conn.execute("INSERT INTO kv(key,value,updated_at) VALUES(?,?,?)",
+                         (f"order_identity:{identifier}", payload, now))
+            conn.execute("INSERT INTO kv(key,value,updated_at) VALUES(?,?,?)",
+                         (f"submission_pending:{identifier}", payload, now))
+            conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                         (now, "WARN", "order_submission_intent", "execution", payload))
+        return identifier
+
+    def acknowledge_order_submission(self, identifier: str) -> None:
+        """Only complete the network-response stage, not fill recovery/reconciliation."""
+        with self.transaction() as conn:
+            row = conn.execute("SELECT value FROM kv WHERE key=?",
+                               (f"submission_pending:{identifier}",)).fetchone()
+            if row is None:
+                raise ValueError("submission intent missing")
+            conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                         (iso(utcnow()), "INFO", "order_submission_observed", "execution", row["value"]))
+            conn.execute("DELETE FROM kv WHERE key=?", (f"submission_pending:{identifier}",))
+
+    def has_pending_submission(self) -> bool:
+        return bool(self._query("SELECT 1 FROM kv WHERE key GLOB 'submission_pending:*' LIMIT 1"))
+
     def latch_execution_observation_fault(self, order_id: str) -> None:
         """Retain the first invalid-observation hold and audit atomically; no clear API."""
         payload = json.dumps({"order_id": order_id[:256], "verified": False})
@@ -893,10 +926,11 @@ class Store:
         row = self._query("""SELECT
             COALESCE(SUM(CASE WHEN key GLOB 'fill_pending:*' THEN 1 ELSE 0 END), 0) AS fills,
             COALESCE(SUM(CASE WHEN key GLOB 'kill_incident_pending:*' THEN 1 ELSE 0 END), 0) AS incidents,
-            COALESCE(SUM(CASE WHEN key='execution_observation_fault' THEN 1 ELSE 0 END), 0) AS observation
+            COALESCE(SUM(CASE WHEN key='execution_observation_fault' THEN 1 ELSE 0 END), 0) AS observation,
+            COALESCE(SUM(CASE WHEN key GLOB 'submission_pending:*' THEN 1 ELSE 0 END), 0) AS submissions
             FROM kv"""
         )[0]
-        counts = {"pending_fill_callbacks": int(row["fills"]),
+        counts = {"unresolved_submissions": int(row["submissions"]), "pending_fill_callbacks": int(row["fills"]),
                   "pending_kill_incidents": int(row["incidents"]),
                   "invalid_execution_observation": bool(row["observation"])}
         return {**counts, "recovery_required": any(counts.values()),
@@ -1283,7 +1317,7 @@ class Store:
                 current.get("incident_tracking_failed") or conn.execute(
                     "SELECT 1 FROM kv WHERE key GLOB 'kill_incident_pending:*' LIMIT 1"
                 ).fetchone() is not None or conn.execute(
-                    "SELECT 1 FROM kv WHERE key GLOB 'fill_pending:*' LIMIT 1"
+                    "SELECT 1 FROM kv WHERE key GLOB 'submission_pending:*' OR key GLOB 'fill_pending:*' LIMIT 1"
                 ).fetchone() is not None or conn.execute(
                     "SELECT 1 FROM kv WHERE key IN ('ramp_incident_tracking_invalid', 'execution_observation_fault')"
                 ).fetchone() is not None

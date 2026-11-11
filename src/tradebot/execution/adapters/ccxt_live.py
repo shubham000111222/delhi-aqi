@@ -253,6 +253,15 @@ class CcxtLiveAdapter(ExchangeAdapter):
         if request.stop_price is not None:
             params["stopPrice"] = float(request.stop_price)
             params["triggerPrice"] = float(request.stop_price)
+        if request.type is OrderType.LIMIT and price is None:
+            raise PermanentExchangeError("limit order requires a price")
+        if self.killswitch is None:
+            raise PermanentExchangeError("durable submission tracking requires a kill switch")
+        try:
+            submission_id = self.killswitch.store.claim_order_submission(self.name, request.client_order_id)
+        except Exception as exc:  # noqa: BLE001 - never submit without durable intent
+            self.killswitch.latch_local_entry_hold()
+            raise PermanentExchangeError("could not reserve submission identity") from exc
         try:
             if request.type is OrderType.LIMIT:
                 if price is None:
@@ -305,6 +314,11 @@ class CcxtLiveAdapter(ExchangeAdapter):
         # Immediate and initial partial fills need the same callback as polled fills.
         # Keep the delta unseen if the callback cannot durably journal it.
         self._emit_observed_fill(request.client_order_id, order)
+        try:
+            self.killswitch.store.acknowledge_order_submission(submission_id)
+        except Exception as exc:  # noqa: BLE001
+            self.killswitch.latch_local_entry_hold()
+            raise PermanentExchangeError("could not acknowledge submission outcome") from exc
         return order
 
     async def cancel_order(self, client_order_id: str, symbol: str | None = None) -> bool:

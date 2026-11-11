@@ -106,6 +106,7 @@ class KillSwitch:
                 and not self.flapping_hold_active()
                 and not self.store.has_pending_kill_incident()
                 and not self.store.has_pending_fill()
+                and not self.store.has_pending_submission()
                 and not self.store.has_execution_observation_fault()
                 and not self.store.has_invalid_ramp_tracking())
 

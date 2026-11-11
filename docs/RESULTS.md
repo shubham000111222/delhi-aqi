@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest durable submission fence pass (working branch)
+
+- Normal CCXT submission now reserves a venue/client-ID hash and pending marker with audit before network I/O. The fence is retained permanently; an adapter without a cached order refuses reuse instead of resubmitting. A pending marker blocks ordinary entries and transactional resets across restart. Validated response delivery and its audit remove only the submission-stage marker, not the identity fence or other holds. Unresolved counts appear in recovery diagnostics.
+- Full suite **1231 passed, 2 skipped**; Ruff, mypy and diff checks passed. Tests cover persistent pending/reset refusal, retained identity after acknowledgement, transaction audit rollback, adapter restart duplicate refusal and network-error containment.
+- This is conservative containment, not recovery. Even definite venue rejections leave a hold; there is no authenticated replay/release workflow. Earlier submissions are not migrated. Fence scope depends on adapter name/database, not independently attested account identity. Successful response acknowledgement does not prove final fills or venue completeness; poll watermarks remain local and no request/quantity binding is supplied. Raw Store writes, direct venue calls, another database and in-flight orders bypass this boundary. Identity records grow without retention (deleting them would weaken deduplication). Live promotion/resets remain blocked; D–I remain incomplete.
+
 ## Latest execution-recovery visibility pass (working branch)
 
 - Added a single-statement diagnostic count of pending fill callbacks, pending kill incidents and invalid execution-observation marker presence. The dashboard snapshot and `/api/autonomy` expose counts without marker payloads or private order identities; the panel uses text-only rendering. Corrupt marker payloads still count. Empty counts explicitly do not establish entry permission or verified reconciliation, and no release endpoint exists.

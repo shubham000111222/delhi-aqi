@@ -828,3 +828,26 @@ def test_cancel_final_fill_callback_failure_remains_retryable():
     asyncio.run(adapter.drain_pending())
     assert len(fills) == 1
     assert not adapter.killswitch.can_open_entries()
+
+
+def test_restart_cannot_resubmit_successfully_observed_client_id():
+    adapter, exchange = adapter_with()
+    asyncio.run(adapter.place_order(request()))
+    restarted = CcxtLiveAdapter(adapter.cfg, adapter.market, adapter.clock, exchange=exchange,
+                                killswitch=adapter.killswitch)
+    asyncio.run(restarted.connect())
+    with pytest.raises(PermanentExchangeError, match='reserve submission identity'):
+        asyncio.run(restarted.place_order(request()))
+    assert len(exchange.created) == 1
+
+
+def test_network_create_error_leaves_durable_pending_intent():
+    adapter, exchange = adapter_with(fail_on_create=NetworkError('unknown outcome'))
+    with pytest.raises(TransientExchangeError):
+        asyncio.run(adapter.place_order(request()))
+    assert adapter.killswitch.store.has_pending_submission()
+    assert not adapter.killswitch.can_open_entries()
+    assert len([c for c in exchange.calls if c[0] == 'create_order']) == 1
+    with pytest.raises(PermanentExchangeError):
+        asyncio.run(adapter.place_order(request()))
+    assert len([c for c in exchange.calls if c[0] == 'create_order']) == 1

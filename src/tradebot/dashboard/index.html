@@ -367,6 +367,7 @@ function renderAutonomy(view) {
   addTextRow(box, "Execution recovery", !recovery ? "Unavailable — not verified" :
     recovery.recovery_required ? "REQUIRED — durable hold present" : "No listed holds — not entry permission");
   if (recovery) {
+    addTextRow(box, "Unresolved submissions", recovery.unresolved_submissions);
     addTextRow(box, "Pending fill callbacks", recovery.pending_fill_callbacks);
     addTextRow(box, "Pending kill incidents", recovery.pending_kill_incidents);
     addTextRow(box, "Invalid venue observation", recovery.invalid_execution_observation ? "HOLD" : "Not recorded");
