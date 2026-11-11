@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest cancellation outcome pass (working branch)
+
+- CCXT cancellation now follows its acknowledgement with an order query and refuses success while the observed order remains open. It emits any final observed fill through the normal callback before reporting success. Cancellation errors no longer invent a canceled status; errors and unconfirmed outcomes latch the durable observation hold (local fallback if storage fails).
+- Five fake-exchange cases cover a final partial fill, missing-order/network cancel failures, an acknowledgement without a terminal query result, and callback failure followed by terminal-fill retry. Full suite **1224 passed, 2 skipped**; Ruff, mypy and diff checks passed.
+- Follow-up queries are not proof of venue completeness or strong consistency. This conservative implementation may block entries after an eventually consistent cancellation or transient failure; no automatic hold release is supplied. Callback watermarks and cancellation tracking remain process-local. No venue test, restart-safe cancellation replay or independent recovery is claimed. Live promotion/resets remain blocked and D–I remain incomplete. Port 8000 dashboard remains read-only paper/synthetic/1× and predates these edits.
+
 ## Latest durable observation hold and calendar pass (working branch)
 
 - Invalid CCXT observations now first latch a local entry hold, then persist a first-fault marker and audit event in one transaction. Ordinary kill-switch entry checks and reset transactions reject the marker even if its payload is corrupt. Repeated faults preserve the first marker without unbounded duplicate audit rows. No release API is provided. Failure of the audit transaction rolls back the durable write but retains the process-local hold; complete database failure cannot protect other processes or survive restart.

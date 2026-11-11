@@ -766,3 +766,65 @@ def test_malformed_create_response_retains_identity_without_resubmission(payload
         asyncio.run(adapter.drain_pending())
         assert len(fills) == 1
         assert not adapter.killswitch.can_open_entries()
+
+
+def test_cancel_delivers_final_partial_fill_from_post_cancel_query():
+    adapter, exchange = adapter_with()
+    order = asyncio.run(adapter.place_order(request()))
+    fills: list[Any] = []
+    adapter.on_fill = fills.append
+    exchange.order_state['x1'].update(filled='0.001', average='100')
+    assert asyncio.run(adapter.cancel_order(order.client_order_id))
+    assert order.status is OrderStatus.CANCELED
+    assert len(fills) == 1 and fills[0].qty == Decimal('0.001')
+    asyncio.run(adapter.drain_pending())
+    assert len(fills) == 1
+
+
+@pytest.mark.parametrize('failure', [OrderNotFound('missing'), NetworkError('timeout')])
+def test_failed_cancel_does_not_invent_terminal_status(failure):
+    adapter, exchange = adapter_with()
+    order = asyncio.run(adapter.place_order(request()))
+
+    async def fail(*args):
+        raise failure
+
+    exchange.cancel_order = fail
+    with pytest.raises((PermanentExchangeError, TransientExchangeError)):
+        asyncio.run(adapter.cancel_order(order.client_order_id))
+    assert order.status.is_open
+    assert adapter.killswitch.store.has_execution_observation_fault()
+    assert not adapter.killswitch.can_open_entries()
+
+
+def test_cancel_ack_without_terminal_query_is_not_success():
+    adapter, exchange = adapter_with()
+    order = asyncio.run(adapter.place_order(request()))
+
+    async def acknowledge(*args):
+        return {'status': 'canceled'}
+
+    exchange.cancel_order = acknowledge
+    with pytest.raises(PermanentExchangeError, match='unconfirmed'):
+        asyncio.run(adapter.cancel_order(order.client_order_id))
+    assert order.status.is_open
+    assert not adapter.killswitch.can_open_entries()
+
+
+def test_cancel_final_fill_callback_failure_remains_retryable():
+    adapter, exchange = adapter_with()
+    order = asyncio.run(adapter.place_order(request()))
+    exchange.order_state['x1'].update(filled='0.001', average='100')
+
+    def fail(fill):
+        raise RuntimeError('journal unavailable')
+
+    adapter.on_fill = fail
+    with pytest.raises(PermanentExchangeError, match='journal unavailable'):
+        asyncio.run(adapter.cancel_order(order.client_order_id))
+    assert adapter.seen_fills[order.client_order_id] == 0
+    fills: list[Any] = []
+    adapter.on_fill = fills.append
+    asyncio.run(adapter.drain_pending())
+    assert len(fills) == 1
+    assert not adapter.killswitch.can_open_entries()

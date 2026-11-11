@@ -6,6 +6,7 @@ Updated 2026-11-02. Applies to working branch `arena/200089ad-delhi-aqi`, draft 
 
 ## D — execution, authority and durable recovery (finish before E–I integration)
 
+- [x] Confirm CCXT cancellation through a follow-up order query and deliver final observed fills; failed or unconfirmed outcomes latch the durable observation fault. Venue consistency and restart-safe cancellation recovery remain unverified.
 - [x] Persist invalid CCXT observation hold with first-fault audit; check it on ordinary entries and transactional resets across restart. Failed persistence retains the local hold. No release workflow is supplied.
 - [ ] Persist submission intent and stable venue/client order identities before network submission; reconcile ambiguous create-order errors without duplicate submission across restart.
 - [ ] Retrieve authoritative venue trade identities, fees/currencies and pagination; detect missing/duplicate/late/corrected trades and cumulative-average rounding.

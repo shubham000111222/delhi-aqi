@@ -313,13 +313,19 @@ class CcxtLiveAdapter(ExchangeAdapter):
             return False
         try:
             await self.exchange.cancel_order(order.exchange_order_id or client_order_id, symbol or order.symbol)
+            # A cancellation acknowledgement is not proof of the final quantity.
+            # Query the outcome before reporting success or allowing a terminal cache
+            # to hide a fill that raced with cancellation.
+            fresh = await self.get_order(client_order_id)
+            if fresh is None or fresh.status.is_open:
+                raise PermanentExchangeError("cancellation outcome is unconfirmed")
+            self._emit_observed_fill(client_order_id, fresh)
         except Exception as exc:  # noqa: BLE001
-            error = self._translate(exc)
-            if isinstance(error, PermanentExchangeError):
-                order.status = OrderStatus.CANCELED
-            raise error from exc
-        order.status = OrderStatus.CANCELED
-        order.updated_at = self.clock.now()
+            if self.killswitch is not None:
+                self.killswitch.latch_execution_observation_fault(client_order_id)
+            # Neither OrderNotFound nor a timeout proves cancellation. Keep the
+            # observed cache state and let recovery inspect it; do not fabricate one.
+            raise self._translate(exc) from exc
         return True
 
     async def cancel_all(self, symbol: str | None = None) -> int:
