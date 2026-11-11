@@ -708,3 +708,28 @@ async def test_strategy_size_reduction_rechecked_at_placement(cfg):
     assert await manager.submit_entry(signal, D("0.001"), price=D("60000"),
                                       sized_strategy_multiplier=D("0.5")) is not None
     store.close()
+
+
+@pytest.mark.parametrize("invalid", ["false", "true", 0, 1, None, [], {}])
+async def test_manager_rejects_non_boolean_reduce_only(cfg, invalid):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    request = OrderRequest(symbol="BTC/USDT", side=Side.SELL, qty=D("0.001"),
+                           type=OrderType.MARKET, reduce_only=invalid)
+    assert await manager._place(request) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+@pytest.mark.parametrize("invalid", ["false", 0, 1, None])
+async def test_paper_adapter_direct_refuses_non_boolean_reduce_only(cfg, invalid):
+    adapter = _adapter(cfg, _market(), SimClock(NOW))
+    request = OrderRequest(symbol="BTC/USDT", side=Side.SELL, qty=D("0.001"),
+                           type=OrderType.MARKET, reduce_only=invalid)
+    with pytest.raises(PermanentExchangeError, match="reduce_only must be boolean"):
+        await adapter.place_order(request)
+    assert not adapter.orders

@@ -600,3 +600,59 @@ def test_direct_venue_entry_rechecks_strategy_size():
         asyncio.run(adapter.place_order(request()))
     assert not [call for call in exchange.calls if call[0] == "create_order"]
     store.close()
+
+
+@pytest.mark.parametrize("status", ["closed", "partially_filled"])
+def test_placement_immediate_fill_is_emitted_exactly_once(status):
+    adapter, exchange = adapter_with()
+    original = exchange.create_order
+
+    async def filled_on_create(*args, **kwargs):
+        raw = await original(*args, **kwargs)
+        exchange.order_state["x1"].update({"status": status, "filled": 0.001, "average": 44000.5})
+        return raw | exchange.order_state["x1"]
+
+    exchange.create_order = filled_on_create
+    fills: list[Any] = []
+    adapter.on_fill = fills.append
+    order = asyncio.run(adapter.place_order(request()))
+    assert len(fills) == 1 and fills[0].qty == Decimal("0.001")
+    assert adapter.seen_fills[order.client_order_id] == Decimal("0.001")
+    asyncio.run(adapter.drain_pending())
+    assert len(fills) == 1
+    assert asyncio.run(adapter.place_order(request())) is order
+    assert len([c for c in exchange.calls if c[0] == "create_order"]) == 1
+
+
+def test_immediate_terminal_fill_callback_failure_can_be_retried():
+    adapter, exchange = adapter_with()
+    original = exchange.create_order
+
+    async def filled_on_create(*args, **kwargs):
+        raw = await original(*args, **kwargs)
+        exchange.order_state["x1"].update({"status": "closed", "filled": 0.001, "average": 44000.5})
+        return raw | exchange.order_state["x1"]
+
+    exchange.create_order = filled_on_create
+
+    def fail(_fill):
+        raise RuntimeError("journal unavailable")
+
+    adapter.on_fill = fail
+    with pytest.raises(RuntimeError, match="journal unavailable"):
+        asyncio.run(adapter.place_order(request()))
+    assert len([c for c in exchange.calls if c[0] == "create_order"]) == 1
+    fills: list[Any] = []
+    adapter.on_fill = fills.append
+    asyncio.run(adapter.drain_pending())
+    assert len(fills) == 1 and fills[0].qty == Decimal("0.001")
+    asyncio.run(adapter.drain_pending())
+    assert len(fills) == 1
+
+
+@pytest.mark.parametrize("invalid", ["false", "true", 0, 1, None, [], {}])
+def test_live_adapter_rejects_non_boolean_reduce_only(invalid):
+    adapter, exchange = adapter_with()
+    with pytest.raises(PermanentExchangeError, match="reduce_only must be boolean"):
+        asyncio.run(adapter.place_order(request(side=Side.SELL, reduce_only=invalid)))
+    assert not [call for call in exchange.calls if call[0] == "create_order"]

@@ -199,14 +199,17 @@ class CcxtLiveAdapter(ExchangeAdapter):
         raise PermanentExchangeError(reason)
 
     async def place_order(self, request: OrderRequest) -> Order:
-        existing = self.orders.get(request.client_order_id)
-        if existing is not None and not existing.status.is_terminal:
-            return existing
-        # Spot strategy is long-only. A caller cannot label a buy as a reducing exit
-        # to bypass the entry stop. A sell's label is still NOT proof the venue enforces
-        # reduce-only or that a balance/position exists.
+        if type(request.reduce_only) is not bool:
+            self._refuse_order(request, "reduce_only must be boolean")
         if request.reduce_only and request.side is not Side.SELL:
             self._refuse_order(request, "reduce-only buy is not a supported protective action")
+        existing = self.orders.get(request.client_order_id)
+        if existing is not None:
+            # A terminal order is still the outcome of this client ID; resubmitting it
+            # can duplicate an already executed order.
+            return existing
+        # A sell's label is NOT proof that the venue enforces reduce-only or that
+        # an independently verified balance/position exists.
         if not request.reduce_only:
             if (self.cfg.mode != self._initial_mode or self.mode != self._initial_mode
                     or self.cfg.risk.model_dump(mode="json") != self._risk_snapshot):
@@ -295,7 +298,10 @@ class CcxtLiveAdapter(ExchangeAdapter):
         )
         order.fee = D(repr((raw.get("fee") or {}).get("cost") or 0))
         self.orders[request.client_order_id] = order
-        self.seen_fills[request.client_order_id] = order.filled_qty
+        self.seen_fills[request.client_order_id] = ZERO
+        # Immediate and initial partial fills need the same callback as polled fills.
+        # Keep the delta unseen if the callback cannot durably journal it.
+        self._emit_observed_fill(request.client_order_id, order)
         return order
 
     async def cancel_order(self, client_order_id: str, symbol: str | None = None) -> bool:
@@ -387,27 +393,33 @@ class CcxtLiveAdapter(ExchangeAdapter):
                 if observed is None:
                     continue
                 fresh = observed
-            delta = fresh.filled_qty - already
-            if delta <= 0:
-                continue
-            price = fresh.avg_fill_price or (fresh.price or self.market_price(fresh.symbol) or ZERO)
-            fee = delta * price * self.get_market_rules(fresh.symbol).taker_fee
-            fill = Fill(
-                order_id=cid,
-                symbol=fresh.symbol,
-                side=fresh.side,
-                price=price,
-                qty=delta,
-                fee=fee,
-                ts=self.clock.now(),
-                strategy=fresh.strategy,
-                liquidity="taker",
-                expected_price=fresh.price,
-                reason=fresh.reason,
-            )
-            if self.on_fill is not None:
-                self.on_fill(fill)
-                self.seen_fills[cid] = fresh.filled_qty
+            self._emit_observed_fill(cid, fresh)
+
+    def _emit_observed_fill(self, cid: str, fresh: Order) -> None:
+        already = self.seen_fills.get(cid, ZERO)
+        delta = fresh.filled_qty - already
+        if delta <= 0:
+            return
+        price = fresh.avg_fill_price or (fresh.price or self.market_price(fresh.symbol) or ZERO)
+        fee = delta * price * self.get_market_rules(fresh.symbol).taker_fee
+        # Order aggregate prices and modelled fees are estimates, not venue trade
+        # records. Live reconciliation remains unverified.
+        fill = Fill(
+            order_id=cid,
+            symbol=fresh.symbol,
+            side=fresh.side,
+            price=price,
+            qty=delta,
+            fee=fee,
+            ts=self.clock.now(),
+            strategy=fresh.strategy,
+            liquidity="taker",
+            expected_price=fresh.price,
+            reason=fresh.reason,
+        )
+        if self.on_fill is not None:
+            self.on_fill(fill)
+            self.seen_fills[cid] = fresh.filled_qty
 
     # --- helpers ----------------------------------------------------------
     def _translate(self, exc: Exception) -> Exception:

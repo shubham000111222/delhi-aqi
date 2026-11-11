@@ -9,6 +9,11 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest execution boundary and immediate-fill pass (working branch)
+
+- CCXT placement now emits immediately reported initial fills to the callback instead of silently marking them seen; failed callbacks leave observed deltas retryable. Cached terminal client IDs no longer cause a second local create-order call. Manager, paper and CCXT reject non-boolean `reduce_only` flags before treating a request as protective.
+- Full suite **1187 passed, 2 skipped**; Ruff, mypy and `git diff --check` passed. Tests use fake exchange responses, not venue validation. CCXT polls cumulative average price and models taker fees rather than retrieving authoritative individual trades; partial-fill incremental prices, costs and coverage are unverified. Its idempotency cache is process-local, not a venue-wide or restart-safe guarantee. External fills before callback persistence, raw/custom venue calls, falsely labelled SELL exits and in-flight orders remain outside protections. Live promotion and live/testnet resets remain blocked; dashboard process predates changes.
+
 ## Latest signed strategy reduction pass (working branch)
 
 - An offline-signed, database/mode/strategy/current-state-bound, single-use action can now reduce the durable multiplier of an enabled strategy. The mutation, signature consumption and audit are atomic; expiry and trust are rechecked under lock. The existing offline signer and CLI support the action. No multiplier increase, hold release or live-readiness authorization is provided.

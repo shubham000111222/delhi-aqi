@@ -201,6 +201,14 @@ class OrderManager:
 
     # --- core placement with retries -------------------------------------
     async def _place(self, request: OrderRequest) -> Order | None:
+        if type(request.reduce_only) is not bool:
+            self.store.log_event(
+                "autonomy_refused", {"action": "invalid_reduce_only", "reason": "reduce_only must be boolean",
+                                     "client_order_id": request.client_order_id},
+                level="CRIT", actor="execution", ts=self.clock.now(),
+            )
+            return None
+
         if not self.bucket.try_acquire():
             wait = self.bucket.time_until()
             log.warning('{"event":"rate_limit_wait","seconds":%.3f}', wait)

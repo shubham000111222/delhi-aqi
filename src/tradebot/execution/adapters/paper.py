@@ -93,6 +93,10 @@ class PaperAdapter(ExchangeAdapter):
 
     # --- order entry ------------------------------------------------------
     async def place_order(self, request: OrderRequest) -> Order:
+        if type(request.reduce_only) is not bool:
+            raise PermanentExchangeError("reduce_only must be boolean")
+        if request.reduce_only and request.side is not Side.SELL:
+            raise PermanentExchangeError("reduce-only buy is not a supported protective action")
         existing = self.orders.get(request.client_order_id)
         if existing is not None:
             # Idempotency: a retry after a timeout must never create a second order.
