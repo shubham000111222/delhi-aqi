@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest cumulative partial-fill accounting pass (working branch)
+
+- Incremental fill price now derives from the difference between current cumulative notional (`filled × average`) and successfully delivered notional, divided by new quantity. Both process-local watermarks advance only after callback success. Numeric string quantities/averages are accepted without Python repr quoting.
+- Nonfinite or regressing quantities, missing/nonpositive averages, and nonpositive incremental notional fail rather than falling back to an unrelated market/limit price. These validation failures latch a process-local entry hold when a kill switch is attached. This hold is lost on restart, is not independently verified reconciliation, and does not resolve pending fills. Malformed parsing outside this validation is not covered by this hold.
+- Full suite **1196 passed, 2 skipped**; Ruff, mypy and diff checks passed. Fake-exchange tests cover changing cumulative averages, callback failure/retry, numeric strings, and inconsistent observations. Rounded venue averages, unchanged-quantity corrections, individual trade identity, actual fees, restart-safe watermarks and venue coverage remain unverified. Live promotion/resets remain blocked; phases D–I are not complete.
+
 ## Latest execution boundary and immediate-fill pass (working branch)
 
 - CCXT placement now emits immediately reported initial fills to the callback instead of silently marking them seen; failed callbacks leave observed deltas retryable. Cached terminal client IDs no longer cause a second local create-order call. Manager, paper and CCXT reject non-boolean `reduce_only` flags before treating a request as protective.

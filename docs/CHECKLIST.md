@@ -16,7 +16,7 @@ depends on.
 For the full Windows installation, implementation and validation procedure, see
 [`WINDOWS_LOCAL_LIVE_READINESS.md`](WINDOWS_LOCAL_LIVE_READINESS.md).
 
-**Last updated:** 2026-11-04 · **Suite:** 1187 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-04 · **Suite:** 1196 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -27,6 +27,7 @@ machine; this workspace has no real-price archive.
 - [x] Add action-bound, single-use offline-signed reductions of an enabled strategy size; this cannot authorize increases or release holds.
 - [x] Serialize consecutive-loss updates and threshold actions across engines with a single SQLite transaction; corrupt streak records block normal entries.
 - [x] Commit the normal persisted position closure and loss-streak controls in one SQLite transaction; refuse a repeated close of the same open row.
+- [x] Derive incremental CCXT partial-fill notional from cumulative quantity/average; preserve both callback watermarks on failure and locally hold entries on invalid observations (not durable recovery).
 - [x] Deliver immediate/initial partial CCXT order-response fills through the same callback as polled fills; prevent process-local resubmission of cached terminal client IDs.
 - [x] Reject non-boolean reduce-only flags at the order-manager, paper-adapter and CCXT boundaries; a SELL label is still not verified exchange-side protection.
 - [x] Journal received fill callbacks before queueing; pending records block normal entries and resets after interruption. Inspect them read-only with `tradebot pending-fills --mode paper` (or the configured mode).

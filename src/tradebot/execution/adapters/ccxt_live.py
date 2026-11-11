@@ -84,6 +84,7 @@ class CcxtLiveAdapter(ExchangeAdapter):
         self.rules: dict[str, MarketRules] = {}
         self.orders: dict[str, Order] = {}
         self.seen_fills: dict[str, Decimal] = {}
+        self.seen_fill_notional: dict[str, Decimal] = {}
         self.on_fill: Any = None
         self.quote = config.settings.quote_currency
         self._key_permissions: dict[str, Any] | None = None
@@ -291,8 +292,8 @@ class CcxtLiveAdapter(ExchangeAdapter):
             reduce_only=request.reduce_only,
             reason=request.reason,
             exchange_order_id=str(raw.get("id") or ""),
-            filled_qty=D(repr(raw.get("filled") or 0)),
-            avg_fill_price=D(repr(raw.get("average") or 0)),
+            filled_qty=D(str(raw.get("filled") or 0)),
+            avg_fill_price=D(str(raw.get("average") or 0)),
             created_at=self.clock.now(),
             updated_at=self.clock.now(),
         )
@@ -342,8 +343,8 @@ class CcxtLiveAdapter(ExchangeAdapter):
         except Exception as exc:  # noqa: BLE001
             raise self._translate(exc) from exc
         order.status = _status_of(raw.get("status"))
-        order.filled_qty = D(repr(raw.get("filled") or 0))
-        order.avg_fill_price = D(repr(raw.get("average") or 0))
+        order.filled_qty = D(str(raw.get("filled") or 0))
+        order.avg_fill_price = D(str(raw.get("average") or 0))
         order.updated_at = self.clock.now()
         return order
 
@@ -397,13 +398,30 @@ class CcxtLiveAdapter(ExchangeAdapter):
 
     def _emit_observed_fill(self, cid: str, fresh: Order) -> None:
         already = self.seen_fills.get(cid, ZERO)
-        delta = fresh.filled_qty - already
-        if delta <= 0:
+        def invalid(reason: str) -> NoReturn:
+            # No fabricated fill may advance the callback watermark. This local
+            # hold is not durable reconciliation or restart-safe recovery.
+            if self.killswitch is not None:
+                self.killswitch.latch_local_entry_hold()
+            raise PermanentExchangeError(f"invalid cumulative fill for {cid}: {reason}")
+
+        quantity = fresh.filled_qty
+        if not quantity.is_finite() or quantity < already:
+            invalid("nonfinite or regressing quantity")
+        delta = quantity - already
+        if delta == 0:
             return
-        price = fresh.avg_fill_price or (fresh.price or self.market_price(fresh.symbol) or ZERO)
-        fee = delta * price * self.get_market_rules(fresh.symbol).taker_fee
-        # Order aggregate prices and modelled fees are estimates, not venue trade
-        # records. Live reconciliation remains unverified.
+        average = fresh.avg_fill_price
+        if not average.is_finite() or average <= 0:
+            invalid("missing or nonpositive average price")
+        notional = quantity * average
+        incremental_notional = notional - self.seen_fill_notional.get(cid, ZERO)
+        if not incremental_notional.is_finite() or incremental_notional <= 0:
+            invalid("nonpositive incremental notional")
+        price = incremental_notional / delta
+        fee = incremental_notional * self.get_market_rules(fresh.symbol).taker_fee
+        # Cumulative averages supply incremental notional, not individual venue
+        # trade identities. Fees remain modelled; reconciliation is unverified.
         fill = Fill(
             order_id=cid,
             symbol=fresh.symbol,
@@ -419,7 +437,8 @@ class CcxtLiveAdapter(ExchangeAdapter):
         )
         if self.on_fill is not None:
             self.on_fill(fill)
-            self.seen_fills[cid] = fresh.filled_qty
+            self.seen_fills[cid] = quantity
+            self.seen_fill_notional[cid] = notional
 
     # --- helpers ----------------------------------------------------------
     def _translate(self, exc: Exception) -> Exception:

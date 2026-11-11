@@ -656,3 +656,59 @@ def test_live_adapter_rejects_non_boolean_reduce_only(invalid):
     with pytest.raises(PermanentExchangeError, match="reduce_only must be boolean"):
         asyncio.run(adapter.place_order(request(side=Side.SELL, reduce_only=invalid)))
     assert not [call for call in exchange.calls if call[0] == "create_order"]
+
+
+def test_partial_fill_uses_incremental_notional_and_preserves_watermark_on_failure():
+    adapter, exchange = adapter_with()
+    asyncio.run(adapter.place_order(request()))
+    fills: list[Any] = []
+    adapter.on_fill = fills.append
+    exchange.order_state['x1'].update(status='partially_filled', filled='0.001', average='100')
+    asyncio.run(adapter.drain_pending())
+    exchange.order_state['x1'].update(status='closed', filled='0.003', average='120')
+
+    def fail(_fill):
+        raise RuntimeError('journal failed')
+
+    adapter.on_fill = fail
+    with pytest.raises(RuntimeError, match='journal failed'):
+        asyncio.run(adapter.drain_pending())
+    assert adapter.seen_fill_notional['tb-abc123'] == Decimal('0.1')
+    adapter.on_fill = fills.append
+    asyncio.run(adapter.drain_pending())
+    assert fills[1].price == Decimal('130')
+    assert sum(f.qty * f.price for f in fills) == Decimal('0.36')
+    asyncio.run(adapter.drain_pending())
+    assert len(fills) == 2
+
+
+@pytest.mark.parametrize('quantity,average', [('NaN', '100'), ('Infinity', '100'),
+    ('-1', '100'), ('0.001', None), ('0.001', 'NaN'), ('0.001', '-1')])
+def test_invalid_cumulative_fill_is_not_booked(quantity, average):
+    adapter, exchange = adapter_with()
+    asyncio.run(adapter.place_order(request()))
+    fills: list[Any] = []
+    adapter.on_fill = fills.append
+    exchange.order_state['x1'].update(status='closed', filled=quantity, average=average)
+    with pytest.raises(PermanentExchangeError, match='invalid cumulative fill'):
+        asyncio.run(adapter.drain_pending())
+    assert not fills
+    assert adapter.seen_fills['tb-abc123'] == 0
+    assert adapter.killswitch is not None
+    assert not adapter.killswitch.can_open_entries()
+
+
+@pytest.mark.parametrize('quantity,average', [('0.0005', '100'), ('0.002', '40')])
+def test_regressing_partial_fill_state_does_not_advance_watermarks(quantity, average):
+    adapter, exchange = adapter_with()
+    asyncio.run(adapter.place_order(request()))
+    fills: list[Any] = []
+    adapter.on_fill = fills.append
+    exchange.order_state['x1'].update(status='partially_filled', filled='0.001', average='100')
+    asyncio.run(adapter.drain_pending())
+    exchange.order_state['x1'].update(status='closed', filled=quantity, average=average)
+    with pytest.raises(PermanentExchangeError, match='invalid cumulative fill'):
+        asyncio.run(adapter.drain_pending())
+    assert len(fills) == 1
+    assert adapter.seen_fills['tb-abc123'] == Decimal('0.001')
+    assert adapter.seen_fill_notional['tb-abc123'] == Decimal('0.1')
