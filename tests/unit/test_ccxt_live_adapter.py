@@ -733,3 +733,36 @@ def test_malformed_poll_preserves_order_and_blocks_entries(filled, average):
     asyncio.run(adapter.drain_pending())
     assert len(fills) == 1
     assert not adapter.killswitch.can_open_entries(), 'a good response cannot clear the hold'
+
+
+@pytest.mark.parametrize('payload', [None, {'filled': True}, {'filled': 'bad'},
+    {'filled': '0.001', 'average': None}, {'fee': {'cost': 'bad'}},
+    {'fee': False}, {'fee': {'cost': 'NaN'}}, {'fee': {'cost': True}}])
+def test_malformed_create_response_retains_identity_without_resubmission(payload):
+    adapter, exchange = adapter_with()
+    original = exchange.create_order
+
+    async def malformed(*args, **kwargs):
+        raw = await original(*args, **kwargs)
+        if payload is None:
+            return None
+        return raw | payload
+
+    exchange.create_order = malformed
+    fills: list[Any] = []
+    adapter.on_fill = fills.append
+    with pytest.raises(PermanentExchangeError, match='invalid cumulative fill'):
+        asyncio.run(adapter.place_order(request()))
+    assert len(exchange.created) == 1
+    assert not fills
+    cached = adapter.orders['tb-abc123']
+    assert cached.status.is_open and cached.filled_qty == 0
+    assert asyncio.run(adapter.place_order(request())) is cached
+    assert len(exchange.created) == 1
+    assert adapter.killswitch is not None
+    assert not adapter.killswitch.can_open_entries()
+    if payload is not None:
+        exchange.order_state['x1'].update(status='closed', filled='0.001', average='100')
+        asyncio.run(adapter.drain_pending())
+        assert len(fills) == 1
+        assert not adapter.killswitch.can_open_entries()

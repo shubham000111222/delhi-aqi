@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest malformed initial-order response pass (working branch)
+
+- A successful create-order call now installs a process-local tracking record before validating response totals. Initial and polled observations use the same parse-before-mutate validation; malformed fee values are also rejected. A malformed response latches the attached local entry hold, preserves the submitted order record, and does not emit fabricated fills. Reusing its cached client ID does not submit another order.
+- Eight new fake-response cases cover absent response, booleans, unparseable totals, missing average, malformed fee structures and nonfinite fees; later valid polls can deliver the fill without clearing the hold. Full suite **1209 passed, 2 skipped**; Ruff, mypy and diff checks passed.
+- This is process-local containment only: no restart-safe identity/watermark journal, durable invalid-observation hold, venue trade deduplication or authenticated recovery is claimed. An absent venue ID requires client-ID lookup whose venue semantics are unverified. Network exceptions during create-order remain a separate ambiguous-outcome risk. Fee validation is not authoritative fee accounting (emitted fees still use the taker model). Phases D–I remain incomplete and live promotion/resets remain blocked. Dashboard stays paper/synthetic/read-only/1× on port 8000 and predates this code change.
+
 ## Latest malformed fill polling pass (working branch)
 
 - Polled cumulative quantity/average parsing and validation happen before cached order mutation. Boolean, unparseable, nonfinite and inconsistent totals latch the attached kill switch's local entry hold and raise. Permanent polling errors now surface instead of being silently skipped; transient fetch errors continue to allow other orders to be polled.

@@ -286,20 +286,22 @@ class CcxtLiveAdapter(ExchangeAdapter):
             qty=qty,
             price=price,
             stop_price=request.stop_price,
-            status=_status_of(raw.get("status")),
+            status=OrderStatus.SUBMITTED,
             strategy=request.strategy,
             signal_id=request.signal_id,
             reduce_only=request.reduce_only,
             reason=request.reason,
-            exchange_order_id=str(raw.get("id") or ""),
-            filled_qty=D(str(raw.get("filled") or 0)),
-            avg_fill_price=D(str(raw.get("average") or 0)),
+            exchange_order_id=str(raw.get("id") or "") if isinstance(raw, dict) else "",
+            filled_qty=ZERO,
+            avg_fill_price=ZERO,
             created_at=self.clock.now(),
             updated_at=self.clock.now(),
         )
-        order.fee = D(repr((raw.get("fee") or {}).get("cost") or 0))
         self.orders[request.client_order_id] = order
         self.seen_fills[request.client_order_id] = ZERO
+        # The venue call succeeded; retain its identity before parsing the response.
+        # A malformed response is an unknown outcome, not permission to resubmit.
+        self._apply_order_observation(order, raw)
         # Immediate and initial partial fills need the same callback as polled fills.
         # Keep the delta unseen if the callback cannot durably journal it.
         self._emit_observed_fill(request.client_order_id, order)
@@ -342,6 +344,10 @@ class CcxtLiveAdapter(ExchangeAdapter):
             )
         except Exception as exc:  # noqa: BLE001
             raise self._translate(exc) from exc
+        self._apply_order_observation(order, raw)
+        return order
+
+    def _apply_order_observation(self, order: Order, raw: Any) -> None:
         # Parse before mutating the cached order. A malformed response must not
         # leave a terminal status cached with stale quantities and hide the retry.
         try:
@@ -351,19 +357,27 @@ class CcxtLiveAdapter(ExchangeAdapter):
                 raise ValueError("boolean fill total")
             filled = D(str(filled_raw if filled_raw is not None else 0))
             average = D(str(average_raw if average_raw is not None else 0))
-            if not filled.is_finite() or filled < self.seen_fills.get(client_order_id, ZERO):
+            if not filled.is_finite() or filled < self.seen_fills.get(order.client_order_id, ZERO):
                 raise ValueError("nonfinite or regressing quantity")
+            fee = order.fee
+            if raw.get("fee") is not None:
+                fee_raw = raw["fee"].get("cost")
+                if isinstance(fee_raw, bool):
+                    raise ValueError("boolean fee")
+                fee = D(str(fee_raw if fee_raw is not None else 0))
+                if not fee.is_finite() or fee < 0:
+                    raise ValueError("invalid fee")
             if not average.is_finite() or (filled > 0 and average <= 0):
                 raise ValueError("invalid cumulative average")
         except (InvalidOperation, TypeError, ValueError, AttributeError) as exc:
             if self.killswitch is not None:
                 self.killswitch.latch_local_entry_hold()
-            raise PermanentExchangeError(f"invalid cumulative fill for {client_order_id}") from exc
+            raise PermanentExchangeError(f"invalid cumulative fill for {order.client_order_id}") from exc
         order.status = _status_of(raw.get("status"))
         order.filled_qty = filled
         order.avg_fill_price = average
+        order.fee = fee
         order.updated_at = self.clock.now()
-        return order
 
     async def get_open_orders(self, symbol: str | None = None) -> list[Order]:
         return [
