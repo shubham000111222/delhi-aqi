@@ -294,6 +294,7 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
 
     def _autonomy_view(store: Store) -> dict[str, Any]:
         return {
+            "execution_recovery": store.execution_recovery_status(),
             "ledger": AutonomyLedger(store=store).summary(),
             "pending_approvals": [request.as_dict() for request in Approvals(store=store).pending()],
             "limitation": "Partial audit coverage; approvals are not authenticated or usable for execution.",

@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest execution-recovery visibility pass (working branch)
+
+- Added a single-statement diagnostic count of pending fill callbacks, pending kill incidents and invalid execution-observation marker presence. The dashboard snapshot and `/api/autonomy` expose counts without marker payloads or private order identities; the panel uses text-only rendering. Corrupt marker payloads still count. Empty counts explicitly do not establish entry permission or verified reconciliation, and no release endpoint exists.
+- Full suite **1226 passed, 2 skipped**; Ruff, mypy and diff checks passed. Integration cases cover mixed corrupt markers, private-payload exclusion, snapshot/API consistency, non-clearing reads and empty-but-unverified status.
+- Dashboard restarted on port 8000 with this branch code, read-only paper/synthetic/1×. The recovery API returned HTTP 200. This view is only a subset of safety holds, not a complete health assessment, authenticated recovery, venue proof or execution authorization. Phase D and phases E–I remain incomplete; live gates remain blocked.
+
 ## Latest cancellation outcome pass (working branch)
 
 - CCXT cancellation now follows its acknowledgement with an order query and refuses success while the observed order remains open. It emits any final observed fill through the normal callback before reporting success. Cancellation errors no longer invent a canceled status; errors and unconfirmed outcomes latch the durable observation hold (local fallback if storage fails).

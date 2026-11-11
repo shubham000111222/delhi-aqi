@@ -884,6 +884,26 @@ class Store:
                 conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
                              (now, "CRIT", "execution_observation_fault", "execution", payload))
 
+    def execution_recovery_status(self) -> dict[str, Any]:
+        """Diagnostic counts from one statement, never authority to trade or reset.
+
+        Do not decode potentially corrupt payloads or expose order identifiers.
+        Presence of even an unreadable marker is still a hold.
+        """
+        row = self._query("""SELECT
+            COALESCE(SUM(CASE WHEN key GLOB 'fill_pending:*' THEN 1 ELSE 0 END), 0) AS fills,
+            COALESCE(SUM(CASE WHEN key GLOB 'kill_incident_pending:*' THEN 1 ELSE 0 END), 0) AS incidents,
+            COALESCE(SUM(CASE WHEN key='execution_observation_fault' THEN 1 ELSE 0 END), 0) AS observation
+            FROM kv"""
+        )[0]
+        counts = {"pending_fill_callbacks": int(row["fills"]),
+                  "pending_kill_incidents": int(row["incidents"]),
+                  "invalid_execution_observation": bool(row["observation"])}
+        return {**counts, "recovery_required": any(counts.values()),
+                "usable_for_reset": False, "reconciliation_verified": False,
+                "limitation": "Diagnostic subset of durable holds, not entry permission. "
+                              "No recovery or release action is provided; do not delete markers."}
+
     def has_execution_observation_fault(self) -> bool:
         # Existence blocks even if the value is malformed; decoding cannot release it.
         return bool(self._query("SELECT 1 FROM kv WHERE key='execution_observation_fault' LIMIT 1"))

@@ -300,3 +300,30 @@ def test_dashboard_resume_requests_l1_only(fast_cfg):
         assert response.status_code == 200
     engine.resume.assert_awaited_once_with("dashboard resume", actor="dashboard", l1_only=True)
     engine.store.close()
+
+
+def test_dashboard_recovery_status_does_not_treat_l0_as_entry_permission(client):
+    store = client.app.state.dashboard.store
+    store.kv_set('fill_pending:one', {'corrupt': True})
+    store.kv_set('fill_pending:two', 'unreadable')
+    store.kv_set('kill_incident_pending:one', 'bad')
+    store.kv_set('execution_observation_fault', {'order_id': '<script>private-order</script>'})
+    data = client.get('/api/autonomy').json()['execution_recovery']
+    assert data['recovery_required'] is True
+    assert data['pending_fill_callbacks'] == 2
+    assert data['pending_kill_incidents'] == 1
+    assert data['invalid_execution_observation'] is True
+    assert data['usable_for_reset'] is False
+    assert data['reconciliation_verified'] is False
+    assert 'private-order' not in str(data)
+    assert client.get('/api/snapshot').json()['autonomy']['execution_recovery'] == data
+    assert store.has_pending_fill(), 'read endpoints must not release a hold'
+
+
+def test_empty_recovery_status_is_not_a_reconciliation_certificate(client):
+    data = client.get('/api/autonomy').json()['execution_recovery']
+    assert data['recovery_required'] is False
+    assert data['usable_for_reset'] is False
+    assert data['reconciliation_verified'] is False
+    assert 'not entry permission' in data['limitation']
+    assert 'No listed holds — not entry permission' in client.get('/').text
