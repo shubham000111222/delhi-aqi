@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest submission snapshot consistency pass (working branch)
+
+- CCXT pre-network intents now retain mode, symbol, side/type, rounded decimal quantity/price, stop reference, reduce-only assertion, strategy and signal identity. Acknowledgement requires matching retained and pending records, expected fields and the venue/client digest; missing/changed records cannot silently release the pending marker.
+- Full suite **1237 passed, 2 skipped**; Ruff, mypy and diff checks passed. Tests cover missing identity, independently changed records, changed venue/client identity in both records, isolation from caller mutation, and rounded request values passed to the fake venue.
+- These are consistency checks, not cryptographic attestation: a privileged writer can alter matching request snapshots in both records; float conversion on network calls can lose decimal precision. Caller strategy/reduce-only assertions still do not prove computed sizing or venue-side protection. Older snapshot-less intents are not migrated and cannot be acknowledged by this path. Independent venue reconstruction, authenticated recovery and full request/account identity binding remain unbuilt. Live gates remain blocked; dashboard remains paper/synthetic/read-only/1× on port 8000 and predates these edits.
+
 ## Latest durable submission fence pass (working branch)
 
 - Normal CCXT submission now reserves a venue/client-ID hash and pending marker with audit before network I/O. The fence is retained permanently; an adapter without a cached order refuses reuse instead of resubmitting. A pending marker blocks ordinary entries and transactional resets across restart. Validated response delivery and its audit remove only the submission-stage marker, not the identity fence or other holds. Unresolved counts appear in recovery diagnostics.

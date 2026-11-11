@@ -42,3 +42,31 @@ def test_intent_audit_transactions_roll_back(kind):
             store.acknowledge_order_submission(identifier)
     assert store.has_pending_submission() == (kind == 'order_submission_observed')
     store.close()
+
+
+@pytest.mark.parametrize('damage', ['missing_identity', 'changed_pending', 'changed_identity', 'both_changed'])
+def test_inconsistent_intent_cannot_be_acknowledged(damage):
+    store = Store(':memory:')
+    identifier = store.claim_order_submission('venue', 'client', request_snapshot={'qty': '1.25'})
+    if damage == 'missing_identity':
+        store._exec('DELETE FROM kv WHERE key=?', (f'order_identity:{identifier}',))
+    if damage in ('changed_pending', 'both_changed'):
+        store.kv_set(f'submission_pending:{identifier}', {'venue': 'other', 'client_id': 'changed', 'request': None})
+    if damage in ('changed_identity', 'both_changed'):
+        store.kv_set(f'order_identity:{identifier}', {'venue': 'other', 'client_id': 'changed', 'request': None})
+    with pytest.raises(ValueError):
+        store.acknowledge_order_submission(identifier)
+    assert store.has_pending_submission()
+    assert not store._query("SELECT 1 FROM events WHERE kind='order_submission_observed'")
+    store.close()
+
+
+def test_request_snapshot_does_not_follow_callers_later_mutation():
+    store = Store(':memory:')
+    request = {'qty': '1.25', 'reduce_only': False}
+    identifier = store.claim_order_submission('venue', 'client', request_snapshot=request)
+    request['qty'] = '100'
+    assert store.kv_get(f'order_identity:{identifier}')['request']['qty'] == '1.25'
+    store.acknowledge_order_submission(identifier)
+    assert store.kv_get(f'order_identity:{identifier}')['request']['qty'] == '1.25'
+    store.close()

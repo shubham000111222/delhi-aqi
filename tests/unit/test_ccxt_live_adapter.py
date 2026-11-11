@@ -851,3 +851,16 @@ def test_network_create_error_leaves_durable_pending_intent():
     with pytest.raises(PermanentExchangeError):
         asyncio.run(adapter.place_order(request()))
     assert len([c for c in exchange.calls if c[0] == 'create_order']) == 1
+
+
+def test_submission_snapshot_records_rounded_wire_values():
+    adapter, exchange = adapter_with()
+    order = asyncio.run(adapter.place_order(request()))
+    rows = adapter.killswitch.store._query("SELECT key FROM kv WHERE key GLOB 'order_identity:*'")
+    payload = adapter.killswitch.store.kv_get(rows[0]['key'])['request']
+    assert payload['qty'] == str(order.qty)
+    assert payload['price'] == str(order.price)
+    assert payload['mode'] == 'live'
+    assert payload['symbol'] == SYMBOL
+    assert payload['reduce_only'] is False
+    assert float(payload['qty']) == exchange.calls[-1][1][3]

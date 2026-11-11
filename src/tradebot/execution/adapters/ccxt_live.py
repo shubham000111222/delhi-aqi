@@ -258,7 +258,16 @@ class CcxtLiveAdapter(ExchangeAdapter):
         if self.killswitch is None:
             raise PermanentExchangeError("durable submission tracking requires a kill switch")
         try:
-            submission_id = self.killswitch.store.claim_order_submission(self.name, request.client_order_id)
+            submission_id = self.killswitch.store.claim_order_submission(
+                self.name, request.client_order_id, request_snapshot={
+                    "mode": self.mode.value, "symbol": request.symbol,
+                    "side": request.side.value, "type": request.type.value,
+                    "qty": str(qty), "price": str(price) if price is not None else None,
+                    "stop_price": str(request.stop_price) if request.stop_price is not None else None,
+                    "reduce_only": request.reduce_only, "strategy": request.strategy,
+                    "signal_id": request.signal_id,
+                },
+            )
         except Exception as exc:  # noqa: BLE001 - never submit without durable intent
             self.killswitch.latch_local_entry_hold()
             raise PermanentExchangeError("could not reserve submission identity") from exc

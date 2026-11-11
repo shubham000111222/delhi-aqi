@@ -872,12 +872,14 @@ class Store:
                          })))
         return identifier
 
-    def claim_order_submission(self, venue: str, client_id: str) -> str:
+    def claim_order_submission(self, venue: str, client_id: str, *,
+                               request_snapshot: dict[str, Any] | None = None) -> str:
         """Reserve a client identity before network I/O; never reused or auto-expired."""
         if not client_id or len(client_id) > 256:
             raise ValueError("invalid submission client ID")
         identifier = hashlib.sha256(json.dumps([venue, client_id]).encode()).hexdigest()
-        payload = json.dumps({"venue": venue, "client_id": client_id})
+        payload = json.dumps({"venue": venue, "client_id": client_id, "request": request_snapshot},
+                             allow_nan=False, sort_keys=True)
         now = iso(utcnow())
         with self.transaction() as conn:
             if conn.execute("SELECT 1 FROM kv WHERE key=?", (f"order_identity:{identifier}",)).fetchone():
@@ -895,8 +897,17 @@ class Store:
         with self.transaction() as conn:
             row = conn.execute("SELECT value FROM kv WHERE key=?",
                                (f"submission_pending:{identifier}",)).fetchone()
-            if row is None:
-                raise ValueError("submission intent missing")
+            identity = conn.execute("SELECT value FROM kv WHERE key=?",
+                                    (f"order_identity:{identifier}",)).fetchone()
+            if row is None or identity is None or row["value"] != identity["value"]:
+                raise ValueError("submission intent missing or changed")
+            try:
+                payload = json.loads(row["value"])
+                expected = hashlib.sha256(json.dumps([payload["venue"], payload["client_id"]]).encode()).hexdigest()
+                if expected != identifier or set(payload) != {"venue", "client_id", "request"}:
+                    raise ValueError("submission identity mismatch")
+            except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("invalid submission identity") from exc
             conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
                          (iso(utcnow()), "INFO", "order_submission_observed", "execution", row["value"]))
             conn.execute("DELETE FROM kv WHERE key=?", (f"submission_pending:{identifier}",))
