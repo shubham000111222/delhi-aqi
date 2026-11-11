@@ -871,6 +871,23 @@ class Store:
                          })))
         return identifier
 
+    def latch_execution_observation_fault(self, order_id: str) -> None:
+        """Retain the first invalid-observation hold and audit atomically; no clear API."""
+        payload = json.dumps({"order_id": order_id[:256], "verified": False})
+        now = iso(utcnow())
+        with self.transaction() as conn:
+            inserted = conn.execute(
+                "INSERT OR IGNORE INTO kv(key,value,updated_at) VALUES(?,?,?)",
+                ("execution_observation_fault", payload, now),
+            ).rowcount
+            if inserted:
+                conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                             (now, "CRIT", "execution_observation_fault", "execution", payload))
+
+    def has_execution_observation_fault(self) -> bool:
+        # Existence blocks even if the value is malformed; decoding cannot release it.
+        return bool(self._query("SELECT 1 FROM kv WHERE key='execution_observation_fault' LIMIT 1"))
+
     def has_pending_fill(self) -> bool:
         return bool(self._query("SELECT 1 FROM kv WHERE key GLOB 'fill_pending:*' LIMIT 1"))
 
@@ -1248,7 +1265,7 @@ class Store:
                 ).fetchone() is not None or conn.execute(
                     "SELECT 1 FROM kv WHERE key GLOB 'fill_pending:*' LIMIT 1"
                 ).fetchone() is not None or conn.execute(
-                    "SELECT 1 FROM kv WHERE key='ramp_incident_tracking_invalid'"
+                    "SELECT 1 FROM kv WHERE key IN ('ramp_incident_tracking_invalid', 'execution_observation_fault')"
                 ).fetchone() is not None
             ):
                 return False
@@ -1323,7 +1340,7 @@ class Store:
         return bool(self._query("SELECT 1 FROM kv WHERE key GLOB 'kill_incident_pending:*' LIMIT 1"))
 
     def has_invalid_ramp_tracking(self) -> bool:
-        return bool(self._query("SELECT 1 FROM kv WHERE key='ramp_incident_tracking_invalid'"))
+        return bool(self._query("SELECT 1 FROM kv WHERE key IN ('ramp_incident_tracking_invalid', 'execution_observation_fault')"))
 
     def recover_pending_kill_incidents(self) -> int:
         """Replay committed escalation outbox records; never changes the kill level."""

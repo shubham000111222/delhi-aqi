@@ -88,6 +88,14 @@ class KillSwitch:
         """Process-local last resort when durable safety writes fail; never auto-cleared."""
         self._local_entry_hold = True
 
+    def latch_execution_observation_fault(self, order_id: str) -> None:
+        """Hold locally first; persist if storage permits. Never auto-release."""
+        self.latch_local_entry_hold()
+        try:
+            self.store.latch_execution_observation_fault(order_id)
+        except Exception:  # noqa: BLE001 - storage failure must retain the local hold
+            log.exception("could not persist execution observation fault")
+
     def can_open_entries(self) -> bool:
         if self._local_entry_hold:
             return False
@@ -98,6 +106,7 @@ class KillSwitch:
                 and not self.flapping_hold_active()
                 and not self.store.has_pending_kill_incident()
                 and not self.store.has_pending_fill()
+                and not self.store.has_execution_observation_fault()
                 and not self.store.has_invalid_ramp_tracking())
 
     def must_flatten(self) -> bool:

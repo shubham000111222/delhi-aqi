@@ -371,7 +371,7 @@ class CcxtLiveAdapter(ExchangeAdapter):
                 raise ValueError("invalid cumulative average")
         except (InvalidOperation, TypeError, ValueError, AttributeError) as exc:
             if self.killswitch is not None:
-                self.killswitch.latch_local_entry_hold()
+                self.killswitch.latch_execution_observation_fault(order.client_order_id)
             raise PermanentExchangeError(f"invalid cumulative fill for {order.client_order_id}") from exc
         order.status = _status_of(raw.get("status"))
         order.filled_qty = filled
@@ -434,10 +434,10 @@ class CcxtLiveAdapter(ExchangeAdapter):
     def _emit_observed_fill(self, cid: str, fresh: Order) -> None:
         already = self.seen_fills.get(cid, ZERO)
         def invalid(reason: str) -> NoReturn:
-            # No fabricated fill may advance the callback watermark. This local
-            # hold is not durable reconciliation or restart-safe recovery.
+            # No fabricated fill may advance the callback watermark. Persist a
+            # hold, but do not claim this establishes reconciliation or recovery.
             if self.killswitch is not None:
-                self.killswitch.latch_local_entry_hold()
+                self.killswitch.latch_execution_observation_fault(cid)
             raise PermanentExchangeError(f"invalid cumulative fill for {cid}: {reason}")
 
         quantity = fresh.filled_qty

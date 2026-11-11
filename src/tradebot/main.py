@@ -2046,11 +2046,17 @@ def cmd_backfill_history(args: argparse.Namespace) -> int:
     cfg = _config(args)
     symbols = [s.strip() for s in (args.symbols or ",".join(cfg.symbol_names())).split(",") if s.strip()]
     end = parse_iso(args.to_dt) if args.to_dt else utcnow()
-    start = (
-        parse_iso(args.from_dt)
-        if args.from_dt
-        else datetime(end.year - (end.month <= args.months), ((end.month - args.months - 1) % 12) + 1, 1, tzinfo=UTC)
-    )
+    if args.from_dt:
+        start = parse_iso(args.from_dt)
+    else:
+        if args.months <= 0:
+            print("error: --months must be positive", file=sys.stderr)
+            return 2
+        year, month = divmod(end.year * 12 + end.month - 1 - args.months, 12)
+        if year < 1:
+            print("error: --months exceeds the supported calendar", file=sys.stderr)
+            return 2
+        start = datetime(year, month + 1, 1, tzinfo=UTC)
     if end <= start:
         print("error: the window must end after it starts", file=sys.stderr)
         return 2

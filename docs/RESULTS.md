@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest durable observation hold and calendar pass (working branch)
+
+- Invalid CCXT observations now first latch a local entry hold, then persist a first-fault marker and audit event in one transaction. Ordinary kill-switch entry checks and reset transactions reject the marker even if its payload is corrupt. Repeated faults preserve the first marker without unbounded duplicate audit rows. No release API is provided. Failure of the audit transaction rolls back the durable write but retains the process-local hold; complete database failure cannot protect other processes or survive restart.
+- Backfill month subtraction now uses calendar month arithmetic across arbitrary year boundaries; zero, negative and calendar-underflow ranges fail before fetching. Explicit start dates continue to override months. Tests cover 12/24 months, January year crossing and leap-day dates without generating large archives.
+- Full suite **1219 passed, 2 skipped**; Ruff, mypy and diff checks passed. Added restart/reset/corrupt-marker, first-fault audit and persistence-failure tests. All exchange tests remain fake responses, not venue certification.
+- Added REMAINING_WORK.md, a consolidated implementation, evidence and recurring-operations register. No claim that phases D–I or the project are complete. The dashboard remains paper/synthetic/read-only/1× on port 8000; its running process predates this pass. Live promotion and live/testnet resets remain blocked.
+
 ## Latest malformed initial-order response pass (working branch)
 
 - A successful create-order call now installs a process-local tracking record before validating response totals. Initial and polled observations use the same parse-before-mutate validation; malformed fee values are also rejected. A malformed response latches the attached local entry hold, preserves the submitted order record, and does not emit fabricated fills. Reusing its cached client ID does not submit another order.

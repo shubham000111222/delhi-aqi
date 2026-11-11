@@ -16,7 +16,10 @@ depends on.
 For the full Windows installation, implementation and validation procedure, see
 [`WINDOWS_LOCAL_LIVE_READINESS.md`](WINDOWS_LOCAL_LIVE_READINESS.md).
 
-**Last updated:** 2026-11-04 · **Suite:** 1209 passed, 2 skipped on the working branch.
+For the consolidated item-by-item implementation and external-evidence backlog, see
+[`REMAINING_WORK.md`](REMAINING_WORK.md). It does not mark unfinished work complete.
+
+**Last updated:** 2026-11-02 · **Suite:** 1219 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -27,6 +30,7 @@ machine; this workspace has no real-price archive.
 - [x] Add action-bound, single-use offline-signed reductions of an enabled strategy size; this cannot authorize increases or release holds.
 - [x] Serialize consecutive-loss updates and threshold actions across engines with a single SQLite transaction; corrupt streak records block normal entries.
 - [x] Commit the normal persisted position closure and loss-streak controls in one SQLite transaction; refuse a repeated close of the same open row.
+- [x] Persist the first invalid execution-observation hold with audit; ordinary entries and transactional resets block across restart, with a local fallback on storage failure. No authenticated release workflow yet.
 - [x] Retain process-local order identity before initial response parsing; share atomic fill/fee validation with polling so malformed successful responses block entries without allowing cached-ID resubmission.
 - [x] Parse polled cumulative fill fields before mutating cached order status; malformed observations latch a local entry hold and permanent polling errors surface rather than being silently skipped.
 - [x] Derive incremental CCXT partial-fill notional from cumulative quantity/average; preserve both callback watermarks on failure and locally hold entries on invalid observations (not durable recovery).
@@ -193,8 +197,7 @@ Tracked in detail in [`BUILD_PLAN_20_21.md`](BUILD_PLAN_20_21.md); this is the r
 - [ ] **Operator-absent ladder** (§21.8) — 7 days warn, 14 days half size, 21 days L1.
 - [ ] **Dashboard Health/Autonomy** (§21.11) — working branch has read-only health and
       partial-audit panels, but approval authorization, full audit coverage and go/no-go remain.
-- [ ] **Historical backfill duration** — fix `--months` arithmetic for 12+ months and
-      test year and leap-day boundaries; until fixed, use explicit UTC `--from`/`--to`.
+- [x] **Historical backfill duration** — calendar subtraction handles 12+ months; year/leap-day boundaries and invalid ranges have regression tests. This does not verify historical archive coverage.
 - [ ] **Promotion evidence integration** — provenance is not verified by the current
       metrics pipeline. Walk-forward and robustness now run a separate modeled 2× fee/adverse-market-slippage replay and feed its result to their cost gate; input provenance, venue costs and identical input coverage remain unverified, and other metrics-only paths have no rerun. Promotion
       fails closed until both are supplied and independently validated.

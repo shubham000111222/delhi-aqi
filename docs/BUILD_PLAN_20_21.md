@@ -2,8 +2,8 @@
 
 Companion to the main build plan's sections 20 (self-healing, R29) and 21
 (self-sustaining, R30). This file is the **status sheet**: what each requirement needs,
-what exists today, and the order the rest lands in. It is updated with every PR, so
-"tracked" here always means "in `main`", never "planned".
+what exists today, and the order the rest lands in. Working-branch changes are explicitly labelled and are not yet merged. The consolidated
+remaining implementation and external acceptance register is [REMAINING_WORK.md](REMAINING_WORK.md).
 
 Legend: ✅ built and tested · 🟡 partial · ⬜ not started · 🔒 needs a human or a networked
 machine (cannot be verified in this sandbox)
