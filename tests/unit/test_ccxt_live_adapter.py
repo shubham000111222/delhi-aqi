@@ -712,3 +712,24 @@ def test_regressing_partial_fill_state_does_not_advance_watermarks(quantity, ave
     assert len(fills) == 1
     assert adapter.seen_fills['tb-abc123'] == Decimal('0.001')
     assert adapter.seen_fill_notional['tb-abc123'] == Decimal('0.1')
+
+
+@pytest.mark.parametrize('filled,average', [('garbage', '100'), (True, '100'),
+    ('0.001', False), ('0.001', {}), ('sNaN', '100')])
+def test_malformed_poll_preserves_order_and_blocks_entries(filled, average):
+    adapter, exchange = adapter_with()
+    order = asyncio.run(adapter.place_order(request()))
+    fills: list[Any] = []
+    adapter.on_fill = fills.append
+    exchange.order_state['x1'].update(status='closed', filled=filled, average=average)
+    with pytest.raises(PermanentExchangeError, match='invalid cumulative fill'):
+        asyncio.run(adapter.drain_pending())
+    assert order.status.is_open
+    assert order.filled_qty == 0
+    assert not fills
+    assert adapter.killswitch is not None
+    assert not adapter.killswitch.can_open_entries()
+    exchange.order_state['x1'].update(status='closed', filled='0.001', average='100')
+    asyncio.run(adapter.drain_pending())
+    assert len(fills) == 1
+    assert not adapter.killswitch.can_open_entries(), 'a good response cannot clear the hold'

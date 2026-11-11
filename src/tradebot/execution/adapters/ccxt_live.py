@@ -17,7 +17,7 @@ Safety choices baked in here:
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, NoReturn
 
 from ...config import Config, Mode
@@ -342,9 +342,26 @@ class CcxtLiveAdapter(ExchangeAdapter):
             )
         except Exception as exc:  # noqa: BLE001
             raise self._translate(exc) from exc
+        # Parse before mutating the cached order. A malformed response must not
+        # leave a terminal status cached with stale quantities and hide the retry.
+        try:
+            filled_raw = raw.get("filled")
+            average_raw = raw.get("average")
+            if isinstance(filled_raw, bool) or isinstance(average_raw, bool):
+                raise ValueError("boolean fill total")
+            filled = D(str(filled_raw if filled_raw is not None else 0))
+            average = D(str(average_raw if average_raw is not None else 0))
+            if not filled.is_finite() or filled < self.seen_fills.get(client_order_id, ZERO):
+                raise ValueError("nonfinite or regressing quantity")
+            if not average.is_finite() or (filled > 0 and average <= 0):
+                raise ValueError("invalid cumulative average")
+        except (InvalidOperation, TypeError, ValueError, AttributeError) as exc:
+            if self.killswitch is not None:
+                self.killswitch.latch_local_entry_hold()
+            raise PermanentExchangeError(f"invalid cumulative fill for {client_order_id}") from exc
         order.status = _status_of(raw.get("status"))
-        order.filled_qty = D(str(raw.get("filled") or 0))
-        order.avg_fill_price = D(str(raw.get("average") or 0))
+        order.filled_qty = filled
+        order.avg_fill_price = average
         order.updated_at = self.clock.now()
         return order
 
@@ -389,6 +406,10 @@ class CcxtLiveAdapter(ExchangeAdapter):
             else:
                 try:
                     observed = await self.get_order(cid)
+                except PermanentExchangeError:
+                    # Invalid observations have already latched a local entry hold.
+                    # Surface them rather than silently treating corruption as a timeout.
+                    raise
                 except Exception:  # noqa: BLE001
                     continue
                 if observed is None:

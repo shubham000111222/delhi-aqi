@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest malformed fill polling pass (working branch)
+
+- Polled cumulative quantity/average parsing and validation happen before cached order mutation. Boolean, unparseable, nonfinite and inconsistent totals latch the attached kill switch's local entry hold and raise. Permanent polling errors now surface instead of being silently skipped; transient fetch errors continue to allow other orders to be polled.
+- Five new fake-exchange cases verify malformed terminal responses leave cached orders open and quantities unchanged, a later valid response still delivers the fill, and that delivery does not clear the hold. Full suite **1201 passed, 2 skipped**; Ruff, mypy and diff checks passed.
+- This closes the polled-response parsing gap only. Initial create-order malformed response handling, durable invalid-observation holds, independently verified reconciliation, restart-safe watermarks, authoritative venue trade identities and recovery remain incomplete. No live safety gate was relaxed. The sandbox dashboard was restored on port 8000 in isolated read-only paper/synthetic mode at speed 1 after the environment restart.
+
 ## Latest cumulative partial-fill accounting pass (working branch)
 
 - Incremental fill price now derives from the difference between current cumulative notional (`filled × average`) and successfully delivered notional, divided by new quantity. Both process-local watermarks advance only after callback success. Numeric string quantities/averages are accepted without Python repr quoting.
