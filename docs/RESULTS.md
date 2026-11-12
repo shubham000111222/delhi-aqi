@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine nonzero executed-trade plumbing test
+
+- Concrete study evidence now retains up to1,000 closed-trade records per variant (symbol/strategy, net P&L/R, fees, open/close timestamps and exit reason), with explicit trade_records_truncated disclosure. Metrics continue to use the collected trade set rather than just the displayed record page.
+- Added an artificial1,800-minute two-symbol trend fixture that actually exercises the existing EMA strategy, ordinary risk engine, orders, fills, closed trades, fees and trade-P&L Monte Carlo. Baseline produces nonzero closed trades; all three filters reject the deliberately missing historical lookback and submit no orders. Invalid-check retention and project acceptance remain false.
+- This fixture explicitly uses market entry/test-only settings and a disabled target-cost-ratio check solely to reach the plumbing under deterministic artificial prices. Repository defaults/risk configuration are unchanged. It is NOT strategy tuning, a recommendation to switch default limit entries to market, recorded OOS evidence, fill parity or a profitability result. The test verifies nonzero fees, bounded records, count consistency and in-window trade timestamps.
+- Full suite **1411 passed, 2 skipped**, Ruff/mypy/diff clean. Recorded OOS benefit, full limit/expiry semantics and hard latency acceptance still unfulfilled; filter remains disabled.
+
 ## Time Machine existing project acceptance gates
 
 - Concrete studies now compute ordinary project performance metrics and trade-P&L bootstrap drawdown per variant, separately from10,000-path candidate simulation. Initial capital/final marked equity are included explicitly in the metrics curve. No trades means unavailable Monte Carlo evidence (`null`), not a fabricated zero-drawdown pass.

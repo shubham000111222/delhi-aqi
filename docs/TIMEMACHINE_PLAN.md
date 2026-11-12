@@ -142,3 +142,5 @@ Reports preserve independent window drawdowns, not a fabricated concatenated cur
 - [ ] Validate this predeclared reference estimator and horizon on recorded non-holdout inputs; no automatic performance claim. Add `--current-volatility` to either research CLI example to freeze this option across nominal/stressed windows. Changing it after inspecting outcomes is parameter selection, not fresh OOS evidence.
 
 - [x] Concrete study diagnostics include existing performance metrics, trade-P&L bootstrap MC (unavailable without trades), and unchanged project acceptance gates. Actual eligible same-input stressed return feeds cost-stress gate; OOS provenance remains false. Research retention/screen flags do not override acceptance gates or enable trading.
+
+- [x] Study evidence includes bounded closed-trade records and truncation flag; nonzero artificial-market integration confirms ordinary strategy/risk/orders/fills/fees/closed-trade metrics and missing-history filter suppression. Test-only market settings do not alter defaults or certify limit/OOS execution.

@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -161,6 +162,8 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
                     }
                     censored = bool(any(terminal.values()))
                     diagnostics[variant] = {'metrics': performance[variant].to_dict(), 'monte_carlo': mc,
+                                            'closed_trades': [asdict(trade) for trade in trades[:1000]],
+                                            'trade_records_truncated': len(trades) > 1000,
                                             'terminal_state': terminal, 'terminal_censored': censored,
                                             'comparison_eligible': not censored and invalid == 0,
                                             'stats': engine.stats.to_dict(), 'checks': len(errors),

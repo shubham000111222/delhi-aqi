@@ -249,3 +249,44 @@ async def test_project_gates_remain_distinct_from_research_retention(fast_cfg):
         assert '1.3' in gates['profit_factor']['detail']
         assert gates['study_comparison_integrity']['passed']
     assert not result['filter_enabled']
+
+
+async def test_nonzero_trade_engine_path_and_short_history_filter_suppression(fast_cfg):
+    # Artificial market-only fixture exercises plumbing, NOT production defaults,
+    # tuning, OOS performance or a recommendation to alter limit strategies.
+    for name, strategy in list(fast_cfg.strategies.strategies.items()):
+        market_ema = name == 'S1_ema_trend'
+        fast_cfg.strategies.strategies[name] = strategy.model_copy(update={
+            'enabled': market_ema,
+            'params': {**strategy.params, 'entry_type': 'market', 'limit_offset_bps': 0,
+                       'adx_min': 0, 'target_r': .5, 'stop_atr_mult': .5}})
+    fast_cfg = replace(fast_cfg, risk=fast_cfg.risk.model_copy(update={'min_target_cost_ratio': Decimal('0')}))
+    length = 1800
+    execution = {}
+    for symbol in fast_cfg.symbol_names():
+        rows = []
+        for i in range(length):
+            price = Decimal('100') + Decimal(i) / 50
+            rows.append(Candle(symbol, '1m', START+timedelta(minutes=i), price,
+                                price+Decimal('.1'), price-Decimal('.1'), price+Decimal('.01'), Decimal('10')))
+        execution[symbol] = rows
+    end = START+timedelta(minutes=length)
+    result = await run_engine_study(fast_cfg, execution, {}, start=START, end=end,
+                                    final_holdout_start=end, fee_rate=.001, slippage_rate=.0005)
+    assert result.get('complete'), result
+    baseline = result['diagnostics']['no_filter']
+    assert baseline['stats']['signals'] > 0
+    assert baseline['stats']['orders'] > 0, baseline
+    assert baseline['stats']['fills'] > 0
+    assert baseline['metrics']['trade_count'] > 0, baseline
+    assert baseline['monte_carlo'] is not None
+    assert not baseline['trade_records_truncated']
+    assert len(baseline['closed_trades']) == baseline['metrics']['trade_count']
+    assert sum(t['fees'] for t in baseline['closed_trades']) > 0
+    assert all(START <= t['opened_at'] <= t['closed_at'] <= end for t in baseline['closed_trades'])
+    for variant in ('simulation_only', 'replay_only', 'both'):
+        row = result['diagnostics'][variant]
+        assert row['checks'] > 0 and row['invalid_checks'] > 0
+        assert row['stats']['orders'] == 0
+        assert not result['retention_criteria_passed'][variant]
+    assert not result['filter_enabled'] and not result['acceptance_gates_passed']
