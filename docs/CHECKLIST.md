@@ -19,7 +19,7 @@ For the full Windows installation, implementation and validation procedure, see
 For the consolidated item-by-item implementation and external-evidence backlog, see
 [`REMAINING_WORK.md`](REMAINING_WORK.md). It does not mark unfinished work complete.
 
-**Last updated:** 2026-11-02 · **Suite:** 1373 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-02 · **Suite:** 1383 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -269,3 +269,5 @@ Fill this in as phases complete — it is what `docs/RESULTS.md` is built from.
 
 - [x] Versioned deterministic existing-strategy replay contexts and market EMA parity tests; complete closed-bar aggregation and explicit limit/stateful-class refusal.
 - [ ] Complete default limit-order entry semantics and end-to-end replay parity; reference recomputation is not timing-certified.
+
+- [x] Independent simulation-only/replay-only/combined checker execution modes and predeclared replay-only research policy; unused evidence not computed.

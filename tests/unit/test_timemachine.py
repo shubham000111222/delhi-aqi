@@ -268,3 +268,79 @@ def test_alert_failure_cannot_allow_trade(bars):
     result = TimeMachine(fail).check(bars[-2:], 'BTC/USDT', END, ReplayPlan(100, 99, 101),
                                     'bad', lambda past: None, fee_rate=0, slippage_rate=0, rule_version='v1')
     assert result['multiplier'] == 0 and result['alert_delivered'] is False
+
+
+@pytest.mark.parametrize('variant', ['simulation_only', 'replay_only', 'both'])
+def test_research_variants_compute_only_selected_evidence(bars, monkeypatch, variant):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import tradebot.analysis.timemachine as tm
+
+    monkeypatch.setattr(tm, 'time', SimpleNamespace(perf_counter=lambda: 0.))
+    simulation = Mock(return_value={'expected_net_r': .2, 'p05_r': -1., 'time_exit': .1,
+                                    'target_first': .5, 'stop_first': .4})
+    replay = Mock(return_value={'expected_net_r': .2, 'p05_r': -1., 'insufficient': False,
+                                'triggers': 20, 'counts': {'target_first': 10, 'stop_first': 8, 'time_exit': 2}})
+    monkeypatch.setattr(tm, 'simulate_trade', simulation)
+    monkeypatch.setattr(tm, 'replay_rule', replay)
+    result = tm.TimeMachine(lambda message: None).check(
+        bars, 'BTC/USDT', END, tm.ReplayPlan(100, 99, 101), 'variant', lambda past: None,
+        fee_rate=.001, slippage_rate=.001, rule_version='v1', variant=variant)
+    assert result['variant'] == variant and result['multiplier'] == 1
+    assert simulation.call_count == (variant != 'replay_only')
+    assert replay.call_count == (variant != 'simulation_only')
+    assert ('simulation' in result) == (variant != 'replay_only')
+    assert ('replay' in result) == (variant != 'simulation_only')
+    assert result['path_count'] == (0 if variant == 'replay_only' else 10000)
+
+
+@pytest.mark.parametrize('damage', ['insufficient', 'negative', 'tail', 'count', 'nan'])
+def test_replay_only_invalid_or_unsafe_evidence_skips(damage):
+    from tradebot.analysis.timemachine import replay_only_verdict
+
+    replay = {'expected_net_r': .2, 'p05_r': -1., 'insufficient': False,
+              'triggers': 20, 'counts': {'target_first': 10, 'stop_first': 8, 'time_exit': 2}}
+    if damage == 'insufficient':
+        replay['insufficient'] = True
+    elif damage == 'negative':
+        replay['expected_net_r'] = -.1
+    elif damage == 'tail':
+        replay['p05_r'] = -2.
+    elif damage == 'count':
+        replay['triggers'] = 19
+    else:
+        replay['expected_net_r'] = float('nan')
+    assert replay_only_verdict(replay)['multiplier'] == 0
+
+
+def test_unknown_variant_skips_and_alerts(bars):
+    from tradebot.analysis.timemachine import TimeMachine
+
+    alerts = []
+    result = TimeMachine(alerts.append).check(
+        bars, 'BTC/USDT', END, ReplayPlan(100, 99, 101), 'bad-variant', lambda past: None,
+        fee_rate=0, slippage_rate=0, rule_version='v1', variant='imaginary')
+    assert result['multiplier'] == 0 and alerts
+
+
+def test_deadline_after_permissive_variant_result_still_skips(bars, monkeypatch):
+    from types import SimpleNamespace
+
+    import tradebot.analysis.timemachine as tm
+
+    clock = [0.]
+    monkeypatch.setattr(tm, 'time', SimpleNamespace(perf_counter=lambda: clock[0]))
+
+    def simulate(*args, **kwargs):
+        clock[0] = 1.
+        return {'expected_net_r': .2, 'p05_r': -1., 'time_exit': .1,
+                'target_first': .5, 'stop_first': .4}
+
+    monkeypatch.setattr(tm, 'simulate_trade', simulate)
+    alerts = []
+    result = tm.TimeMachine(alerts.append).check(
+        bars, 'BTC/USDT', END, ReplayPlan(100, 99, 101), 'late-result', lambda past: None,
+        fee_rate=0, slippage_rate=0, rule_version='v1', variant='simulation_only')
+    assert result['multiplier'] == 0 and result['verdict'] == 'SKIP'
+    assert result['timed_out'] and alerts

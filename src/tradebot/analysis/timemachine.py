@@ -334,6 +334,34 @@ def trade_verdict(simulation: dict[str, object], replay: dict[str, object], *,
                 'reason': 'missing or invalid metrics', 'filter_enabled': False}
 
 
+def replay_only_verdict(replay: dict[str, object], *, coin_flip_skip: bool = True) -> dict[str, object]:
+    """Predeclared research ablation: same thresholds on observed replay metrics.
+
+    Unlike combined mode, insufficient replay alone cannot support an entry.
+    This is not a new live policy or a calibrated strategy-selection rule.
+    """
+    try:
+        if replay.get('insufficient') is not False:
+            raise ValueError('insufficient replay-only evidence')
+        counts = replay['counts']
+        if not isinstance(counts, dict):
+            raise ValueError('invalid replay counts')
+        values = [counts[k] for k in ('target_first', 'stop_first', 'time_exit')]
+        if any(type(v) is not int or v < 0 for v in values):
+            raise ValueError('invalid replay counts')
+        total = sum(values)
+        if total < 20 or replay.get('triggers') != total:
+            raise ValueError('insufficient or inconsistent replay counts')
+        metrics = {'expected_net_r': replay.get('expected_net_r'), 'p05_r': replay.get('p05_r'),
+                   **{k: v/total for k, v in zip(('target_first', 'stop_first', 'time_exit'), values, strict=True)}}
+        result = trade_verdict(metrics, {'insufficient': True}, coin_flip_skip=coin_flip_skip)
+        result['reason'] = 'replay-only thresholds: ' + str(result['reason'])
+        return result
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return {'verdict': 'SKIP', 'multiplier': 0., 'label': 'insufficient or invalid replay',
+                'reason': 'replay-only requires at least 20 valid completed triggers', 'filter_enabled': False}
+
+
 class TimeMachine:
     """Standalone, disabled-by-default check with bounded process-local caches.
 
@@ -364,13 +392,15 @@ class TimeMachine:
     def check(self, bars: Sequence[Candle], symbol: str, decision_time: datetime,
               plan: ReplayPlan, trade_id: str, rule: Callable[[Sequence[Candle]], ReplayPlan | None], *,
               fee_rate: float, slippage_rate: float, rule_version: str, volatility_scale: float = 1.,
-              coin_flip_skip: bool = True) -> dict[str, object]:
+              coin_flip_skip: bool = True, variant: str = 'both') -> dict[str, object]:
         started = time.perf_counter()
         deadline = started + self.budget_ms / 1000
         paths = self.paths
-        result: dict[str, object] = {'trade_id': trade_id, 'path_count': paths,
-                                    'verdict': 'SKIP', 'multiplier': 0., 'filter_enabled': False}
+        result: dict[str, object] = {'trade_id': trade_id, 'path_count': 0 if variant == 'replay_only' else paths,
+                                    'verdict': 'SKIP', 'multiplier': 0., 'filter_enabled': False, 'variant': variant}
         try:
+            if variant not in ('both', 'simulation_only', 'replay_only'):
+                raise ValueError('unknown research check variant')
             result['seed'] = trade_seed(trade_id)
             if not isinstance(rule_version, str) or not rule_version:
                 raise ValueError('immutable replay rule version is required')
@@ -390,22 +420,32 @@ class TimeMachine:
             result['input_hash'] = history.input_hash
             if time.perf_counter() >= deadline:
                 raise TimeoutError('history preparation budget exceeded')
-            replay_key = (history.input_hash, rule, rule_version, fee_rate, slippage_rate)
-            replay = self._replay_cache.get(replay_key)
-            if replay is None:
-                replay = replay_rule(history, rule, fee_rate=fee_rate, slippage_rate=slippage_rate,
-                                     deadline=deadline)
-                self._replay_cache[replay_key] = replay
-                if len(self._replay_cache) > self.cache_entries:
-                    self._replay_cache.popitem(last=False)
-            self._replay_cache.move_to_end(replay_key)
-            simulation = simulate_trade(history, plan, trade_id, fee_rate=fee_rate,
-                                        slippage_rate=slippage_rate, paths=paths,
-                                        volatility_scale=volatility_scale, deadline=deadline)
+            replay: dict[str, object] = {'insufficient': True}
+            if variant != 'simulation_only':
+                replay_key = (history.input_hash, rule, rule_version, fee_rate, slippage_rate)
+                cached_replay = self._replay_cache.get(replay_key)
+                if cached_replay is None:
+                    cached_replay = replay_rule(history, rule, fee_rate=fee_rate, slippage_rate=slippage_rate,
+                                                deadline=deadline)
+                    self._replay_cache[replay_key] = cached_replay
+                    if len(self._replay_cache) > self.cache_entries:
+                        self._replay_cache.popitem(last=False)
+                self._replay_cache.move_to_end(replay_key)
+                replay = copy.deepcopy(cached_replay)
+                result['replay'] = replay
+            if variant != 'replay_only':
+                simulation = simulate_trade(history, plan, trade_id, fee_rate=fee_rate,
+                                            slippage_rate=slippage_rate, paths=paths,
+                                            volatility_scale=volatility_scale, deadline=deadline)
+                result['simulation'] = simulation
+                result.update(trade_verdict(simulation, replay, coin_flip_skip=coin_flip_skip))
+            else:
+                result.update(replay_only_verdict(replay, coin_flip_skip=coin_flip_skip))
+                result['path_count'] = 0  # no bootstrap paths were run
             if time.perf_counter() >= deadline:
+                # Never leave a partially computed permissive verdict on a timed-out result.
+                result.update(verdict='SKIP', multiplier=0.)
                 raise TimeoutError('check budget exceeded')
-            result.update(simulation=simulation, replay=copy.deepcopy(replay))
-            result.update(trade_verdict(simulation, replay, coin_flip_skip=coin_flip_skip))
             self.overruns = 0
             if result['verdict'] == 'SKIP':
                 result['alert_delivered'] = self._notify(f'Time Machine {trade_id}: SKIP: {result["reason"]}')
@@ -413,9 +453,9 @@ class TimeMachine:
         except Exception as exc:  # noqa: BLE001 - every invalid/error outcome must skip
             timed_out = isinstance(exc, TimeoutError)
             self.overruns = self.overruns + 1 if timed_out else 0
-            result.update(reason=type(exc).__name__ + ': ' + str(exc), timed_out=timed_out)
+            result.update(verdict='SKIP', multiplier=0., reason=type(exc).__name__ + ': ' + str(exc), timed_out=timed_out)
             result['alert_delivered'] = self._notify(f'Time Machine {trade_id}: SKIP: {result["reason"]}')
-            if self.overruns >= 3 and self.paths == 10000:
+            if self.overruns >= 3 and self.paths == 10000 and variant != 'replay_only':
                 self.paths = 5000
                 result['path_reduction_alert_delivered'] = self._notify(
                     'Time Machine: three consecutive overruns; subsequent checks reduced to 5000 paths')

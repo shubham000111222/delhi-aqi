@@ -9,6 +9,14 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine research ablation modes
+
+- Checker and simulated engine bridge now explicitly select `simulation_only`, `replay_only` or `both` (default unchanged). Simulation-only does not call the replay rule; replay-only does not run bootstrap paths and reports path_count=0. Omitted evidence is omitted, not fabricated as a computed result. Unknown modes skip and alert.
+- Simulation-only applies existing simulation thresholds without replay sign disagreement. Replay-only requires >=20 consistent completed triggers and applies the same predeclared mean/tail/time/coin-flip thresholds to observed replay outcomes/proportions. Insufficient replay alone skips (unlike combined mode where valid simulation can stand alone). This conservative research convention is explicit, not supplied real OOS evidence or live policy. The no-filter baseline uses no candidate hook.
+- End-of-check deadline/error handling explicitly overwrites any partially calculated permissive result with SKIP/0. Replay-only overruns never trigger a meaningless bootstrap path reduction. No hard-preemption/timing guarantee.
+- Ten new tests cover exact component call isolation for three modes, five insufficient/invalid/unsafe replay cases, unknown-mode alerts and a permissive computed result arriving after deadline. Full suite **1383 passed, 2 skipped**; Ruff, mypy and diff clean. Actual four independent engine runs and recorded OOS comparison remain pending.
+- Existing entry timeout is 120 seconds, shorter than 5m OHLC: current data cannot resolve limit-fill-before-expiry or queue position. Default limit entries remain unsupported, never substituted with market fills. Finer event data/model validation is required for honest parity.
+
 ## Time Machine deterministic strategy replay bindings
 
 - Added `analysis/strategy_replay.py`: constructs contexts from complete aligned strategy-timeframe candles aggregated from the supplied closed 5m prefix. Rejects gaps/duplicates/mixed symbols/timeframes, drops incomplete edge buckets, bounds indicator history to 1,500 candles and evaluates only at a newly closed strategy bar.

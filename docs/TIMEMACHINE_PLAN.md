@@ -85,3 +85,9 @@ latency acceptance or a performance guarantee. The 250 ms gate remains unfulfill
 
 - [x] Versioned frozen settings, existing deterministic strategy/regime evaluation, complete5m-to-strategy-timeframe aggregation and market EMA plan parity. Fresh instances; no repeated signal from an incomplete latest bucket.
 - [ ] Limit-fill/queue semantics for default strategies, stateful ML replay and full portfolio/exit-management parity remain unsupported. No silent market substitution. Optimize/measure cold replay before latency acceptance.
+
+## Research ablation modes
+
+- [x] Engine bridge/checker mode isolation: simulation-only bypasses replay, replay-only bypasses bootstrap (0 paths), combined remains default; baseline has no hook. Replay-only requires 20 completed triggers and applies the same fixed mean/tail/time/coin-flip thresholds to replay statistics; insufficient evidence skips. This is a predeclared research convention, not an enabled live rule.
+- [ ] Execute actual isolated engine/store/portfolio runs per variant on identical point-in-time recorded inputs; callbacks/declarations alone are not proof. No final-holdout tuning.
+- [ ] Resolve limit fills/queue position and 120-second timeout using adequate finer event data:5m bars cannot verify these semantics.
