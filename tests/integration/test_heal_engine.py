@@ -150,3 +150,18 @@ async def test_the_stuck_exit_row_sees_a_position_that_outlived_its_exit(engine)
     detail = await row.action(engine)
     assert "re-submitted" in detail
     assert await row.verify(engine) is True, "the position must be gone or the heal is a failure"
+
+
+async def test_reconciliation_heal_does_not_change_risk_limits_or_enable_strategy(engine):
+    """Exercise a real playbook row rather than only testing a refusal helper."""
+    risk_before = engine.cfg.risk.model_dump()
+    engine._disabled_strategies["S1_ema_trend"] = "operator disabled"
+    engine.killswitch.trigger(KillLevel.L1, trigger="manual", reason="operator pause")
+    engine._reconcile_state = "mismatch"
+
+    outcomes = await engine.playbook.tick(engine)
+
+    assert any(outcome.row == "reconcile_mismatch" for outcome in outcomes)
+    assert engine.cfg.risk.model_dump() == risk_before
+    assert engine._strategy_blocked("S1_ema_trend")
+    assert engine.killswitch.level is KillLevel.L1

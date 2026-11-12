@@ -186,12 +186,15 @@ async def _run_backtest(
 ) -> dict:
     from .engine import Engine
 
+    if cfg.mode is not Mode.PAPER:
+        raise ValueError("backtests require paper mode")
     start = _sim_start(cfg)
     clock = SimClock(start)
     store = Store(persist) if persist else Store(":memory:")
     engine = await Engine.build(cfg, clock=clock, store=store)
     if capital is not None:
         engine.ledger.starting_cash = capital
+        engine.ledger.cash = capital
         engine.adapter.cash = capital  # type: ignore[attr-defined]
         engine.starting_capital = capital
         store.kv_set("day_start_equity", to_str(capital))
@@ -308,6 +311,74 @@ def cmd_live_check(args: argparse.Namespace) -> int:
     print(f"{len(results) - len(failed)}/{len(results)} gates passed")
     store.close()
     return 1 if failed else 0
+
+
+def cmd_venue_observe(args: argparse.Namespace) -> int:
+    """Read a venue account snapshot without trading, reconciliation or reset authority."""
+    from .data.hub import MarketData
+    from .execution.adapters.ccxt_live import CcxtLiveAdapter
+    from .execution.venue_comparison import compare_local
+    from .execution.venue_observation import ObservationError, observe_account
+
+    cfg = _config(args)
+    if cfg.mode not in (Mode.LIVE, Mode.TESTNET):
+        print("venue-observe requires --mode testnet or --mode live", file=sys.stderr)
+        return 2
+
+    async def _go() -> dict[str, Any]:
+        clock = Clock()
+        adapter = CcxtLiveAdapter(cfg, MarketData(cfg.symbol_names()), clock, testnet=cfg.mode is Mode.TESTNET)
+        try:
+            await adapter.connect()
+            observation = await observe_account(adapter.exchange, mode=cfg.mode.value, clock=clock)
+            if args.compare_local:
+                started = clock.now()
+                comparison = compare_local(observation, path=cfg.settings.db_path, quote=cfg.settings.quote_currency)
+                comparison["local_read_started_at"] = iso(started)
+                comparison["local_read_finished_at"] = iso(clock.now())
+                observation["local_comparison"] = comparison
+            return observation
+        finally:
+            await adapter.close()
+
+    try:
+        result = asyncio.run(_go())
+    except ObservationError as exc:
+        print(f"venue observation failed: {exc}", file=sys.stderr)
+        return 1
+    except Exception:  # noqa: BLE001 - do not expose credentials or raw venue responses
+        print("venue observation failed: could not connect to venue", file=sys.stderr)
+        return 1
+    _print(result)
+    return 0
+
+
+def cmd_pending_submissions(args: argparse.Namespace) -> int:
+    """Inspect unresolved network intents without authorizing release or replay."""
+    from .execution.submission_inspection import SubmissionInspectionError, inspect_pending_submissions
+
+    cfg = _config(args)
+    try:
+        result = inspect_pending_submissions(Path(cfg.settings.db_path))
+    except SubmissionInspectionError as exc:
+        print(f"pending-submission inspection failed: {exc}", file=sys.stderr)
+        return 1
+    _print(result)
+    return 0
+
+
+def cmd_pending_fills(args: argparse.Namespace) -> int:
+    """Inspect callback journal without modifying the database or authorizing recovery."""
+    from .execution.fill_recovery import FillInspectionError, inspect_pending_fills
+
+    cfg = _config(args)
+    try:
+        result = inspect_pending_fills(Path(cfg.settings.db_path))
+    except FillInspectionError as exc:
+        print(f"pending-fill inspection failed: {exc}", file=sys.stderr)
+        return 1
+    _print(result)
+    return 0
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -525,6 +596,113 @@ def cmd_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_autonomy(args: argparse.Namespace) -> int:
+    """Show the partial autonomy audit ledger, without authorizing actions."""
+    from .autonomy import AutonomyLedger
+
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    try:
+        result = AutonomyLedger(store=store).summary()
+    finally:
+        store.close()
+    _print(result)
+    return 0
+
+
+def cmd_recovery_request(args: argparse.Namespace) -> int:
+    """Create a short-lived, state-bound request for offline operator signature."""
+    from .signed_recovery import SignedFaultRecovery
+
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    try:
+        result = SignedFaultRecovery(cfg, store).request(args.key_id, args.reason)
+    finally:
+        store.close()
+    _print(result)
+    return 0
+
+
+def cmd_recovery_apply(args: argparse.Namespace) -> int:
+    """Verify and consume an offline signature without resetting the kill switch."""
+    from .signed_recovery import SignedFaultRecovery
+
+    request_path, signature_path = Path(args.request), Path(args.signature)
+    if request_path.stat().st_size > 16384 or signature_path.stat().st_size > 1024:
+        raise ValueError("recovery input file is too large")
+    request = json.loads(request_path.read_text(encoding="utf-8-sig"))
+    signature = signature_path.read_text(encoding="utf-8-sig").strip()
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    try:
+        SignedFaultRecovery(cfg, store).apply(request, signature)
+        print("signature consumed; kill level unchanged; incident history remains unverified")
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_allocation_request(args: argparse.Namespace) -> int:
+    from .signed_allocation import SignedAllocation
+
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    try:
+        _print(SignedAllocation(cfg, store).request(args.key_id, args.reason, args.cap))
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_allocation_apply(args: argparse.Namespace) -> int:
+    from .signed_allocation import SignedAllocation
+
+    request_path, signature_path = Path(args.request), Path(args.signature)
+    if request_path.stat().st_size > 16384 or signature_path.stat().st_size > 1024:
+        raise ValueError("allocation input file is too large")
+    request = json.loads(request_path.read_text(encoding="utf-8-sig"))
+    signature = signature_path.read_text(encoding="utf-8-sig").strip()
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    try:
+        SignedAllocation(cfg, store).apply(request, signature)
+        print("allocation cap reduced; live readiness and kill level unchanged")
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_strategy_reduction_request(args: argparse.Namespace) -> int:
+    from .signed_strategy import SignedStrategyReduction
+
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    try:
+        _print(SignedStrategyReduction(cfg, store).request(args.key_id, args.reason, args.strategy, args.multiplier))
+    finally:
+        store.close()
+    return 0
+
+
+def cmd_strategy_reduction_apply(args: argparse.Namespace) -> int:
+    from .signed_strategy import SignedStrategyReduction
+
+    request_path, signature_path = Path(args.request), Path(args.signature)
+    if request_path.stat().st_size > 16384 or signature_path.stat().st_size > 1024:
+        raise ValueError("strategy reduction input file is too large")
+    request = json.loads(request_path.read_text(encoding="utf-8-sig"))
+    signature = signature_path.read_text(encoding="utf-8-sig").strip()
+    cfg = _config(args)
+    store = Store(cfg.settings.db_path)
+    try:
+        SignedStrategyReduction(cfg, store).apply(request, signature)
+        print("strategy size reduced; live readiness and kill level unchanged")
+    finally:
+        store.close()
+    return 0
+
+
 def cmd_health(args: argparse.Namespace) -> int:
     """One health check, printed: what each component answered and what the model made of it.
 
@@ -546,6 +724,12 @@ def cmd_health(args: argparse.Namespace) -> int:
         _print(health)
         return 0
 
+    blockers = health.get("entry_blockers", {})
+    if blockers.get("available") is True:
+        print("entry blockers: " + (", ".join(blockers.get("reasons", [])) or "none observed"))
+    else:
+        print("entry blockers: unavailable")
+    print("Point-in-time diagnostic only; not entry authorization.")
     components: dict[str, Any] = health.get("components", {})
     print(f"overall: {components.get('overall', 'UNKNOWN')} | score {components.get('score', '?')}")
     if components.get("flapping"):
@@ -648,8 +832,7 @@ def cmd_watchdog(args: argparse.Namespace) -> int:
     router = router_from_config(cfg, store)
     supervisor = None
     # The watchdog can only flatten what it can reach. Without a venue client it still
-    # escalates, alerts and restarts - it just cannot sell, and it says so in its output
-    # rather than implying protection it does not have.
+    # escalates and alerts. Live/testnet restart is blocked without verified preflight.
     actions = None
     if args.supervise:
         supervisor = Supervisor(
@@ -679,7 +862,7 @@ def cmd_watchdog(args: argparse.Namespace) -> int:
     result["mode"] = cfg.mode.value
     result["deadman"] = watch.deadman.state()
     result["venue_client"] = (
-        "none: this process cannot flatten, only escalate/alert/restart"
+        "none: cannot flatten; live/testnet restart blocked, paper restart only"
         if actions is None
         else "attached"
     )
@@ -730,7 +913,7 @@ def cmd_control(args: argparse.Namespace) -> int:
     from .risk.killswitch import KillSwitch
 
     store = Store(cfg.settings.db_path)
-    ks = KillSwitch(store)
+    ks = KillSwitch(store, mode=cfg.mode)
     if args.action == "pause":
         ks.trigger(KillLevel.L1, trigger="manual", reason=args.reason or "manual pause", actor="cli")
     elif args.action == "kill":
@@ -870,6 +1053,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="stop after N minutes of wall clock instead of running until interrupted "
              "(the engine clock in a live session is real time, so minutes are real minutes)",
     )
+
+    venue_observe = sub.add_parser("venue-observe", help="read venue balances and open orders (not reset or safety evidence)")
+    venue_observe.add_argument("--compare-local", action="store_true", help="diagnose differences against local DB (read-only)")
+
+    sub.add_parser("pending-submissions", help="inspect unresolved submission intents (read-only)")
+    sub.add_parser("pending-fills", help="inspect pending fill callbacks (read-only; not recovery evidence)")
 
     live_check = sub.add_parser("live-check", help="run every live-mode gate (never trades)")
     live_check.add_argument("--confirm", default=None)
@@ -1014,6 +1203,32 @@ def build_parser() -> argparse.ArgumentParser:
     bfl.add_argument("--seed", type=int, default=7)
     bfl.add_argument("--json", action="store_true")
 
+    sub.add_parser("autonomy", help="show the partial autonomy audit ledger")
+
+    rec_req = sub.add_parser("recovery-request", help="create a signed incident-tracking acknowledgement request")
+    rec_req.add_argument("--key-id", required=True, help="SHA-256 fingerprint of an authorized public key")
+    rec_req.add_argument("--reason", required=True, help="written reason for acknowledgement")
+    rec_apply = sub.add_parser("recovery-apply", help="consume an offline signed incident acknowledgement")
+    rec_apply.add_argument("--request", required=True, help="request JSON file")
+    rec_apply.add_argument("--signature", required=True, help="base64 Ed25519 signature file")
+
+    alloc_req = sub.add_parser("allocation-request", help="request a signed reduction of the live allocation cap")
+    alloc_req.add_argument("--key-id", required=True)
+    alloc_req.add_argument("--reason", required=True)
+    alloc_req.add_argument("--cap", required=True, help="new cap as a decimal fraction")
+    alloc_apply = sub.add_parser("allocation-apply", help="consume a signed live allocation cap reduction")
+    alloc_apply.add_argument("--request", required=True)
+    alloc_apply.add_argument("--signature", required=True)
+
+    strat_req = sub.add_parser("strategy-reduction-request", help="request a signed strategy size reduction")
+    strat_req.add_argument("--key-id", required=True)
+    strat_req.add_argument("--reason", required=True)
+    strat_req.add_argument("--strategy", required=True)
+    strat_req.add_argument("--multiplier", required=True, help="new multiplier as a decimal fraction")
+    strat_apply = sub.add_parser("strategy-reduction-apply", help="consume a signed strategy size reduction")
+    strat_apply.add_argument("--request", required=True)
+    strat_apply.add_argument("--signature", required=True)
+
     hlth = sub.add_parser("health", help="run one health check and print component state")
     hlth.add_argument("--json", action="store_true")
 
@@ -1106,7 +1321,7 @@ def cmd_walk_forward(args: argparse.Namespace) -> int:
         return 2
     capital = D(args.capital) if args.capital else None
     result = asyncio.run(
-        run_walk_forward(cfg, windows, capital=capital, seed=args.seed)
+        run_walk_forward(cfg, windows, capital=capital, seed=args.seed, cost_stress=True)
     )
     if args.json:
         _print(
@@ -1114,6 +1329,7 @@ def cmd_walk_forward(args: argparse.Namespace) -> int:
                 "windows": result["windows"],
                 "summary": result["summary"],
                 "metrics": result["metrics_dict"],
+                "cost_stress": result["cost_stress"],
                 "gates": [{"name": g.name, "passed": g.passed, "detail": g.detail} for g in result["gates"]],
                 "passed": result["passed"],
             }
@@ -1231,6 +1447,9 @@ async def _run_robustness(cfg: Config, days: int, seed: int | None, multiplier: 
     from .core.store import Store
     from .engine import Engine
 
+    if cfg.mode is not Mode.PAPER:
+        raise ValueError("robustness runs require paper mode")
+
     async def _session(this_cfg: Config) -> tuple[Any, Any, Any]:
         start = _sim_start(this_cfg)
         clock = SimClock(start)
@@ -1276,8 +1495,16 @@ async def _run_robustness(cfg: Config, days: int, seed: int | None, multiplier: 
         "sharpe": float(stressed_eval["metrics"].sharpe),
         "trades": stressed_eval["metrics"].trade_count,
     }
-    report["gates"] = [g.to_dict() for g in base["gates"]]
-    report["passed"] = base["passed"]
+    # A real second engine run is available here. It is modeled, not proof of
+    # untouched OOS data or venue costs, and only 2x satisfies the required gate.
+    from .backtest.metrics import acceptance_gates, all_gates_passed
+
+    stress_gate_metrics = stressed_eval["metrics"] if multiplier == 2.0 else None
+    gates = acceptance_gates(base["metrics"], mc=base["monte_carlo"], cost_stress_metrics=stress_gate_metrics)
+    report["gates"] = [g.to_dict() for g in gates]
+    report["passed"] = all_gates_passed(gates)
+    report["stress_model"] = ("modeled fees and adverse market slippage scaled; limit fills stay at limit; "
+                              "venue costs and out-of-sample provenance unverified")
     return report
 
 
@@ -1685,9 +1912,13 @@ def _start_command_listener(cfg: Config, engine: Any) -> asyncio.Task[Any] | Non
         allowed = frozenset({chat})
     else:  # pragma: no cover - guarded by the caller
         return None
+    def audit(kind: str, payload: dict[str, Any]) -> None:
+        engine.store.log_event(kind, payload, actor="telegram")
+
     router = CommandRouter(
         ops=build_ops(engine=engine, store=engine.store, clock=engine.clock),
         whitelist=allowed,
+        log=audit,
     )
     return asyncio.create_task(serve(router, transport))
 
@@ -1836,11 +2067,17 @@ def cmd_backfill_history(args: argparse.Namespace) -> int:
     cfg = _config(args)
     symbols = [s.strip() for s in (args.symbols or ",".join(cfg.symbol_names())).split(",") if s.strip()]
     end = parse_iso(args.to_dt) if args.to_dt else utcnow()
-    start = (
-        parse_iso(args.from_dt)
-        if args.from_dt
-        else datetime(end.year - (end.month <= args.months), ((end.month - args.months - 1) % 12) + 1, 1, tzinfo=UTC)
-    )
+    if args.from_dt:
+        start = parse_iso(args.from_dt)
+    else:
+        if args.months <= 0:
+            print("error: --months must be positive", file=sys.stderr)
+            return 2
+        year, month = divmod(end.year * 12 + end.month - 1 - args.months, 12)
+        if year < 1:
+            print("error: --months exceeds the supported calendar", file=sys.stderr)
+            return 2
+        start = datetime(year, month + 1, 1, tzinfo=UTC)
     if end <= start:
         print("error: the window must end after it starts", file=sys.stderr)
         return 2
@@ -2754,6 +2991,9 @@ def main(argv: list[str] | None = None) -> int:
         "backtest": cmd_backtest,
         "run": cmd_run,
         "live-check": cmd_live_check,
+        "venue-observe": cmd_venue_observe,
+        "pending-submissions": cmd_pending_submissions,
+        "pending-fills": cmd_pending_fills,
         "status": cmd_status,
         "metrics": cmd_metrics,
         "report": cmd_report,
@@ -2779,6 +3019,13 @@ def main(argv: list[str] | None = None) -> int:
         "backfill": cmd_backfill,
         "backfill-history": cmd_backfill_history,
         "health": cmd_health,
+        "autonomy": cmd_autonomy,
+        "recovery-request": cmd_recovery_request,
+        "recovery-apply": cmd_recovery_apply,
+        "allocation-request": cmd_allocation_request,
+        "allocation-apply": cmd_allocation_apply,
+        "strategy-reduction-request": cmd_strategy_reduction_request,
+        "strategy-reduction-apply": cmd_strategy_reduction_apply,
         "alerts": cmd_alerts,
         "watchdog": cmd_watchdog,
         "experiments": cmd_experiments,
@@ -2790,7 +3037,7 @@ def main(argv: list[str] | None = None) -> int:
     handler = handlers[args.command]
     try:
         return int(handler(args) or 0)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError, PermissionError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:  # pragma: no cover

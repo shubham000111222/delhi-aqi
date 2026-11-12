@@ -312,6 +312,9 @@ class OrderRequest:
     tag: str = ""
     reduce_only: bool = False
     reason: str = ""
+    # Caller assertion captured during risk sizing; not cryptographic provenance.
+    sized_ramp_multiplier: Decimal | None = None
+    sized_strategy_multiplier: Decimal | None = None
 
     def __post_init__(self) -> None:
         if not self.client_order_id:

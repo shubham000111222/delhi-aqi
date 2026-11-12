@@ -110,6 +110,7 @@ class DailyReport:
     system_health: dict[str, Any] = field(default_factory=dict)
     ai_notes: list[str] = field(default_factory=list)
     ai_source: str = "template"
+    timemachine: dict[str, Any] = field(default_factory=dict)
 
     def _health_line(self) -> str:
         """§20.2: the report says which component is unhealthy, not just that it is.
@@ -203,6 +204,16 @@ class DailyReport:
             lines.append("Open: flat")
         if self.kill_events:
             lines.append(f"Kill switch: {self.kill_events[0]['level']} - {self.kill_events[0].get('trigger')}")
+        checks = self.timemachine.get('checks', [])
+        lines.append(f"Time Machine: {len(checks)} recent checks; "
+                     f"truncated={self.timemachine.get('truncated', False)}")
+        affected = [row for row in checks if row['check'].get('multiplier') in (0, .5)]
+        for row in affected[:20]:
+            if row['check'].get('multiplier') in (0, .5):
+                lines.append(f"TM {row['check'].get('trade_id', '?')}: "
+                             f"{row['check'].get('verdict', '?')} x{row['check'].get('multiplier')}")
+        if len(affected) > 20:
+            lines.append("Time Machine list shortened; see the full daily report.")
         lines.append(f"AI notes: {len(self.ai_notes)} bullets")
         lines.append("Tomorrow: " + ("; ".join(self.next_day) if self.next_day else "all strategies active"))
         return "\n".join(lines)
@@ -292,6 +303,11 @@ class DailyReport:
         else:
             md.append("- Flat.")
 
+        md += ["", "## Time Machine — persisted research checks", "",
+               f"Newest {len(self.timemachine.get('checks', []))} checks; "
+               f"truncated: {self.timemachine.get('truncated', False)}. Filter not enabled by this report."]
+        md += [f"- {row['ts']}: {row['ticket']}" for row in self.timemachine.get('checks', [])
+               if row['check'].get('multiplier') in (0, .5)]
         md += ["", "## 9. AI commentary", ""]
         md += [f"- {note}" for note in self.ai_notes] if self.ai_notes else ["- (template only)"]
         md += ["", "## 10. Next day", ""]
@@ -435,6 +451,9 @@ def build_daily_report(
     report.max_intraday_drawdown = max_dd
     report.peak_exposure_pct = peak_exposure
 
+    from .timemachine import check_history
+
+    report.timemachine = check_history(store, since=day_start, until=day_end, limit=1000)
     # events and health
     events = store.events(limit=2000, since=day_start)
     counts: dict[str, int] = {}

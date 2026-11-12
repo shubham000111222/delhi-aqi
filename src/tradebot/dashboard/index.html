@@ -90,7 +90,7 @@
   <div class="metric"><span class="label">Day PnL</span><span class="value" id="daypnl">–</span></div>
   <div class="metric"><span class="label">Realized</span><span class="value" id="realized">–</span></div>
   <div class="metric"><span class="label">Open</span><span class="value" id="open">–</span></div>
-  <div class="metric"><span class="label">Trades</span><span class="value" id="trades">–</span></div>
+  <div class="metric"><span class="label">Recent trades</span><span class="value" id="trades">–</span></div>
   <div class="metric"><span class="label">Market time (UTC)</span><span class="value" id="clock" style="font-size:14px">–</span></div>
   <div style="margin-left:auto" class="muted" id="heartbeat">connecting…</div>
 </header>
@@ -123,6 +123,16 @@
   </section>
 
   <section class="card half">
+    <h2>Entry blockers <span class="muted">read-only safety state</span></h2>
+    <p id="entry-blockers" class="muted">Not sampled.</p>
+  </section>
+
+  <section class="card half">
+    <h2>Time Machine <span class="muted">research checks — not enabled live</span></h2>
+    <div id="timemachine"><p class="empty">No computed checks recorded.</p></div>
+  </section>
+
+  <section class="card half">
     <h2>Execution cost <span class="muted">(slippage vs decision price)</span></h2>
     <div id="slippage"><p class="empty">no fills with a decision price yet</p></div>
   </section>
@@ -130,6 +140,16 @@
   <section class="card half">
     <h2>Why entries were refused <span class="muted">(by risk check)</span></h2>
     <div id="vetoes"><p class="empty">no risk verdicts logged yet</p></div>
+  </section>
+
+  <section class="card half">
+    <h2>Component health</h2>
+    <div id="component-health"><p class="empty">waiting for component health</p></div>
+  </section>
+
+  <section class="card half">
+    <h2>Autonomy audit</h2>
+    <div id="autonomy"><p class="empty">waiting for autonomy audit</p></div>
   </section>
 
   <section class="card half">
@@ -162,6 +182,9 @@ const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(Number(
   ? "–" : Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
 const pct = v => (Number(v) * 100).toFixed(2) + "%";
 const el = id => document.getElementById(id);
+// Values from venues, strategies and logs are untrusted text, not HTML.
+const esc = value => String(value ?? "").replace(/[&<>"']/g, c =>
+  ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"})[c]);
 let lastEquity = null;
 let failures = 0;
 
@@ -218,9 +241,9 @@ function renderPositions(rows) {
   if (!rows || rows.length === 0) { tbody.innerHTML = '<tr><td class="empty">flat</td></tr>'; return; }
   tbody.innerHTML = rows.map(p => `
     <tr>
-      <td>${p.symbol}</td>
-      <td><span class="chip">${p.strategy.split("_")[0]}</span></td>
-      <td>${p.qty}</td>
+      <td>${esc(p.symbol)}</td>
+      <td><span class="chip">${esc(String(p.strategy || "").split("_")[0])}</span></td>
+      <td>${esc(p.qty)}</td>
       <td>${fmt(p.avg_entry)}</td>
       <td>${fmt(p.stop)}</td>
       <td>${fmt(p.target)}</td>
@@ -233,11 +256,11 @@ function renderTrades(rows) {
   if (!rows || rows.length === 0) { tbody.innerHTML = '<tr><td class="empty">no closed trades yet</td></tr>'; return; }
   tbody.innerHTML = rows.slice(0, 8).map(t => `
     <tr>
-      <td>${(t.closed_at || "").slice(5, 16).replace("T", " ")}</td>
-      <td>${t.symbol}</td>
-      <td><span class="chip">${String(t.strategy).split("_")[0]}</span></td>
+      <td>${esc((t.closed_at || "").slice(5, 16).replace("T", " "))}</td>
+      <td>${esc(t.symbol)}</td>
+      <td><span class="chip">${esc(String(t.strategy).split("_")[0])}</span></td>
       <td class="${Number(t.pnl) >= 0 ? "up" : "down"}">${fmt(t.pnl)}</td>
-      <td><span class="chip">${t.exit_reason || ""}</span></td>
+      <td><span class="chip">${esc(t.exit_reason || "")}</span></td>
     </tr>`).join("");
 }
 
@@ -246,10 +269,10 @@ function renderSignals(rows) {
   if (!rows || rows.length === 0) { tbody.innerHTML = '<tr><td class="empty">no signals yet (strategies warm up on 15m/1h bars)</td></tr>'; return; }
   tbody.innerHTML = rows.slice(0, 6).map(s => `
     <tr>
-      <td>${(s.ts || "").slice(5, 16).replace("T", " ")}</td>
-      <td>${s.symbol}</td>
-      <td><span class="chip buy">${s.side}</span></td>
-      <td class="muted" style="font-size:12px">${(s.reason || "").slice(0, 90)}</td>
+      <td>${esc((s.ts || "").slice(5, 16).replace("T", " "))}</td>
+      <td>${esc(s.symbol)}</td>
+      <td><span class="chip buy">${esc(s.side)}</span></td>
+      <td class="muted" style="font-size:12px">${esc((s.reason || "").slice(0, 90))}</td>
     </tr>`).join("");
 }
 
@@ -257,38 +280,38 @@ function renderSlippage(slip) {
   const box = el("slippage");
   if (!box) return;
   if (!slip || !slip.available) {
-    box.innerHTML = `<p class="empty">${(slip && slip.note) || "no fills with a decision price yet"}</p>`;
+    box.innerHTML = `<p class="empty">${esc((slip && slip.note) || "no fills with a decision price yet")}</p>`;
     return;
   }
   const over = Number(slip.p95_bps) > Number(slip.budget_bps);
   box.innerHTML =
-    `<div class="kv"><span>Fills measured</span><span>${slip.fills}</span></div>` +
+    `<div class="kv"><span>Fills measured</span><span>${esc(slip.fills)}</span></div>` +
     `<div class="kv"><span>Median</span><span>${Number(slip.median_bps).toFixed(2)} bps</span></div>` +
     `<div class="kv"><span>Mean</span><span>${Number(slip.mean_bps).toFixed(2)} bps</span></div>` +
     `<div class="kv"><span>p95 ${over ? "⚠ over budget" : "(inside budget)"}</span>` +
     `<span style="color:${over ? "var(--red)" : "inherit"}">${Number(slip.p95_bps).toFixed(2)} bps / ${Number(slip.budget_bps).toFixed(0)}</span></div>` +
     `<div class="kv"><span>Worst</span><span>${Number(slip.worst_bps).toFixed(2)} bps</span></div>` +
-    `<div class="kv"><span>Size cap model</span><span>${slip.sizing_model ? slip.sizing_model.samples + " fills" : "not fitted yet"}</span></div>`;
+    `<div class="kv"><span>Size cap model</span><span>${esc(slip.sizing_model ? slip.sizing_model.samples + " fills" : "not fitted yet")}</span></div>`;
 }
 
 function renderVetoes(view) {
   const box = el("vetoes");
   if (!box) return;
   if (!view || !view.available) {
-    box.innerHTML = `<p class="empty">${(view && view.note) || "no risk verdicts logged yet"}</p>`;
+    box.innerHTML = `<p class="empty">${esc((view && view.note) || "no risk verdicts logged yet")}</p>`;
     return;
   }
   const rows = (view.by_check || []).map(row => {
     const pct = Math.round((Number(row.share) || 0) * 100);
     const colour = row.check === "cost_budget" ? "var(--amber)" : "var(--blue)";
-    return `<div class="kv"><span>${row.check}</span><span>${row.count} <span class="muted">(${pct}%)</span></span></div>` +
+    return `<div class="kv"><span>${esc(row.check)}</span><span>${esc(row.count)} <span class="muted">(${pct}%)</span></span></div>` +
       `<div style="height:4px;background:var(--line,#222);border-radius:2px;margin:0 0 8px">` +
       `<div style="height:4px;width:${Math.max(2, pct)}%;background:${colour};border-radius:2px"></div></div>`;
   }).join("");
   box.innerHTML =
-    `<div class="kv"><span>Verdicts in window</span><span>${view.window}</span></div>` +
-    `<div class="kv"><span>Approved</span><span>${view.approved} <span class="muted">(${Math.round((Number(view.approval_rate) || 0) * 100)}%)</span></span></div>` +
-    (view.note ? `<p class="muted" style="font-size:12px;margin:6px 0">${view.note}</p>` : "") +
+    `<div class="kv"><span>Verdicts in window</span><span>${esc(view.window)}</span></div>` +
+    `<div class="kv"><span>Approved</span><span>${esc(view.approved)} <span class="muted">(${Math.round((Number(view.approval_rate) || 0) * 100)}%)</span></span></div>` +
+    (view.note ? `<p class="muted" style="font-size:12px;margin:6px 0">${esc(view.note)}</p>` : "") +
     (rows || `<p class="empty">every entry in the window was approved</p>`) +
     `<p class="muted" style="font-size:12px;margin-top:8px">cost_budget in amber: the strategies are proposing trades that cannot pay for themselves.</p>`;
 }
@@ -299,6 +322,7 @@ function renderRisk(data) {
   const exposure = positions.reduce((acc, p) => acc + Number(p.qty) * Number(p.avg_entry || 0), 0);
   const expPct = Math.min(exposure / equity, 1.5);
   const dayPnl = Number(data.day_pnl) / (Number(data.day_start_equity) || 1);
+  const drawdown = Number(data.drawdown_pct) || 0;
   const ddLimit = Math.abs(Number(limits.max_drawdown));
   const dayLimit = Math.abs(Number(limits.daily_loss_flatten));
   const row = (label, used, limit, text) => `
@@ -308,11 +332,69 @@ function renderRisk(data) {
     </div>`;
   el("risk").innerHTML =
     row("Total exposure", expPct, Number(limits.total_exposure), `${pct(expPct)} of ${pct(Number(limits.total_exposure))} cap`) +
-    row("Open positions", positions.length, limits.max_open_positions, `${positions.length} of ${limits.max_open_positions}`) +
+    row("Open positions", positions.length, limits.max_open_positions, `${positions.length} of ${Number(limits.max_open_positions)}`) +
     row("Day loss vs flatten limit", Math.max(0, -dayPnl), dayLimit, `${pct(Math.min(0, dayPnl))} vs -${pct(dayLimit)}`) +
-    row("Drawdown vs lockdown limit", Math.abs(Math.min(0, dayPnl)), ddLimit, `${pct(Math.min(0, dayPnl))} vs -${pct(ddLimit)}`) +
+    row("Drawdown vs lockdown limit", Math.abs(Math.min(0, drawdown)), ddLimit, `${pct(Math.min(0, drawdown))} vs -${pct(ddLimit)}`) +
     `<div class="kv"><span>Risk per trade</span><span>${pct(Number(limits.risk_per_trade))}</span></div>
      <div class="kv"><span>Daily stop for new entries</span><span>${pct(Number(limits.daily_loss_stop))}</span></div>`;
+}
+
+// These values come from the audit log and venue: use textContent, never HTML.
+function addTextRow(box, label, value) {
+  const row = document.createElement("div");
+  row.className = "kv";
+  const left = document.createElement("span");
+  const right = document.createElement("span");
+  left.textContent = String(label);
+  right.textContent = String(value);
+  row.append(left, right);
+  box.append(row);
+}
+
+function renderHealth(view) {
+  const box = el("component-health");
+  box.replaceChildren();
+  if (!view || !view.components || !Object.keys(view.components).length) {
+    addTextRow(box, "Component health", "No engine attached");
+    return;
+  }
+  addTextRow(box, "Overall (critical components)", view.overall || "UNKNOWN");
+  for (const [name, component] of Object.entries(view.components)) {
+    const failures = Object.values(component.checks || {})
+      .filter(check => !(check.liveness && check.readiness && check.correctness))
+      .map(check => check.detail).filter(Boolean).join("; ");
+    addTextRow(box, name + (component.critical ? "" : " (optional)"),
+      (component.state || "UNKNOWN") + (failures ? " — " + failures : ""));
+  }
+  if ((view.flapping || []).length) addTextRow(box, "Flapping", view.flapping.join(", "));
+}
+
+function renderAutonomy(view) {
+  const box = el("autonomy");
+  box.replaceChildren();
+  if (!view) { addTextRow(box, "Audit", "Unavailable"); return; }
+  const recovery = view.execution_recovery;
+  addTextRow(box, "Execution recovery", !recovery ? "Unavailable — not verified" :
+    recovery.recovery_required ? "REQUIRED — durable hold present" : "No listed holds — not entry permission");
+  if (recovery) {
+    addTextRow(box, "Unresolved submissions", recovery.unresolved_submissions);
+    addTextRow(box, "Pending fill callbacks", recovery.pending_fill_callbacks);
+    addTextRow(box, "Pending kill incidents", recovery.pending_kill_incidents);
+    addTextRow(box, "Invalid venue observation", recovery.invalid_execution_observation ? "HOLD" : "Not recorded");
+    addTextRow(box, "Recovery limitations", recovery.limitation);
+  }
+  const ledger = view.ledger || {};
+  addTextRow(box, "Recent recorded actions (up to 1,000)", ledger.actions ?? 0);
+  addTextRow(box, "Refused attempts", ledger.refused_attempts ?? 0);
+  addTextRow(box, "Pending requests (not executable)", (view.pending_approvals || []).length);
+  for (const entry of (ledger.recent || []).slice(-5).reverse()) {
+    addTextRow(box, entry.actor + " · " + entry.level_label,
+      entry.action + " · " + entry.outcome);
+  }
+  const note = document.createElement("p");
+  note.className = "muted";
+  note.textContent = view.limitation || "Partial audit coverage.";
+  box.append(note);
 }
 
 function renderFeed(events) {
@@ -323,9 +405,9 @@ function renderFeed(events) {
     const short = payload.length > 110 ? payload.slice(0, 110) + "…" : payload;
     const kindClass = e.level === "CRIT" ? "kind CRIT" : e.level === "WARN" ? "kind WARN" : "kind";
     return `<div class="row">
-      <span class="ts">${(e.ts || "").slice(11, 19)}</span>
-      <span class="${kindClass}">${e.kind}</span>
-      <span class="muted">${short.replace(/</g, "&lt;")}</span>
+      <span class="ts">${esc((e.ts || "").slice(11, 19))}</span>
+      <span class="${kindClass}">${esc(e.kind)}</span>
+      <span class="muted">${esc(short)}</span>
     </div>`;
   }).join("");
 }
@@ -361,11 +443,22 @@ async function tick() {
     renderSpark(data.equity_curve);
     renderPositions(data.positions);
     renderTrades(data.trades);
+    const blockers = data.entry_blockers || {};
+    el("entry-blockers").textContent = blockers.available
+      ? ((blockers.reasons || []).join(", ") || "No reported blockers; ordinary risk checks still apply.")
+      : "Unavailable: no engine attached. This does not authorize entries.";
+    const tm = data.timemachine || {};
+    el("timemachine").innerHTML = (tm.checks || []).map(row =>
+      `<details><summary>${esc(row.check.trade_id || "unknown")} · ${esc(row.check.verdict || "unavailable")} · x${esc(String(row.check.multiplier ?? "?"))}</summary><p>${esc(row.ticket)}</p></details>`
+    ).join("") || '<p class="empty">No computed checks recorded; no odds invented.</p>';
+    if (tm.truncated) el("timemachine").innerHTML += '<p class="muted">Showing newest checks only.</p>';
     renderSignals(data.signals);
     renderRisk(data);
     renderSlippage(data.slippage);
     renderVetoes(data.veto_breakdown);
     renderFeed(data.events);
+    renderHealth((data.health || {}).components);
+    renderAutonomy(data.autonomy);
     const disabled = !data.controls_enabled;
     document.querySelectorAll("#controls button").forEach(b => { b.disabled = disabled; });
   } catch (err) {
@@ -387,8 +480,10 @@ document.querySelectorAll("#controls button").forEach(btn => {
       if (!confirm(`Confirm ${action.toUpperCase()}? This cancels orders and closes positions at market.`)) return;
       body.confirm = "CONFIRM";
     }
+    const token = prompt("Dashboard control password:");
+    if (!token) return;
     const res = await fetch(`/api/control/${action}`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body)
+      method: "POST", headers: { "content-type": "application/json", "x-dashboard-token": token }, body: JSON.stringify(body)
     });
     const out = await res.json().catch(() => ({}));
     flash(res.ok ? `${action}: ok (${out.kill_level || ""})` : `${action} failed: ${out.detail || res.status}`);

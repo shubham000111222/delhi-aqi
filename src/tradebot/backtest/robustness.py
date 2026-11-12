@@ -152,17 +152,21 @@ def curves_after_stress(
 
 
 def stress_config(config: Any, multiplier: float) -> Any:
-    """Deep-copy the config with every fee scaled. Never mutates the original.
+    """Scale simulated fees and adverse market execution slippage; never mutate the source.
 
-    Slippage is *not* a config number in this system - fills walk the recorded book - so
-    it cannot be scaled directly. Doubling fees is the honest available stress; the
-    limitation is stated rather than papered over.
+    This is a modelled stress, not verified real venue cost. Limit fills remain at their
+    limit price and no missing slippage is invented where the model has no adverse cost.
     """
-    stressed = copy.deepcopy(config)
     factor = D(str(multiplier))
+    if not factor.is_finite() or factor < 1 or factor > 10:
+        raise ValueError("cost multiplier must be finite and between 1 and 10")
+    stressed = copy.deepcopy(config)
     paper = stressed.settings.paper
     paper.maker_fee = paper.maker_fee * factor
     paper.taker_fee = paper.taker_fee * factor
+    paper.slippage_multiplier = paper.slippage_multiplier * factor
+    if not paper.slippage_multiplier.is_finite() or paper.slippage_multiplier > 10:
+        raise ValueError("resulting slippage multiplier exceeds model limit")
     live = stressed.settings.live_fees
     live.maker = live.maker * factor
     live.taker = live.taker * factor

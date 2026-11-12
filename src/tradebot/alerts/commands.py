@@ -34,6 +34,7 @@ HELP = (
     "/resume - clear an L1 pause\n"
     "/flatten - close everything (asks to confirm)\n"
     "/kill - flatten and pause (asks to confirm)\n"
+    "/lockdown - flatten and lock at L3 (asks to confirm)\n"
     "/help - this list"
 )
 
@@ -61,6 +62,7 @@ class Ops:
     resume: Callable[[str], str]
     flatten: Callable[[str], str]
     kill: Callable[[str], str]
+    lockdown: Callable[[str], str] | None = None
 
 
 @dataclass
@@ -84,6 +86,8 @@ class CommandRouter:
                 {"chat_id": str(chat_id), "command": command, "reason": "not whitelisted"},
             )
             return Reply(text="", ok=False, command=command, authorised=False)
+
+        self.log("command_received", {"chat_id": str(chat_id), "command": command})
 
         if command in ("", "help", "start"):
             return self._reply("help", HELP)
@@ -132,9 +136,9 @@ class CommandRouter:
         if time.monotonic() > expires:
             return self._reply("confirm", f"{command} confirmation expired; ask again", ok=False)
         reason = f"telegram-confirmed:{chat_id}"
-        runner = {"flatten": self.ops.flatten, "kill": self.ops.kill}.get(command)
-        if runner is None:  # lockdown shares the kill path but keeps its own name
-            runner = self.ops.kill
+        runner = {"flatten": self.ops.flatten, "kill": self.ops.kill, "lockdown": self.ops.lockdown}.get(command)
+        if runner is None:
+            return self._reply(command, f"{command} is not available", ok=False)
         try:
             return self._reply(command, runner(reason))
         except Exception as exc:  # noqa: BLE001
@@ -170,7 +174,7 @@ def build_ops(
         ledger = engine.ledger
         return (
             f"realised {ledger.realized_pnl:+.2f} | unrealised "
-            f"{ledger.unrealized_pnl(engine.marks):+.2f} | fees {ledger.fees_paid:.2f}"
+            f"{ledger.unrealized(engine.marks):+.2f} | fees {ledger.fees_paid:.2f}"
         )
 
     def positions() -> str:
@@ -183,9 +187,33 @@ def build_ops(
         ]
         return "\n".join(lines)
 
+    tasks: set[Any] = set()
+
+    def schedule(coro: Any, action: str) -> None:
+        import asyncio
+
+        task = asyncio.get_running_loop().create_task(coro)
+        tasks.add(task)
+
+        def completed(done: Any) -> None:
+            tasks.discard(done)
+            if done.cancelled():
+                store.log_event("telegram_action_failed", {"action": action, "error": "cancelled"},
+                                level="WARN", actor="telegram")
+                return
+            error = done.exception()
+            if error is not None:
+                store.log_event("telegram_action_failed", {"action": action, "error": type(error).__name__},
+                                level="CRIT", actor="telegram")
+            else:
+                store.log_event("telegram_action_completed", {"action": action}, actor="telegram")
+
+        task.add_done_callback(completed)
+
     def report() -> str:
         if report_fn is None:
-            return "report building is not wired to this bot"
+            schedule(engine.emit_daily_report(), "report")
+            return "report requested; check the event log for completion"
         result = report_fn()
         paths = result.get("paths", {}) if isinstance(result, dict) else {}
         return "report written: " + ", ".join(str(p) for p in paths.values())
@@ -197,14 +225,20 @@ def build_ops(
         return f"paused at L1 ({reason})"
 
     def resume(reason: str) -> str:
-        engine.killswitch.reset(reason=reason, actor="telegram")
+        from ..core.models import KillLevel
+
+        reviewed = engine.killswitch.state
+        if reviewed.get("level") != KillLevel.L1.value:
+            raise PermissionError("remote resume may only clear L1; L2/L3 require local review")
+        engine.killswitch.reset(reason=reason, actor="telegram", expected_state=reviewed)
         return f"resumed to L0 ({reason})"
 
     def flatten(reason: str) -> str:
-        import asyncio
+        from ..core.models import KillLevel
 
-        asyncio.get_event_loop().create_task(engine.flatten_all(reason))
-        return f"flatten requested ({reason})"
+        engine.killswitch.trigger(KillLevel.L1, trigger="manual_flatten", reason=reason, actor="telegram")
+        schedule(engine.flatten_all(reason), "flatten")
+        return f"flatten requested; entries paused, check the event log for completion ({reason})"
 
     def kill(reason: str) -> str:
         from ..core.models import KillLevel
@@ -212,6 +246,13 @@ def build_ops(
         engine.killswitch.trigger(KillLevel.L2, trigger="manual_kill", reason=reason, actor="telegram")
         flatten(reason)
         return f"kill requested: L2 and flatten ({reason})"
+
+    def lockdown(reason: str) -> str:
+        from ..core.models import KillLevel
+
+        engine.killswitch.trigger(KillLevel.L3, trigger="manual_lockdown", reason=reason, actor="telegram")
+        flatten(reason)
+        return f"lockdown requested: L3 and flatten ({reason})"
 
     return Ops(
         status=status,
@@ -222,6 +263,7 @@ def build_ops(
         resume=resume,
         flatten=flatten,
         kill=kill,
+        lockdown=lockdown,
     )
 
 

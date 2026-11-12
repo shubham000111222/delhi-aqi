@@ -7,6 +7,7 @@ from typing import Any
 from ...config import Config, Mode
 from ...core.clock import Clock
 from ...data.hub import MarketData
+from ...risk.killswitch import KillSwitch
 from .base import ExchangeAdapter, ExchangeError, PermanentExchangeError, TransientExchangeError
 from .paper import PaperAdapter
 
@@ -20,7 +21,10 @@ __all__ = [
 ]
 
 
-def make_adapter(config: Config, market: MarketData, clock: Clock, rules: dict[str, Any] | None = None) -> ExchangeAdapter:
+def make_adapter(
+    config: Config, market: MarketData, clock: Clock, rules: dict[str, Any] | None = None,
+    *, killswitch: KillSwitch | None = None,
+) -> ExchangeAdapter:
     """Paper for paper mode; ccxt for testnet and live (each with its own keys)."""
     if config.mode is Mode.PAPER:
         return PaperAdapter(
@@ -34,4 +38,4 @@ def make_adapter(config: Config, market: MarketData, clock: Clock, rules: dict[s
         )
     from .ccxt_live import CcxtLiveAdapter
 
-    return CcxtLiveAdapter(config, market, clock, testnet=config.mode is Mode.TESTNET)
+    return CcxtLiveAdapter(config, market, clock, testnet=config.mode is Mode.TESTNET, killswitch=killswitch)

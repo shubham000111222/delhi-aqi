@@ -8,14 +8,17 @@ from decimal import Decimal
 import pytest
 from tests.conftest import make_book
 
+from tradebot.config import Mode
 from tradebot.core.clock import SimClock
 from tradebot.core.models import (
     Fill,
+    KillLevel,
     MarketRules,
     OrderRequest,
     OrderStatus,
     OrderType,
     Side,
+    Signal,
     Trade,
 )
 from tradebot.core.money import D
@@ -137,8 +140,170 @@ class TestPaperAdapter:
 class TestOrderManager:
     def _manager(self, cfg, adapter, clock):
         store = Store()
-        ks = KillSwitch(store, clock=clock)
+        ks = KillSwitch(store, clock=clock, mode=cfg.mode)
         return OrderManager(cfg, adapter, store, ks, clock), ks, store
+
+    @pytest.mark.parametrize("level", [KillLevel.L1, KillLevel.L2, KillLevel.L3])
+    async def test_entry_refused_at_actual_order_boundary(self, cfg, level):
+        clock = SimClock(NOW)
+        adapter = _adapter(cfg, _market(), clock)
+        manager, ks, store = self._manager(cfg, adapter, clock)
+        ks.trigger(level, trigger="test", reason="halt")
+        signal = Signal(id="blocked", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                        entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+        assert await manager.submit_entry(signal, D("0.001"), price=D("60000"), plan=object()) is None
+        assert adapter.orders == {}
+        assert manager.plans == {}
+        refused = [e for e in store.events() if e["kind"] == "autonomy_refused"]
+        assert len(refused) == 1
+        assert refused[0]["payload"]["kill_level"] == level.value
+
+    async def test_entry_retry_is_blocked_after_external_kill(self, cfg, tmp_path):
+        clock = SimClock(NOW)
+        adapter = _adapter(cfg, _market(), clock)
+        store = Store(tmp_path / "state.db")
+        other_store = Store(tmp_path / "state.db")
+        ks = KillSwitch(store, clock=clock, mode=Mode.PAPER)
+        other = KillSwitch(other_store, clock=clock, mode=Mode.PAPER)
+        manager = OrderManager(cfg, adapter, store, ks, clock)
+        calls = []
+
+        async def fail_then_escalate(request):
+            calls.append(request.client_order_id)
+            other.trigger(KillLevel.L3, trigger="watchdog", reason="halt")
+            raise TransientExchangeError("temporary failure")
+
+        adapter.place_order = fail_then_escalate  # type: ignore[assignment]
+        signal = Signal(id="race", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                        entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+        assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+        assert len(calls) == 1
+        assert store.count_events("autonomy_refused") == 1
+        store.close()
+        other_store.close()
+
+    @pytest.mark.parametrize("lookup_fails", [True, False])
+    async def test_ambiguous_order_is_not_blindly_retried(self, cfg, lookup_fails):
+        clock = SimClock(NOW)
+        from dataclasses import replace
+
+        cfg = replace(cfg, settings=cfg.settings.model_copy(update={"mode": Mode.LIVE}))
+        adapter = _adapter(cfg, _market(), clock)
+        # Simulate an adapter whose local lookup cannot prove venue absence.
+        adapter.mode = Mode.LIVE
+        manager, ks, store = self._manager(cfg, adapter, clock)
+        calls = []
+
+        async def unknown_submit(request):
+            calls.append(request.client_order_id)
+            raise TransientExchangeError("timeout")
+
+        async def lookup(cid):
+            if lookup_fails:
+                raise TransientExchangeError("lookup unavailable")
+            return None
+
+        adapter.place_order = unknown_submit  # type: ignore[assignment]
+        adapter.get_order = lookup  # type: ignore[assignment]
+        signal = Signal(id="unknown", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                        entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+        assert await manager.submit_entry(signal, D("0.001"), price=D("60000"),
+                                          sized_ramp_multiplier=D("0.10")) is None
+        assert len(calls) == 1
+        assert ks.level is KillLevel.L1
+        assert store.count_events("order_outcome_unknown") == 1
+
+    async def test_unknown_exit_is_not_retried_and_pauses_entries(self, cfg):
+        clock = SimClock(NOW)
+        adapter = _adapter(cfg, _market(), clock)
+        manager, ks, store = self._manager(cfg, adapter, clock)
+        adapter.mode = Mode.LIVE
+        calls = []
+
+        async def unknown_submit(request):
+            calls.append(request.client_order_id)
+            raise TransientExchangeError("exit timeout")
+
+        adapter.place_order = unknown_submit  # type: ignore[assignment]
+        assert await manager.submit_exit("BTC/USDT", D("0.001"), "S1", "risk exit") is None
+        assert len(calls) == 1
+        assert ks.level is KillLevel.L1
+        assert store.count_events("order_outcome_unknown") == 1
+
+    async def test_blocked_entry_does_not_submit_if_audit_write_fails(self, cfg, monkeypatch):
+        clock = SimClock(NOW)
+        adapter = _adapter(cfg, _market(), clock)
+        manager, ks, store = self._manager(cfg, adapter, clock)
+        ks.trigger(KillLevel.L1, trigger="test", reason="pause")
+
+        def fail_log(*args, **kwargs):
+            raise OSError("disk unavailable")
+
+        monkeypatch.setattr(store, "log_event", fail_log)
+        signal = Signal(id="disk", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                        entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+        with pytest.raises(OSError, match="disk unavailable"):
+            await manager.submit_entry(signal, D("0.001"), price=D("60000"))
+        assert adapter.orders == {}
+
+    async def test_simulator_retries_only_after_authoritative_absence(self, cfg):
+        clock = SimClock(NOW)
+        adapter = _adapter(cfg, _market(), clock)
+        manager, _, store = self._manager(cfg, adapter, clock)
+        original = adapter.place_order
+        calls = []
+
+        async def fail_once(request):
+            calls.append(request.client_order_id)
+            if len(calls) == 1:
+                raise TransientExchangeError("before acceptance")
+            return await original(request)
+
+        adapter.place_order = fail_once  # type: ignore[assignment]
+        signal = Signal(id="safe", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                        entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+        assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is not None
+        assert len(calls) == 2
+        assert store.count_events("order_outcome_unknown") == 0
+
+    async def test_entry_blocked_if_kill_occurs_during_rate_limit_wait(self, cfg):
+        clock = SimClock(NOW)
+        adapter = _adapter(cfg, _market(), clock)
+        manager, ks, store = self._manager(cfg, adapter, clock)
+
+        class WaitingBucket:
+            def try_acquire(self):
+                return False
+
+            def time_until(self):
+                return 1.0
+
+        manager.bucket = WaitingBucket()  # type: ignore[assignment]
+        original_sleep = clock.sleep
+
+        async def sleep_and_pause(seconds):
+            ks.trigger(KillLevel.L1, trigger="test", reason="pause during wait")
+            await original_sleep(seconds)
+
+        clock.sleep = sleep_and_pause  # type: ignore[method-assign]
+        signal = Signal(id="wait", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                        entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+        assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+        assert adapter.orders == {}
+        assert store.count_events("autonomy_refused") == 1
+
+    @pytest.mark.parametrize("level", [KillLevel.L1, KillLevel.L2, KillLevel.L3])
+    async def test_kill_check_does_not_block_paper_exit(self, cfg, level):
+        clock = SimClock(NOW)
+        adapter = _adapter(cfg, _market(), clock)
+        manager, ks, _ = self._manager(cfg, adapter, clock)
+        await adapter.place_order(OrderRequest(symbol="BTC/USDT", side=Side.BUY, qty=D("0.001"),
+                                               type=OrderType.MARKET, strategy="S1", tag="open"))
+        ks.trigger(level, trigger="test", reason="halt")
+        order = await manager.submit_exit("BTC/USDT", D("0.001"), "S1", "risk exit")
+        assert order is not None
+        assert order.status is OrderStatus.FILLED
+        assert adapter.holdings["BTC"] == 0
 
     async def test_transient_error_is_retried_once_order_is_found(self, cfg):
         clock = SimClock(NOW)
@@ -300,3 +465,382 @@ class TestSizing:
             limits=cfg.risk, rules=self._rules(),
         )
         assert size.qty == 0 and not size.ok
+
+
+@pytest.mark.parametrize("mutation", ["mode", "risk", "adapter_mode", "adapter"])
+async def test_order_boundary_refuses_runtime_risk_mode_or_adapter_changes(cfg, mutation):
+    from dataclasses import replace
+
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    if mutation == "mode":
+        cfg.settings.mode = Mode.LIVE
+    elif mutation == "risk":
+        manager.cfg = replace(cfg, risk=cfg.risk.model_copy(update={"risk_per_trade": D("0.02")}))
+    elif mutation == "adapter_mode":
+        adapter.mode = Mode.LIVE
+    else:
+        manager.adapter = _adapter(cfg, _market(), clock)
+    signal = Signal(id="immutable", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+async def test_entry_refused_when_initial_adapter_mode_does_not_match_config(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    adapter.mode = Mode.LIVE
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    signal = Signal(id="wrong-mode", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+async def test_reduce_only_buy_cannot_bypass_kill_check(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    switch.trigger(KillLevel.L2, trigger="test", reason="stop")
+    request = OrderRequest(symbol="BTC/USDT", side=Side.BUY, qty=D("0.001"),
+                           type=OrderType.MARKET, reduce_only=True)
+    assert await manager._place(request) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+async def test_order_boundary_refuses_mismatched_kill_switch_mode(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.LIVE)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    signal = Signal(id="wrong-switch", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+async def test_order_boundary_refuses_replaced_kill_switch(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store, other = Store(":memory:"), Store(":memory:")
+    manager = OrderManager(cfg, adapter, store, KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER), clock)
+    manager.killswitch = KillSwitch(other, clock=clock, kill_file=None, mode=Mode.PAPER)
+    signal = Signal(id="switch-swap", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+    other.close()
+
+
+async def test_durable_flapping_hold_blocks_entry_before_l1(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    store.extend_flapping_hold(NOW + timedelta(minutes=10), ["feed"], ts=NOW)
+    signal = Signal(id="hold-entry", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert switch.level is KillLevel.L0
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert not adapter.orders
+    store.close()
+
+
+async def test_disabled_strategy_cannot_submit_entry_but_exit_path_remains_available(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    manager = OrderManager(cfg, adapter, store, KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER), clock)
+    store.disable_strategy("S1", "fault", faults=3, ts=NOW)
+    signal = Signal(id="disabled-entry", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    # A disabled strategy's exit must reach the adapter, even if paper rejects it for no position.
+    calls = []
+    original = adapter.place_order
+
+    async def capture(request):
+        calls.append(request)
+        return await original(request)
+
+    adapter.place_order = capture
+    await manager.submit_exit("BTC/USDT", D("0.001"), "S1", "protect")
+    assert len(calls) == 1 and calls[0].reduce_only
+    store.close()
+
+
+async def test_fault_pause_blocks_direct_entry_but_expires(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    manager = OrderManager(cfg, adapter, store, KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER), clock)
+    store.record_strategy_fault("S1", "fault", now=NOW)
+    signal = Signal(id="paused-entry", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    clock.advance(timedelta(hours=1, seconds=1))
+    assert not store.strategy_fault_paused("S1", now=clock.now())
+    store.close()
+
+
+@pytest.mark.parametrize("sized", [None, D("NaN"), D("-1"), D("0.10")])
+async def test_live_entry_refuses_missing_invalid_or_stale_sizing(cfg, sized):
+    from dataclasses import replace
+
+    cfg = replace(cfg, settings=cfg.settings.model_copy(update={"mode": Mode.LIVE}))
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    adapter.mode = Mode.LIVE
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.LIVE)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    store.kv_set("operator_allocation_cap", {"cap": "0.05"})
+    signal = Signal(id="stale-cap", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000"), sized_ramp_multiplier=sized) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+async def test_live_entry_accepts_current_sizing_assertion(cfg):
+    from dataclasses import replace
+
+    cfg = replace(cfg, settings=cfg.settings.model_copy(update={"mode": Mode.LIVE}))
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    adapter.mode = Mode.LIVE
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.LIVE)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    store.kv_set("operator_allocation_cap", {"cap": "0.05"})
+    signal = Signal(id="current-cap", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000"), sized_ramp_multiplier=D("0.05"))
+    store.close()
+
+
+@pytest.mark.parametrize("side", [Side.BUY, Side.SELL])
+async def test_stress_doubles_adverse_modeled_market_impact(cfg, side):
+    from dataclasses import replace
+
+    base_cfg = cfg
+    stress_cfg = replace(cfg, settings=cfg.settings.model_copy(deep=True))
+    stress_cfg.settings.paper.slippage_multiplier = D("2")
+    base = _adapter(base_cfg, _market(), SimClock(NOW), cash="100000")
+    stressed = _adapter(stress_cfg, _market(), SimClock(NOW), cash="100000")
+    if side is Side.SELL:
+        base.holdings["BTC"] = stressed.holdings["BTC"] = D("1")
+    request = OrderRequest(symbol="BTC/USDT", side=side, qty=D("0.75"), type=OrderType.MARKET,
+                           price=D("60000"), strategy="t", tag="stress-impact")
+    nominal = await base.place_order(request)
+    expensive = await stressed.place_order(request)
+    nominal_impact = abs(nominal.avg_fill_price - D("60000"))
+    stressed_impact = abs(expensive.avg_fill_price - D("60000"))
+    assert nominal_impact > 0
+    assert abs(stressed_impact - nominal_impact * 2) < D("1e-20")
+    assert expensive.avg_fill_price > nominal.avg_fill_price if side is Side.BUY else expensive.avg_fill_price < nominal.avg_fill_price
+
+
+async def test_stressed_invalid_market_price_rejects_order_without_filling(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock, cash="100000")
+    adapter.cfg.slippage_multiplier = D("NaN")
+    req = OrderRequest(symbol="BTC/USDT", side=Side.BUY, qty=D("0.01"), type=OrderType.MARKET, strategy="t")
+    with pytest.raises(PermanentExchangeError, match="slippage multiplier"):
+        await adapter.place_order(req)
+    assert adapter.orders[req.client_order_id].status is OrderStatus.REJECTED
+    assert not adapter.fills
+
+
+async def test_timed_strategy_pause_blocks_direct_manager_entry(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    store.extend_strategy_pause("S1", until=NOW + timedelta(hours=2), reason="losses", now=NOW)
+    signal = Signal(id="timed-pause", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+async def test_strategy_size_reduction_rechecked_at_placement(cfg):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    store.reduce_strategy_size("S1", D("0.5"), now=NOW, reason="losses")
+    signal = Signal(id="reduced", strategy="S1", symbol="BTC/USDT", timeframe="15m", side=Side.BUY,
+                    entry_type=OrderType.MARKET, ts=NOW, stop=D("59000"), target=D("62000"))
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000")) is None
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000"),
+                                      sized_strategy_multiplier=D("1")) is None
+    assert not adapter.orders
+    assert await manager.submit_entry(signal, D("0.001"), price=D("60000"),
+                                      sized_strategy_multiplier=D("0.5")) is not None
+    store.close()
+
+
+@pytest.mark.parametrize("invalid", ["false", "true", 0, 1, None, [], {}])
+async def test_manager_rejects_non_boolean_reduce_only(cfg, invalid):
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=Mode.PAPER)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    request = OrderRequest(symbol="BTC/USDT", side=Side.SELL, qty=D("0.001"),
+                           type=OrderType.MARKET, reduce_only=invalid)
+    assert await manager._place(request) is None
+    assert not adapter.orders
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+@pytest.mark.parametrize("invalid", ["false", 0, 1, None])
+async def test_paper_adapter_direct_refuses_non_boolean_reduce_only(cfg, invalid):
+    adapter = _adapter(cfg, _market(), SimClock(NOW))
+    request = OrderRequest(symbol="BTC/USDT", side=Side.SELL, qty=D("0.001"),
+                           type=OrderType.MARKET, reduce_only=invalid)
+    with pytest.raises(PermanentExchangeError, match="reduce_only must be boolean"):
+        await adapter.place_order(request)
+    assert not adapter.orders
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field,value', [
+    ('client_order_id', 'wrong'), ('symbol', 'ETH/USDT'), ('side', Side.SELL),
+    ('qty', D('0.5')), ('strategy', 'wrong'), ('signal_id', 'wrong'),
+    ('reduce_only', 'false'), ('price', D('1')),
+])
+async def test_timeout_lookup_conflict_is_not_recovery_or_safe_retry(cfg, field, value):
+    from dataclasses import replace
+
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(':memory:')
+    switch = KillSwitch(store, clock=clock, mode=Mode.PAPER, kill_file=None)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    original = adapter.place_order
+    original_get = adapter.get_order
+    calls = []
+
+    async def timeout(request):
+        calls.append(request.client_order_id)
+        await original(request)
+        raise TransientExchangeError('timeout after acceptance')
+
+    async def conflicting(client_id):
+        return replace(await original_get(client_id), **{field: value})
+
+    adapter.place_order = timeout
+    adapter.get_order = conflicting
+    signal = Signal(id='conflict', strategy='S1', symbol='BTC/USDT', timeframe='15m',
+                    side=Side.BUY, entry_type=OrderType.MARKET, ts=NOW,
+                    stop=D('59000'), target=D('62000'))
+    assert await manager.submit_entry(signal, D('0.001'), price=D('60000')) is None
+    assert len(calls) == 1
+    assert store.count_events('order_recovery_conflict') == 1
+    assert store.count_events('order_recovered') == 0
+    assert store.has_execution_observation_fault()
+    assert not switch.can_open_entries()
+    store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field,value', [
+    ('client_order_id', 'wrong'), ('symbol', 'ETH/USDT'), ('side', Side.SELL),
+    ('qty', D('0.5')), ('strategy', 'wrong'), ('signal_id', 'wrong'),
+    ('reduce_only', 'false'), ('price', D('1')), (None, None),
+])
+async def test_successful_submit_conflict_is_not_recorded_or_retried(cfg, field, value):
+    from dataclasses import replace
+
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(':memory:')
+    switch = KillSwitch(store, clock=clock, mode=Mode.PAPER, kill_file=None)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    original = adapter.place_order
+    calls = []
+
+    async def conflicting(request):
+        calls.append(request.client_order_id)
+        observed = await original(request)
+        return replace(observed, **{field: value}) if field else None
+
+    adapter.place_order = conflicting
+    signal = Signal(id='response-conflict', strategy='S1', symbol='BTC/USDT', timeframe='15m',
+                    side=Side.BUY, entry_type=OrderType.MARKET, ts=NOW,
+                    stop=D('59000'), target=D('62000'))
+    assert await manager.submit_entry(signal, D('0.001'), price=D('60000')) is None
+    assert len(calls) == 1
+    assert store.count_events('order_response_conflict') == 1
+    assert store.count_events('order_submitted') == 0
+    assert manager.stats.submitted == 0
+    assert store.has_execution_observation_fault()
+    assert not switch.can_open_entries()
+    store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field,value', [
+    ('status', 'closed'), ('qty', D('NaN')), ('filled_qty', D('NaN')),
+    ('filled_qty', D('-1')), ('filled_qty', D('100')), ('filled_qty', True),
+    ('avg_fill_price', D('Infinity')), ('avg_fill_price', D('0')),
+    ('fee', D('-1')), ('fee', D('NaN')), ('price', D('Infinity')),
+])
+async def test_invalid_execution_totals_hold_instead_of_reporting_success(cfg, field, value):
+    from dataclasses import replace
+
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(':memory:')
+    switch = KillSwitch(store, clock=clock, mode=Mode.PAPER, kill_file=None)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    original = adapter.place_order
+    calls = []
+
+    async def malformed(request):
+        calls.append(request.client_order_id)
+        order = await original(request)
+        return replace(order, **{field: value})
+
+    adapter.place_order = malformed
+    signal = Signal(id='bad-totals', strategy='S1', symbol='BTC/USDT', timeframe='15m',
+                    side=Side.BUY, entry_type=OrderType.MARKET, ts=NOW,
+                    stop=D('59000'), target=D('62000'))
+    assert await manager.submit_entry(signal, D('0.001'), price=D('60000')) is None
+    assert len(calls) == 1
+    assert store.count_events('order_response_conflict') == 1
+    assert store.count_events('order_submitted') == 0
+    assert not switch.can_open_entries()
+    store.close()

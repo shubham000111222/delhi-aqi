@@ -9,6 +9,7 @@ a partial chunk complete.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,9 @@ def history_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
     )
     config.ensure_dirs()
     monkeypatch.setattr(cli, "_config", lambda args: config)
+    # Fixed closed historical endpoint: wall-clock minute rollover must not change
+    # how many demo candles the CLI expects while the test is paging.
+    monkeypatch.setattr(cli, "utcnow", lambda: datetime(2024, 11, 2, tzinfo=UTC))
     return config
 
 
@@ -116,3 +120,30 @@ class TestBackfillHistory:
              "--to", "2026-04-01T00:00:00Z", "--symbols", "BTC/USDT"]
         )
         assert code == 2
+
+
+@pytest.mark.parametrize('end,months,expected', [
+    ('2024-02-29T12:00:00Z', 12, '2023-02-01'),
+    ('2024-02-29T12:00:00Z', 24, '2022-02-01'),
+    ('2024-01-15T00:00:00Z', 13, '2022-12-01'),
+    ('2024-03-01T00:00:00Z', 1, '2024-02-01'),
+])
+def test_calendar_months_span_multiple_years(history_cfg, monkeypatch, end, months, expected):
+    captured = []
+
+    def chunks(start, stop):
+        captured.append((start, stop))
+        return []
+
+    monkeypatch.setattr(cli, '_month_chunks', chunks)
+    assert run_cli(['backfill-history', '--source', 'demo', '--months', str(months),
+                    '--to', end, '--symbols', 'BTC/USDT']) == 0
+    assert captured[0][0].date().isoformat() == expected
+
+
+@pytest.mark.parametrize('months', ['0', '-1', '999999'])
+def test_invalid_calendar_months_fail_without_backfill(history_cfg, months, capsys):
+    assert run_cli(['backfill-history', '--source', 'demo', '--months', months,
+                    '--to', '2024-02-29T12:00:00Z']) == 2
+    assert 'error:' in capsys.readouterr().err
+    assert not (history_cfg.settings.data_dir / 'backfill-history.json').exists()

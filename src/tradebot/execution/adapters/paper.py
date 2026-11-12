@@ -93,6 +93,10 @@ class PaperAdapter(ExchangeAdapter):
 
     # --- order entry ------------------------------------------------------
     async def place_order(self, request: OrderRequest) -> Order:
+        if type(request.reduce_only) is not bool:
+            raise PermanentExchangeError("reduce_only must be boolean")
+        if request.reduce_only and request.side is not Side.SELL:
+            raise PermanentExchangeError("reduce-only buy is not a supported protective action")
         existing = self.orders.get(request.client_order_id)
         if existing is not None:
             # Idempotency: a retry after a timeout must never create a second order.
@@ -196,9 +200,22 @@ class PaperAdapter(ExchangeAdapter):
                 avg, filled = mark, order.qty
         else:
             avg, filled = mark, order.qty
-        if filled < order.qty:
-            order.status = OrderStatus.PARTIALLY_FILLED
         try:
+            # Stress adverse execution relative to the decision reference, including
+            # latency and book impact, but do not amplify favorable price movement.
+            # Stop references can be old; this is a stress model, not venue evidence.
+            factor = self.cfg.slippage_multiplier
+            if not factor.is_finite() or factor < 1 or factor > 10:
+                raise PermanentExchangeError("invalid paper slippage multiplier")
+            reference = order.reference_price if order.reference_price and order.reference_price > 0 else mark
+            if order.side is Side.BUY:
+                avg += max(ZERO, avg - reference) * (factor - 1)
+            else:
+                avg -= max(ZERO, reference - avg) * (factor - 1)
+            if avg <= 0 or not avg.is_finite():
+                raise PermanentExchangeError("stressed market fill price is invalid")
+            if filled < order.qty:
+                order.status = OrderStatus.PARTIALLY_FILLED
             self._record_fill(order, avg, filled, liquidity="taker")
         except PermanentExchangeError as exc:
             # The venue refused the fill (no stock, no cash). The order must not stay
