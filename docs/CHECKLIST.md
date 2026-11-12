@@ -19,7 +19,7 @@ For the full Windows installation, implementation and validation procedure, see
 For the consolidated item-by-item implementation and external-evidence backlog, see
 [`REMAINING_WORK.md`](REMAINING_WORK.md). It does not mark unfinished work complete.
 
-**Last updated:** 2026-11-02 · **Suite:** 1311 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-02 · **Suite:** 1315 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -30,7 +30,8 @@ See [TIMEMACHINE_PLAN.md](TIMEMACHINE_PLAN.md) for the complete acceptance regis
 - [x] Phase 5 foundation: point-in-time closed 5m bars, full-precision hash/seed, immutable standardized OHLC returns and conservative next-open historical rule replay.
 - [ ] Complete strategy-specific replay adapters (limit entry semantics are not implemented).
 - [x] Standalone Phase 6 bootstrap core and fixed risk-reducing verdict function; not wired into trading.
-- [ ] Finish Phase 6 orchestration, alert/failure handling, cache/timing control and four-variant OOS validation with untouched holdout.
+- [x] Standalone fail-closed check orchestration, bounded input/replay caches, cooperative deadline checks and three-overrun path reduction with alert callback; no production latency certification.
+- [ ] Finish real alert/risk/backtester integration, measured end-to-end latency acceptance and four-variant OOS validation with untouched holdout.
 - [ ] Phase 8: durable checks, engine/backtester integration, Trades verdicts, plain-word tickets and daily-report skipped/sized-down list.
 - [ ] Demonstrate OOS retention criteria and <=250 ms checks before enabling. The filter is currently disabled/unwired; no result is live evidence.
 

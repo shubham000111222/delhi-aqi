@@ -5,8 +5,11 @@ OHLC cannot establish first touch within a bar: ambiguous replay bars use stop-f
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -130,7 +133,7 @@ class PastBars(Sequence[Candle]):
 
 
 def replay_rule(history: History, rule: Callable[[Sequence[Candle]], ReplayPlan | None], *,
-                fee_rate: float, slippage_rate: float) -> dict[str, object]:
+                fee_rate: float, slippage_rate: float, deadline: float | None = None) -> dict[str, object]:
     """Independent trigger replay, next-open market fills, no overlapping positions.
 
     Rules see only a closed prefix. Require a fully observed exit horizon before
@@ -151,6 +154,8 @@ def replay_rule(history: History, rule: Callable[[Sequence[Candle]], ReplayPlan 
     censored = 0
     i = 0
     while i < len(bars) - 1:
+        if deadline is not None and time.perf_counter() >= deadline:
+            raise TimeoutError("replay budget exceeded")
         plan = rule(PastBars(bars, i + 1))
         if plan is None:
             i += 1
@@ -203,7 +208,7 @@ def replay_rule(history: History, rule: Callable[[Sequence[Candle]], ReplayPlan 
 
 def simulate_trade(history: History, plan: ReplayPlan, trade_id: str, *,
                    fee_rate: float, slippage_rate: float, paths: int = 10000,
-                   volatility_scale: float = 1.0) -> dict[str, object]:
+                   volatility_scale: float = 1.0, deadline: float | None = None) -> dict[str, object]:
     """Volatility-scaled moving block bootstrap; no market prediction or entry authority.
 
     Blocks are independently chosen per path with length uniformly 6..12 bars.
@@ -235,6 +240,8 @@ def simulate_trade(history: History, plan: ReplayPlan, trade_id: str, *,
     side = plan.side
     scale = history.volatility * volatility_scale
     for step in range(plan.max_bars):
+        if deadline is not None and time.perf_counter() >= deadline:
+            raise TimeoutError("simulation budget exceeded")
         ids = np.flatnonzero(active)
         if not len(ids):
             break
@@ -325,3 +332,94 @@ def trade_verdict(simulation: dict[str, object], replay: dict[str, object], *,
     except (KeyError, TypeError, ValueError, OverflowError):
         return {'verdict': 'SKIP', 'multiplier': 0.0, 'label': 'invalid check',
                 'reason': 'missing or invalid metrics', 'filter_enabled': False}
+
+
+class TimeMachine:
+    """Standalone, disabled-by-default check with bounded process-local caches.
+
+    Alert callback is required; delivery failure is recorded and still skips. No
+    persistence, risk-engine mutation or production execution authority is provided.
+    Deadlines are cooperative, not a hard wall-clock preemption guarantee.
+    """
+    def __init__(self, alert: Callable[[str], None], *, budget_ms: float = 250,
+                 cache_entries: int = 2) -> None:
+        if (not callable(alert) or not np.isfinite(budget_ms) or not 0 < budget_ms <= 250
+                or type(cache_entries) is not int or not 1 <= cache_entries <= 4):
+            raise ValueError('invalid Time Machine configuration')
+        self.alert = alert
+        self.budget_ms = budget_ms
+        self.cache_entries = cache_entries
+        self.paths = 10000
+        self.overruns = 0
+        self._history_cache: OrderedDict[object, History] = OrderedDict()
+        self._replay_cache: OrderedDict[object, dict[str, object]] = OrderedDict()
+
+    def _notify(self, message: str) -> bool:
+        try:
+            self.alert(message)
+            return True
+        except Exception:  # noqa: BLE001 - alert failure cannot allow a trade
+            return False
+
+    def check(self, bars: Sequence[Candle], symbol: str, decision_time: datetime,
+              plan: ReplayPlan, trade_id: str, rule: Callable[[Sequence[Candle]], ReplayPlan | None], *,
+              fee_rate: float, slippage_rate: float, rule_version: str, volatility_scale: float = 1.,
+              coin_flip_skip: bool = True) -> dict[str, object]:
+        started = time.perf_counter()
+        deadline = started + self.budget_ms / 1000
+        paths = self.paths
+        result: dict[str, object] = {'trade_id': trade_id, 'path_count': paths,
+                                    'verdict': 'SKIP', 'multiplier': 0., 'filter_enabled': False}
+        try:
+            result['seed'] = trade_seed(trade_id)
+            if not isinstance(rule_version, str) or not rule_version:
+                raise ValueError('immutable replay rule version is required')
+            # Immutable values, not just timestamps, key standardized-return reuse.
+            # Future rows do not invalidate a past decision's cache entry.
+            closed = tuple(b for b in bars if b.symbol == symbol
+                           and decision_time - timedelta(days=60) <= b.ts < decision_time
+                           and b.close_time <= decision_time)
+            key = (symbol, decision_time, closed)
+            history = self._history_cache.get(key)
+            if history is None:
+                history = prepare_history(closed, symbol, decision_time)
+                self._history_cache[key] = history
+                if len(self._history_cache) > self.cache_entries:
+                    self._history_cache.popitem(last=False)
+            self._history_cache.move_to_end(key)
+            result['input_hash'] = history.input_hash
+            if time.perf_counter() >= deadline:
+                raise TimeoutError('history preparation budget exceeded')
+            replay_key = (history.input_hash, rule, rule_version, fee_rate, slippage_rate)
+            replay = self._replay_cache.get(replay_key)
+            if replay is None:
+                replay = replay_rule(history, rule, fee_rate=fee_rate, slippage_rate=slippage_rate,
+                                     deadline=deadline)
+                self._replay_cache[replay_key] = replay
+                if len(self._replay_cache) > self.cache_entries:
+                    self._replay_cache.popitem(last=False)
+            self._replay_cache.move_to_end(replay_key)
+            simulation = simulate_trade(history, plan, trade_id, fee_rate=fee_rate,
+                                        slippage_rate=slippage_rate, paths=paths,
+                                        volatility_scale=volatility_scale, deadline=deadline)
+            if time.perf_counter() >= deadline:
+                raise TimeoutError('check budget exceeded')
+            result.update(simulation=simulation, replay=copy.deepcopy(replay))
+            result.update(trade_verdict(simulation, replay, coin_flip_skip=coin_flip_skip))
+            self.overruns = 0
+            if result['verdict'] == 'SKIP':
+                result['alert_delivered'] = self._notify(f'Time Machine {trade_id}: SKIP: {result["reason"]}')
+            return result
+        except Exception as exc:  # noqa: BLE001 - every invalid/error outcome must skip
+            timed_out = isinstance(exc, TimeoutError)
+            self.overruns = self.overruns + 1 if timed_out else 0
+            result.update(reason=type(exc).__name__ + ': ' + str(exc), timed_out=timed_out)
+            result['alert_delivered'] = self._notify(f'Time Machine {trade_id}: SKIP: {result["reason"]}')
+            if self.overruns >= 3 and self.paths == 10000:
+                self.paths = 5000
+                result['path_reduction_alert_delivered'] = self._notify(
+                    'Time Machine: three consecutive overruns; subsequent checks reduced to 5000 paths')
+            return result
+        finally:
+            result['elapsed_ms'] = (time.perf_counter() - started) * 1000
+            result['next_path_count'] = self.paths

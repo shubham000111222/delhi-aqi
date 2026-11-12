@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine bounded orchestration pass (working branch)
+
+- Added standalone TimeMachine.check with bounded full-value point-in-time history/standardized-return and replay caches. Replay reuse requires the same callback, explicit immutable rule version, input hash and costs; callers must change the version when rule configuration changes. Mutable closure changes cannot be inferred. Future rows do not invalidate past-decision cache keys.
+- Every input/check error and cooperative timeout returns SKIP with a required alert callback; delivery failure remains recorded and cannot permit a trade. Three consecutive overruns reduce subsequent checks from 10,000 to 5,000 paths and emit a degradation alert. No immediate same-trade retry consumes more budget. Elapsed time and next path count are reported.
+- Full suite **1315 passed, 2 skipped**; Ruff, mypy and diff checks passed. Four new tests cover short-input alerts, three-overrun degradation, future-row cache stability/input mutation invalidation, and alert failure. Cache success/degradation tests use mocked cores, not latency certification.
+- Deadlines are cooperative, not hard preemption: history hashing/preparation, a slow replay rule and alert delivery can exceed 250 ms before SKIP returns. End-to-end measured-budget acceptance remains open. Caches/overrun counters are process-local and the orchestrator is not designed for concurrent threads. No engine/backtester/real-alert integration or OOS retention study is supplied; filter remains disabled and live gates remain blocked.
+
 ## Time Machine standalone Monte Carlo/verdict core (working branch)
 
 - Added deterministic 10,000-path (or explicitly 5,000-path) block bootstrap using 6–12-bar blocks of standardized joint OHLC returns with explicit volatility scaling. Simulated stops gap-fill at open; targets rest at target; entry/stop/time slippage and two-leg fees reduce net R. Unknown dual-touch ordering uses a fair random draw and is counted, never marked verified. Returns probabilities, net R statistics, expected holding time and input/seed/path provenance.

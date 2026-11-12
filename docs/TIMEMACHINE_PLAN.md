@@ -23,7 +23,7 @@ existing strategy is safe or profitable. Risk package must never import analysis
 
 ## Phase 6 — pending, filter stays disabled
 
-- [ ] Cached standardized returns keyed by symbol, as-of window, input hash and settings.
+- [x] Bounded process-local standardized-return/history cache keyed by symbol, decision time and full closed-bar values; replay cache additionally binds costs, callback and explicit immutable rule version.
 - [x] Standalone vectorized 10,000-path volatility-scaled block bootstrap (blocks 6–12 bars);
   deterministic seed, sampled intrabar path assumptions, fees/slippage/gap exits.
 - [ ] Define and validate horizon and current-volatility estimator without final-holdout
@@ -35,10 +35,11 @@ existing strategy is safe or profitable. Risk package must never import analysis
   p05 < -1.5R, or time-exit probability > .60 with E[R] < .05. SKIP conditions take
   precedence over sign disagreement. |E[R]| < .05 is labelled coin flip with configured
   size-down/skip (never overriding a mandatory SKIP). Thresholds validation-only.
-- [ ] All missing/invalid/error/timeout handling skips and alerts. No risk bypass; apply
+- [x] Standalone orchestrator catches missing/invalid/error/timeout outcomes, skips and invokes a required alert callback; alert delivery failure is recorded.
+- [ ] Wire real alert delivery and risk-boundary integration. No risk bypass; apply
   multiplier before the existing risk engine, never above base size.
-- [ ] Enforce measured 250 ms end-to-end check budget; repeated overruns reduce paths
-  to 5,000 and alert. No timing target has yet been measured or claimed.
+- [x] Cooperative deadline checks in replay/simulation and before result acceptance; three consecutive overruns reduce subsequent checks to 5,000 paths and invoke alerts.
+- [ ] Prove <=250 ms end-to-end latency on supported histories/horizons, including cache misses and production alert delivery. Cooperative checks do not preempt slow callbacks or hashing/preparation; those can exceed the deadline before returning SKIP.
 - [ ] Run no-filter, simulation-only, replay-only and combined variants inside the
   backtester with decision-time data only, identical costs/capital and untouched final
   holdout. Retain only if OOS expectancy improves or max DD falls while keeping at least

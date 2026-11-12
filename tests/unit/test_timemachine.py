@@ -182,3 +182,83 @@ def test_invalid_verdict_fails_closed():
 
     assert trade_verdict({}, {})['multiplier'] == 0
     assert trade_verdict({'expected_net_r': float('nan')}, {})['multiplier'] == 0
+
+
+def test_orchestrator_errors_skip_and_alert(bars):
+    from tradebot.analysis.timemachine import TimeMachine
+
+    alerts = []
+    machine = TimeMachine(alerts.append)
+    result = machine.check(bars[-10:], 'BTC/USDT', END, ReplayPlan(100, 99, 101),
+                           'short', lambda past: None, fee_rate=0, slippage_rate=0, rule_version='v1')
+    assert result['multiplier'] == 0 and result['alert_delivered'] is True
+    assert alerts and result['filter_enabled'] is False
+
+
+def test_three_overruns_degrade_subsequent_checks_and_alert(bars, monkeypatch):
+    import tradebot.analysis.timemachine as tm
+
+    alerts = []
+    calls = []
+    monkeypatch.setattr(tm, 'replay_rule', lambda *a, **k: {'insufficient': True, 'expected_net_r': None})
+
+    def timeout(*args, **kwargs):
+        calls.append(kwargs['paths'])
+        raise TimeoutError('test deadline')
+
+    monkeypatch.setattr(tm, 'simulate_trade', timeout)
+    machine = tm.TimeMachine(alerts.append)
+    def rule(past):
+        return None
+    for i in range(4):
+        result = machine.check(bars, 'BTC/USDT', END, tm.ReplayPlan(100, 99, 101), str(i), rule,
+                               fee_rate=0, slippage_rate=0, rule_version='v1')
+        assert result['multiplier'] == 0
+    assert calls == [10000, 10000, 10000, 5000]
+    assert machine.paths == 5000
+    assert any('5000' in message for message in alerts)
+
+
+def test_cache_point_in_time_and_input_change_invalidation(bars, monkeypatch):
+    import tradebot.analysis.timemachine as tm
+
+    real_prepare = tm.prepare_history
+    calls = []
+
+    def prepare(*args, **kwargs):
+        calls.append('history')
+        return real_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(tm, 'prepare_history', prepare)
+    monkeypatch.setattr(tm, 'replay_rule', lambda *a, **k: {'insufficient': True, 'expected_net_r': None})
+    monkeypatch.setattr(tm, 'simulate_trade', lambda *a, **k: {
+        'expected_net_r': .2, 'p05_r': -1., 'target_first': .5, 'stop_first': .4, 'time_exit': .1})
+    machine = tm.TimeMachine(lambda message: None)
+    def rule(past):
+        return None
+
+    def run(data):
+        return machine.check(data, 'BTC/USDT', END, tm.ReplayPlan(100, 99, 101), 'past', rule,
+                             fee_rate=0, slippage_rate=0, rule_version='v1')
+
+    first = run(bars)
+    future = replace(bars[-1], ts=END, close=Decimal('NaN'))
+    again = run((*bars, future))
+    assert first['multiplier'] == again['multiplier'] == 1
+    assert calls == ['history']
+    changed = list(bars)
+    changed[-1] = replace(changed[-1], volume=Decimal('2'))
+    third = run(changed)
+    assert calls == ['history', 'history']
+    assert first['input_hash'] != third['input_hash']
+
+
+def test_alert_failure_cannot_allow_trade(bars):
+    from tradebot.analysis.timemachine import TimeMachine
+
+    def fail(message):
+        raise RuntimeError('delivery unavailable')
+
+    result = TimeMachine(fail).check(bars[-2:], 'BTC/USDT', END, ReplayPlan(100, 99, 101),
+                                    'bad', lambda past: None, fee_rate=0, slippage_rate=0, rule_version='v1')
+    assert result['multiplier'] == 0 and result['alert_delivered'] is False
