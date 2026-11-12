@@ -205,6 +205,7 @@ class Engine:
         beat = Path(config.settings.watchdog.heartbeat_file)
         self._heartbeat_path = beat if beat.is_absolute() else Path(config.settings.state_dir) / beat
         self._heartbeat_warns = 0
+        self._last_entry_blockers: tuple[str, ...] | None = None
         self._last_alert_flush: datetime | None = None
         self.starting_capital = config.settings.starting_capital_usdt
         self.ramp = RampController(config, store)
@@ -1308,8 +1309,10 @@ class Engine:
         )
         flapping = self._hold_on_flapping(now=now)
         healed = await self.playbook.tick(self) if self.running else []
+        blockers = self.killswitch.entry_blockers()
+        await self._report_entry_blockers(blockers, now=now)
         health = {
-            "entry_blockers": {"available": True, "reasons": list(self.killswitch.entry_blockers()),
+            "entry_blockers": {"available": True, "reasons": list(blockers),
                                "note": "Point-in-time diagnostic only; not entry authorization."},
             "ts": iso(now),
             "flapping_held": flapping,
@@ -1620,6 +1623,36 @@ class Engine:
         )
         level = str(payload.pop("level", "INFO"))
         self._log(kind, payload, level=level, actor="heal", ts=self.clock.now())
+
+    async def _report_entry_blockers(self, blockers: tuple[str, ...], *, now: datetime) -> None:
+        """Audit observed changes, not authority transitions; never release a hold.
+
+        Deduplication is process-local. A restarted process reports an existing hold
+        again. Notifier acceptance is not proof of external delivery.
+        """
+        previous = self._last_entry_blockers
+        if previous == blockers:
+            return
+        if previous is None and not blockers:
+            self._last_entry_blockers = blockers
+            return
+        level = "WARN" if blockers else "INFO"
+        self._log("entry_blockers_changed", {
+            "previous": list(previous) if previous is not None else None,
+            "reasons": list(blockers), "point_in_time": True,
+            "entry_authorized": False,
+        }, level=level, actor="health", ts=now)
+        self._last_entry_blockers = blockers
+        if self.notifier is None:
+            return
+        message = ("Entry-blocker diagnostic: " + (", ".join(blockers) or "none currently observed")
+                   + ". Point-in-time only; not entry authorization.")
+        try:
+            await self.notifier.send(message, level=level)
+        except Exception as exc:  # noqa: BLE001 - delivery failure must not release holds
+            self._log("entry_blocker_alert_failed", {"error_type": type(exc).__name__,
+                      "reasons": list(blockers), "entry_authorized": False},
+                      level="ERROR", actor="health", ts=now)
 
     async def _flush_alerts(self, now: datetime) -> None:
         """Retry undelivered alerts, at most once a minute.

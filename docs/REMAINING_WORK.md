@@ -36,7 +36,8 @@ Full criteria and honest limits: [TIMEMACHINE_PLAN.md](TIMEMACHINE_PLAN.md).
 - [x] Read-only process/durable entry-blocker reasons surfaced in dashboard and research-study integrity; no release authority.
 - [x] Carry read-only entry-blocker reasons through engine health, health CLI and component Health API separately from component scores.
 - [x] Kill-switch live preflight names observed blockers and limits passing wording to that gate, excluding other-process local holds.
-- [ ] Complete durable-fault/promotion evidence coverage in alerts and all remaining preflight gates; verify consistency across all consumers.
+- [x] Audit changed entry-blocker sets and submit change-only notifier diagnostics without release authority; failed sends audited.
+- [ ] Verify independent external blocker-alert delivery/retry and complete promotion evidence coverage in alerts/remaining preflight gates; verify consistency across consumers.
 
 ## Remaining self-healing requirements (§20)
 

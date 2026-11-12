@@ -480,3 +480,56 @@ async def test_health_reports_durable_observation_fault_without_release(engine):
     assert 'execution_observation_fault' in health['entry_blockers']['reasons']
     assert engine.store.has_execution_observation_fault()
     assert not engine.killswitch.can_open_entries()
+
+
+async def test_entry_blocker_alerts_are_change_only_and_never_authorize(engine):
+    class Notifier:
+        def __init__(self):
+            self.messages = []
+
+        async def send(self, message, *, level):
+            self.messages.append((message, level))
+
+    notifier = Notifier()
+    engine.notifier = notifier
+    await engine.health_check()
+    assert notifier.messages == []
+    engine.killswitch.latch_local_entry_hold()
+    await engine.health_check()
+    await engine.health_check()
+    assert len(notifier.messages) == 1
+    assert 'local_entry_hold' in notifier.messages[0][0]
+    engine.store.latch_execution_observation_fault('fault')
+    await engine.health_check()
+    assert len(notifier.messages) == 2
+    assert not engine.killswitch.can_open_entries()
+    rows = engine.store.events(kinds=['entry_blockers_changed'])
+    assert len(rows) == 2
+    assert all(row['payload']['entry_authorized'] is False for row in rows)
+
+
+async def test_failed_entry_blocker_alert_is_audited_without_releasing_hold(engine):
+    class BrokenNotifier:
+        async def send(self, message, *, level):
+            raise OSError('secret transport details must not appear in audit')
+
+    engine.notifier = BrokenNotifier()
+    engine.killswitch.latch_local_entry_hold()
+    await engine.health_check()
+    await engine.health_check()
+    assert not engine.killswitch.can_open_entries()
+    rows = engine.store.events(kinds=['entry_blocker_alert_failed'])
+    assert len(rows) == 1
+    assert rows[0]['payload']['error_type'] == 'OSError'
+    assert 'secret' not in str(rows)
+
+
+async def test_empty_blocker_change_is_informational_not_resume_authority(engine):
+    # Test the observer directly; do not add a production hold-release path.
+    await engine._report_entry_blockers(('local_entry_hold',), now=engine.clock.now())
+    await engine._report_entry_blockers((), now=engine.clock.now())
+    rows = engine.store.events(kinds=['entry_blockers_changed'])
+    assert len(rows) == 2
+    empty = next(row for row in rows if not row['payload']['reasons'])
+    assert empty['level'] == 'INFO'
+    assert empty['payload']['entry_authorized'] is False
