@@ -40,6 +40,7 @@ existing strategy is safe or profitable. Risk package must never import analysis
   multiplier before the existing risk engine, never above base size.
 - [x] Cooperative deadline checks in replay/simulation and before result acceptance; three consecutive overruns reduce subsequent checks to 5,000 paths and invoke alerts.
 - [ ] Prove <=250 ms end-to-end latency on supported histories/horizons, including cache misses and production alert delivery. Cooperative checks do not preempt slow callbacks or hashing/preparation; those can exceed the deadline before returning SKIP.
+- [x] Standalone four-run study driver in `backtest/timemachine_study.py`: declared holdout exclusion, identical input/settings/capital checks, net-expectancy/drawdown comparison and >=50% baseline trade retention. Never enables the filter by itself.
 - [ ] Run no-filter, simulation-only, replay-only and combined variants inside the
   backtester with decision-time data only, identical costs/capital and untouched final
   holdout. Retain only if OOS expectancy improves or max DD falls while keeping at least

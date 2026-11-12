@@ -196,8 +196,11 @@ def test_orchestrator_errors_skip_and_alert(bars):
 
 
 def test_three_overruns_degrade_subsequent_checks_and_alert(bars, monkeypatch):
+    from types import SimpleNamespace
+
     import tradebot.analysis.timemachine as tm
 
+    monkeypatch.setattr(tm, 'time', SimpleNamespace(perf_counter=lambda: 0.))
     alerts = []
     calls = []
     monkeypatch.setattr(tm, 'replay_rule', lambda *a, **k: {'insufficient': True, 'expected_net_r': None})
@@ -220,8 +223,11 @@ def test_three_overruns_degrade_subsequent_checks_and_alert(bars, monkeypatch):
 
 
 def test_cache_point_in_time_and_input_change_invalidation(bars, monkeypatch):
+    from types import SimpleNamespace
+
     import tradebot.analysis.timemachine as tm
 
+    monkeypatch.setattr(tm, 'time', SimpleNamespace(perf_counter=lambda: 0.))
     real_prepare = tm.prepare_history
     calls = []
 

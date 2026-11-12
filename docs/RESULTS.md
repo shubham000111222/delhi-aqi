@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine four-variant research comparison (working branch)
+
+- Added a backtest study driver invoking no-filter, simulation-only, replay-only and combined runner callbacks independently. It requires identical declared window, input/settings hashes and starting capital, unique run IDs and finite trade/equity results. Declared study windows overlapping the final holdout are rejected before invoking a runner.
+- Computes net expectancy, maximum equity drawdown and trade retention. A filtered variant meets retention arithmetic only if expectancy improves or drawdown falls, with at least 50% of baseline trades and nonzero trades. Empty baseline, unchanged results, mismatching inputs or failed runs cannot pass. Filter remains disabled regardless; provenance_verified is always false.
+- Full suite **1324 passed, 2 skipped**; Ruff, mypy and diff checks passed. Nine new synthetic-result tests cover comparison boundaries, empty/unchanged cases, holdout rejection and six invalid-run conditions. An earlier full run exposed a cold-cache timing dependency in the mocked overrun test; injected test clocks now isolate control-flow assertions from performance, without weakening actual deadlines.
+- This is a callback-driven comparison framework, not completed engine integration or real OOS evidence. A caller can misdeclare hashes/windows; unique run IDs do not prove fresh portfolio/store isolation. Production strategy replay adapters, decision-time backtester wiring, real recorded study data, final-holdout governance and measured end-to-end latency remain open. No advantage or live readiness is claimed; filter stays disabled.
+
 ## Time Machine bounded orchestration pass (working branch)
 
 - Added standalone TimeMachine.check with bounded full-value point-in-time history/standardized-return and replay caches. Replay reuse requires the same callback, explicit immutable rule version, input hash and costs; callers must change the version when rule configuration changes. Mutable closure changes cannot be inferred. Future rows do not invalidate past-decision cache keys.
