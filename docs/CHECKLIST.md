@@ -19,7 +19,7 @@ For the full Windows installation, implementation and validation procedure, see
 For the consolidated item-by-item implementation and external-evidence backlog, see
 [`REMAINING_WORK.md`](REMAINING_WORK.md). It does not mark unfinished work complete.
 
-**Last updated:** 2026-11-02 · **Suite:** 1405 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-02 · **Suite:** 1409 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -284,3 +284,5 @@ Fill this in as phases complete — it is what `docs/RESULTS.md` is built from.
 - [x] Terminal open positions/orders/pending execution disclosure and conservative comparison-ineligibility for both baseline and filtered nominal/stressed studies; no invented liquidation fills.
 
 - [x] Lazy history loading inside checker deadline/error/alert boundary; over-budget reads skip before cores and count toward adaptive path reduction. Cooperative only, not hard latency certification.
+
+- [x] Fixed point-in-time trailing24h current/historical volatility ratio, optional research CLI propagation and logged estimator provenance; no final-holdout tuning.

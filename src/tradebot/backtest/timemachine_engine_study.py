@@ -36,7 +36,8 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
                            history_5m: Mapping[str, Sequence[Candle]], *, start: datetime,
                            end: datetime, final_holdout_start: datetime,
                            fee_rate: float, slippage_rate: float,
-                           max_bars: int = 288, cost_stress: bool = False) -> dict[str, Any]:
+                           max_bars: int = 288, cost_stress: bool = False,
+                           volatility_scale: float | None = 1.) -> dict[str, Any]:
     """No injected engine/result callback. Each variant starts from fresh capital.
 
     Input hashes are computed, not accepted as assertions. Archive/venue provenance
@@ -92,7 +93,7 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
                                  'strategies': cfg.strategies.model_dump(mode='json'),
                                  'symbols': cfg.symbols.model_dump(mode='json'),
                                  'checker_costs': [fee_rate, slippage_rate], 'max_bars': max_bars,
-                                 'runner': 'isolated-cold-start-v1'})
+                                 'volatility_scale': volatility_scale, 'runner': 'isolated-cold-start-v1'})
         window = StudyWindow(start, end, final_holdout_start, input_hash, settings_hash, capital)
         with TemporaryDirectory(prefix='timemachine-study-') as temporary:
             for variant in VARIANTS:
@@ -112,7 +113,8 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
                     if variant != 'no_filter':
                         engine.set_research_candidate_gate(TimeMachineEngineGate(
                             TimeMachine(alerts.append), lambda symbol, cutoff: history[symbol], bindings,
-                            fee_rate=fee_rate, slippage_rate=slippage_rate, variant=variant))
+                            fee_rate=fee_rate, slippage_rate=slippage_rate, variant=variant,
+                            volatility_scale=volatility_scale))
                     # Finite prefiltered feed: drain every symbol at the final close.
                     # stop_at=end would stop after the first symbol at that timestamp.
                     await engine.run(idle_timeout=.01)
@@ -171,7 +173,8 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
             stressed = await run_engine_study(
                 stress_config(cfg, 2.), execution, history, start=start, end=end,
                 final_holdout_start=final_holdout_start, fee_rate=fee_rate * 2,
-                slippage_rate=slippage_rate * 2, max_bars=max_bars, cost_stress=False)
+                slippage_rate=slippage_rate * 2, max_bars=max_bars, cost_stress=False,
+                volatility_scale=volatility_scale)
             result['cost_stress'] = {'multiplier': 2, 'study': stressed,
                                      'model': '2x paper fees and adverse modeled market slippage; '
                                               'limit prices unchanged; checker fee/slippage assumptions doubled',

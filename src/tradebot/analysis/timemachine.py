@@ -89,6 +89,26 @@ def prepare_history(bars: Sequence[Candle], symbol: str, decision_time: datetime
     return History(tuple(selected), digest, standardized, volatility)
 
 
+def current_volatility_scale(history: History) -> dict[str, object]:
+    """Fixed trailing24h close-return estimator; not tuned to a holdout outcome.
+
+    The supplied History must already be prepared/validated at the decision cutoff.
+    Standardized returns use historical sigma, so their recent sample sigma is the
+    required current/historical scale ratio. No future window or forward fill.
+    """
+    recent = history.standardized_ohlc[-288:, 3]
+    if len(recent) != 288 or not np.isfinite(recent).all():
+        raise HistoryError('invalid current-volatility return window')
+    scale = float(np.std(recent, ddof=1))
+    current = scale * history.volatility
+    if not np.isfinite(scale) or scale <= 0 or not np.isfinite(current) or current <= 0:
+        raise HistoryError('zero or invalid current volatility')
+    return {'estimator': 'trailing288-closed5m-close-log-returns-ddof1-v1',
+            'return_observations': 288, 'current_volatility': current,
+            'baseline_volatility': history.volatility, 'scale': scale,
+            'window_end': history.bars[-1].close_time.isoformat()}
+
+
 @dataclass(frozen=True)
 class ReplayPlan:
     entry: float  # decision reference; actual fill is next bar open with adverse slippage
@@ -391,7 +411,7 @@ class TimeMachine:
 
     def check(self, bars: Sequence[Candle] | Callable[[], Sequence[Candle]], symbol: str, decision_time: datetime,
               plan: ReplayPlan, trade_id: str, rule: Callable[[Sequence[Candle]], ReplayPlan | None], *,
-              fee_rate: float, slippage_rate: float, rule_version: str, volatility_scale: float = 1.,
+              fee_rate: float, slippage_rate: float, rule_version: str, volatility_scale: float | None = 1.,
               coin_flip_skip: bool = True, variant: str = 'both') -> dict[str, object]:
         started = time.perf_counter()
         deadline = started + self.budget_ms / 1000
@@ -424,6 +444,12 @@ class TimeMachine:
                     self._history_cache.popitem(last=False)
             self._history_cache.move_to_end(key)
             result['input_hash'] = history.input_hash
+            if variant != 'replay_only' and volatility_scale is None:
+                estimator = current_volatility_scale(history)
+                result['volatility_estimator'] = estimator
+                volatility_scale = float(estimator['scale'])  # type: ignore[arg-type]
+            elif volatility_scale is not None:
+                result['volatility_estimator'] = {'estimator': 'explicit-fixed-scale', 'scale': volatility_scale}
             if time.perf_counter() >= deadline:
                 raise TimeoutError('history preparation budget exceeded')
             replay: dict[str, object] = {'insufficient': True}
@@ -442,7 +468,7 @@ class TimeMachine:
             if variant != 'replay_only':
                 simulation = simulate_trade(history, plan, trade_id, fee_rate=fee_rate,
                                             slippage_rate=slippage_rate, paths=paths,
-                                            volatility_scale=volatility_scale, deadline=deadline)
+                                            volatility_scale=volatility_scale if volatility_scale is not None else 1., deadline=deadline)
                 result['simulation'] = simulation
                 result.update(trade_verdict(simulation, replay, coin_flip_skip=coin_flip_skip))
             else:

@@ -344,3 +344,52 @@ def test_deadline_after_permissive_variant_result_still_skips(bars, monkeypatch)
         fee_rate=0, slippage_rate=0, rule_version='v1', variant='simulation_only')
     assert result['multiplier'] == 0 and result['verdict'] == 'SKIP'
     assert result['timed_out'] and alerts
+
+
+def test_current_volatility_ratio_responds_to_recent_regime_only(history):
+    from tradebot.analysis.timemachine import current_volatility_scale
+
+    baseline = current_volatility_scale(history)
+    source = history.standardized_ohlc.copy()
+    source[-288:, 3] *= 3
+    higher = current_volatility_scale(replace(history, standardized_ohlc=source))
+    assert higher['scale'] == pytest.approx(baseline['scale'] * 3)
+    assert higher['current_volatility'] == pytest.approx(baseline['current_volatility'] * 3)
+    assert higher['return_observations'] == 288
+    assert higher['window_end'] == END.isoformat()
+
+
+def test_current_volatility_future_append_invariance(bars):
+    from tradebot.analysis.timemachine import current_volatility_scale
+
+    original = current_volatility_scale(prepare_history(bars, 'BTC/USDT', END))
+    future = replace(bars[-1], ts=END, close=Decimal('NaN'))
+    appended = current_volatility_scale(prepare_history((*bars, future), 'BTC/USDT', END))
+    assert original == appended
+
+
+def test_zero_current_volatility_is_refused(history):
+    from tradebot.analysis.timemachine import current_volatility_scale
+
+    source = history.standardized_ohlc.copy()
+    source[-288:, 3] = 0
+    with pytest.raises(HistoryError, match='current volatility'):
+        current_volatility_scale(replace(history, standardized_ohlc=source))
+
+
+def test_checker_auto_volatility_is_logged_and_forwarded(bars, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import tradebot.analysis.timemachine as tm
+
+    monkeypatch.setattr(tm, 'time', SimpleNamespace(perf_counter=lambda: 0.))
+    simulate = Mock(return_value={'expected_net_r': .2, 'p05_r': -1., 'time_exit': .1,
+                                  'target_first': .5, 'stop_first': .4})
+    monkeypatch.setattr(tm, 'simulate_trade', simulate)
+    result = tm.TimeMachine(lambda message: None).check(
+        bars, 'BTC/USDT', END, ReplayPlan(100, 99, 101), 'auto-vol', lambda past: None,
+        fee_rate=.001, slippage_rate=.001, rule_version='v1', variant='simulation_only', volatility_scale=None)
+    assert result['multiplier'] == 1
+    assert result['volatility_estimator']['scale'] == simulate.call_args.kwargs['volatility_scale']
+    assert result['volatility_estimator']['return_observations'] == 288

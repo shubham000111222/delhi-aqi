@@ -33,7 +33,7 @@ async def run_window_studies(config: Config, execution: Mapping[str, Sequence[Ca
                              history: Mapping[str, Sequence[Candle]], *,
                              windows: Sequence[ResearchWindow], final_holdout_start: datetime,
                              fee_rate: float, slippage_rate: float, max_bars: int = 288,
-                             cost_stress: bool = True) -> dict[str, Any]:
+                             cost_stress: bool = True, volatility_scale: float | None = 1.) -> dict[str, Any]:
     """Independent cold-start portfolios per window; never concatenate their drawdowns.
 
     Conservative research screen: a variant must pass retention and actual modeled
@@ -54,7 +54,8 @@ async def run_window_studies(config: Config, execution: Mapping[str, Sequence[Ca
         for window in frozen:
             study = await run_engine_study(snapshot, execution, history, start=window.start, end=window.end,
                                            final_holdout_start=final_holdout_start, fee_rate=fee_rate,
-                                           slippage_rate=slippage_rate, max_bars=max_bars, cost_stress=cost_stress)
+                                           slippage_rate=slippage_rate, max_bars=max_bars, cost_stress=cost_stress,
+                                           volatility_scale=volatility_scale)
             studies.append({'start': window.start.isoformat(), 'end': window.end.isoformat(), 'study': study})
             if not study.get('complete'):
                 raise ValueError('incomplete research window: ' + str(study.get('error', 'cost stress failed')))

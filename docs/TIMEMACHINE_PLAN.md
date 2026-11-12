@@ -135,3 +135,8 @@ Reports preserve independent window drawdowns, not a fabricated concatenated cur
 - [x] Terminal censoring: reports preserve marked open positions and unresolved order/fill/submission flags. A fully consumed feed may be complete but comparison-ineligible. Retention/stress screens require uncensored baseline and variant; no automatic liquidation at invented prices.
 
 - [x] History-provider I/O is now included in the checker cooperative timer via lazy loading. Slow-provider returns skip before hashing/replay/bootstrap, provider exceptions use required alert callback, and repeated provider overruns degrade paths. Bridge validation, audit/notifier time and hard preemption still need end-to-end acceptance.
+
+## Current-volatility estimator
+
+- [x] Optional `--current-volatility` uses288 closed5m close-log returns (trailing24h, sample sigma/ddof1) relative to prepared history sigma. Zero/nonfinite estimates skip; future appends cannot change past ratios. Estimator revision, observations, cutoff and baseline/current sigma/scale are persisted with computed checks. Fixed-scale default remains1 unless the option is explicitly chosen.
+- [ ] Validate this predeclared reference estimator and horizon on recorded non-holdout inputs; no automatic performance claim. Add `--current-volatility` to either research CLI example to freeze this option across nominal/stressed windows. Changing it after inspecting outcomes is parameter selection, not fresh OOS evidence.

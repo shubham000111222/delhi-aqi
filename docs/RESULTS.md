@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine current-volatility scaling
+
+- Added fixed trailing24h estimator: sample standard deviation (ddof1) of the last288 closed5m close-log returns divided by the prepared history's sigma. Bootstrap OHLC is scaled by this ratio, preserving the joint sampled excursion model. No final-holdout fitting or future rows are used. Zero/nonfinite recent volatility refuses instead of inventing a scale.
+- Explicit research option `volatility_scale=None`, exposed as CLI `--current-volatility`, propagates unchanged through engine bindings, nominal/stressed studies and multi-window runs. Existing explicit fixed-scale defaults remain unchanged; replay-only does not estimate an unused simulation scale. Settings hashes record which option was requested; checker audit records estimator revision,288 observations, window end, baseline/current sigma and computed ratio.
+- Four new tests cover regime-sensitive scaling, exact future-append invariance, zero-vol refusal and checker provenance/argument forwarding. Full suite **1409 passed, 2 skipped**; Ruff/mypy/diff clean. This is a fixed reference estimator, not recorded-market calibration or OOS evidence; horizon selection, limit-entry parity, hard timing and live acceptance remain unfinished.
+
 ## Time Machine provider-inclusive cooperative deadline
 
 - Engine bridge now supplies history lazily to the checker. The checker starts its clock before invoking the provider, catches provider errors inside the required alert/error boundary and tests the deadline immediately on provider return, before preparation/hash/replay/bootstrap.

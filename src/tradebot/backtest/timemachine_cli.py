@@ -28,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--slippage-rate', type=float, required=True, help='checker adverse slippage assumption')
     parser.add_argument('--windows-file', type=Path, help='predeclared JSON list of 3..24 start/end windows; replaces --start/--end')
     parser.add_argument('--max-bars', type=int, default=288)
+    parser.add_argument('--current-volatility', action='store_true', help='use fixed trailing24h closed5m volatility ratio')
     parser.add_argument('--cost-stress', action='store_true', help='rerun all four variants at 2x modeled costs')
     parser.add_argument('--output', type=Path, required=True, help='new JSON evidence file; refuses overwrite')
     args = parser.parse_args(argv)
@@ -83,12 +84,14 @@ def main(argv: list[str] | None = None) -> int:
             result = asyncio.run(run_engine_study(config, execution, history, start=start, end=end,
                                                   final_holdout_start=holdout, fee_rate=args.fee_rate,
                                                   slippage_rate=args.slippage_rate, max_bars=args.max_bars,
-                                                  cost_stress=args.cost_stress))
+                                                  cost_stress=args.cost_stress,
+                                                  volatility_scale=None if args.current_volatility else 1.))
         else:
             result = asyncio.run(run_window_studies(config, execution, history, windows=windows,
                                                    final_holdout_start=holdout, fee_rate=args.fee_rate,
                                                    slippage_rate=args.slippage_rate, max_bars=args.max_bars,
-                                                   cost_stress=args.cost_stress))
+                                                   cost_stress=args.cost_stress,
+                                                  volatility_scale=None if args.current_volatility else 1.))
         args.output.parent.mkdir(parents=True, exist_ok=True)
         with args.output.open('x', encoding='utf-8') as stream:
             json.dump(result, stream, indent=2, default=str, allow_nan=False)
