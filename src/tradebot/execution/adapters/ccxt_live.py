@@ -404,8 +404,9 @@ class CcxtLiveAdapter(ExchangeAdapter):
                 raise ValueError("boolean fill total")
             filled = D(str(filled_raw if filled_raw is not None else 0))
             average = D(str(average_raw if average_raw is not None else 0))
-            if not filled.is_finite() or filled < self.seen_fills.get(order.client_order_id, ZERO):
-                raise ValueError("nonfinite or regressing quantity")
+            if (not filled.is_finite() or filled < max(order.filled_qty, self.seen_fills.get(order.client_order_id, ZERO))
+                    or filled > order.qty):
+                raise ValueError("nonfinite, regressing or excessive quantity")
             fee = order.fee
             if raw.get("fee") is not None:
                 fee_raw = raw["fee"].get("cost")
@@ -414,7 +415,7 @@ class CcxtLiveAdapter(ExchangeAdapter):
                 fee = D(str(fee_raw if fee_raw is not None else 0))
                 if not fee.is_finite() or fee < 0:
                     raise ValueError("invalid fee")
-            if not average.is_finite() or (filled > 0 and average <= 0):
+            if not average.is_finite() or average < 0 or (filled > 0 and average <= 0):
                 raise ValueError("invalid cumulative average")
         except (InvalidOperation, TypeError, ValueError, AttributeError) as exc:
             if self.killswitch is not None:
@@ -488,8 +489,8 @@ class CcxtLiveAdapter(ExchangeAdapter):
             raise PermanentExchangeError(f"invalid cumulative fill for {cid}: {reason}")
 
         quantity = fresh.filled_qty
-        if not quantity.is_finite() or quantity < already:
-            invalid("nonfinite or regressing quantity")
+        if not quantity.is_finite() or quantity < already or quantity > fresh.qty:
+            invalid("nonfinite, regressing or excessive quantity")
         delta = quantity - already
         if delta == 0:
             return

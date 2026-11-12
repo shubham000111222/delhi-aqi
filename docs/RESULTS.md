@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest pre-callback fill bounds pass (working branch)
+
+- Initial/polled CCXT observations now reject filled quantity above submitted quantity before cache mutation or callbacks. Cumulative quantity must not regress below either previously observed or successfully delivered quantity, preserving observations when callback delivery failed. Zero-fill averages cannot be negative. The callback emitter independently checks excessive quantity.
+- Full suite **1278 passed, 2 skipped**; Ruff, mypy and diff checks passed. Fake-exchange tests cover initial/polled overfills and a regressing poll after failed partial-fill delivery. Corrected the existing fee-test fixture to request its reported quantity rather than silently testing an overfill.
+- An actual venue overfill is not ignored as safe: it latches the durable observation hold and requires independent investigation; no invented corrected fill is booked. This does not establish authoritative trade identities, persisted observation watermarks, authenticated recovery or safe handling of true venue corrections. D–I remain incomplete; live gates stay blocked. Dashboard server remains on port 8000, paper/synthetic/read-only/1×, predating these changes; Arena browser access remains unresolved.
+
 ## Latest execution-total response validation (working branch)
 
 - Shared order-manager response/recovery consistency now requires an OrderStatus enum, finite Decimal quantity/fill/average/fee, positive submitted quantity, fill quantity within [0, submitted], nonnegative average/fee, positive average for nonzero fills, and finite positive optional order price. Invalid results follow the existing durable observation hold and conflict path without a resend.

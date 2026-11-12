@@ -300,7 +300,7 @@ class TestFillDetection:
 
     def test_the_fee_comes_from_the_venue_taker_fee(self):
         adapter, exchange = adapter_with()
-        asyncio.run(adapter.place_order(request()))
+        asyncio.run(adapter.place_order(request(qty=Decimal("0.01"))))
         fills: list[Any] = []
         adapter.on_fill = fills.append
         exchange.order_state["x1"].update({"status": "closed", "filled": 0.01, "average": 10000.0})
@@ -890,3 +890,47 @@ def test_cached_id_accepts_equivalent_rounded_wire_intent():
     assert result is original
     assert len(exchange.created) == 1
     assert not adapter.killswitch.store.has_execution_observation_fault()
+
+
+@pytest.mark.parametrize('initial', [True, False])
+def test_overfilled_observation_never_reaches_callback(initial):
+    adapter, exchange = adapter_with()
+    original = exchange.create_order
+    fills: list[Any] = []
+    adapter.on_fill = fills.append
+    if initial:
+        async def overfilled(*args, **kwargs):
+            raw = await original(*args, **kwargs)
+            return raw | {'filled': '100', 'average': '100'}
+        exchange.create_order = overfilled
+        with pytest.raises(PermanentExchangeError, match='invalid cumulative fill'):
+            asyncio.run(adapter.place_order(request()))
+    else:
+        asyncio.run(adapter.place_order(request()))
+        exchange.order_state['x1'].update(status='closed', filled='100', average='100')
+        with pytest.raises(PermanentExchangeError, match='invalid cumulative fill'):
+            asyncio.run(adapter.drain_pending())
+    assert not fills
+    assert adapter.orders['tb-abc123'].filled_qty == 0
+    assert adapter.killswitch.store.has_execution_observation_fault()
+    assert not adapter.killswitch.can_open_entries()
+
+
+def test_poll_cannot_erase_observed_but_undelivered_partial_fill():
+    adapter, exchange = adapter_with()
+    order = asyncio.run(adapter.place_order(request()))
+    exchange.order_state['x1'].update(status='partially_filled', filled='0.002', average='100')
+
+    def fail(fill):
+        raise RuntimeError('journal unavailable')
+
+    adapter.on_fill = fail
+    with pytest.raises(RuntimeError):
+        asyncio.run(adapter.drain_pending())
+    assert order.filled_qty == Decimal('0.002')
+    assert adapter.seen_fills[order.client_order_id] == 0
+    exchange.order_state['x1'].update(filled='0.001')
+    with pytest.raises(PermanentExchangeError, match='invalid cumulative fill'):
+        asyncio.run(adapter.drain_pending())
+    assert order.filled_qty == Decimal('0.002')
+    assert adapter.killswitch.store.has_execution_observation_fault()
