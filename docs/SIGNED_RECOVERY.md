@@ -153,3 +153,17 @@ assertion, **not the actual quantity**. Direct SQL, raw/custom adapters, untrust
 misconfigured independent processes and already in-flight orders can bypass the control.
 No authenticated multiplier increase/release workflow exists. Never edit SQLite to
 remove a reduction as a substitute for the missing recovery workflow.
+
+## Unresolved submission inspection (not recovery)
+
+PowerShell, with the virtual environment active:
+
+```powershell
+python -m tradebot pending-submissions --mode paper
+```
+
+Use the actual configured mode/database when investigating it. This command reads a bounded
+SQLite/WAL snapshot without releasing holds, acknowledging outcomes or resubmitting. Output
+may include private order/strategy identifiers; do not post it publicly without review.
+`identity_record_matches` only compares local records. Even an empty list is not proof of
+venue reconciliation. Do not delete submission or identity markers to bypass a hold.

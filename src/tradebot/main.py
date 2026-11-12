@@ -353,6 +353,20 @@ def cmd_venue_observe(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pending_submissions(args: argparse.Namespace) -> int:
+    """Inspect unresolved network intents without authorizing release or replay."""
+    from .execution.submission_inspection import SubmissionInspectionError, inspect_pending_submissions
+
+    cfg = _config(args)
+    try:
+        result = inspect_pending_submissions(Path(cfg.settings.db_path))
+    except SubmissionInspectionError as exc:
+        print(f"pending-submission inspection failed: {exc}", file=sys.stderr)
+        return 1
+    _print(result)
+    return 0
+
+
 def cmd_pending_fills(args: argparse.Namespace) -> int:
     """Inspect callback journal without modifying the database or authorizing recovery."""
     from .execution.fill_recovery import FillInspectionError, inspect_pending_fills
@@ -1037,6 +1051,7 @@ def build_parser() -> argparse.ArgumentParser:
     venue_observe = sub.add_parser("venue-observe", help="read venue balances and open orders (not reset or safety evidence)")
     venue_observe.add_argument("--compare-local", action="store_true", help="diagnose differences against local DB (read-only)")
 
+    sub.add_parser("pending-submissions", help="inspect unresolved submission intents (read-only)")
     sub.add_parser("pending-fills", help="inspect pending fill callbacks (read-only; not recovery evidence)")
 
     live_check = sub.add_parser("live-check", help="run every live-mode gate (never trades)")
@@ -2971,6 +2986,7 @@ def main(argv: list[str] | None = None) -> int:
         "run": cmd_run,
         "live-check": cmd_live_check,
         "venue-observe": cmd_venue_observe,
+        "pending-submissions": cmd_pending_submissions,
         "pending-fills": cmd_pending_fills,
         "status": cmd_status,
         "metrics": cmd_metrics,

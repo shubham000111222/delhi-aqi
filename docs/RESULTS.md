@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest submission inspection pass (working branch)
+
+- Added `python -m tradebot pending-submissions --mode paper` (or the configured mode) for read-only SQLite/WAL inspection of unresolved intents. A single read transaction bounds rows, individual records and combined pending/identity payload bytes; validates local identifiers/digests; and reports whether retained identity text matches. Missing/mismatching identity is diagnostic, never recovery authority. No database is created when absent.
+- Full suite **1285 passed, 2 skipped**; Ruff, mypy and diff checks passed. Seven tests cover WAL-visible records, missing identity, malformed digest, all size limits, absent database and CLI output with holds preserved.
+- Request snapshots can contain local strategy/order identifiers: treat command output as sensitive operational diagnostics. A matching record or empty list does not establish exchange coverage, execution absence, safe replay or permission to reset. Authenticated recovery and phases D–I remain unfinished; live gates remain blocked. Dashboard server continues port 8000 in paper/synthetic/read-only/1×; user-facing Arena access remains unresolved.
+
 ## Latest pre-callback fill bounds pass (working branch)
 
 - Initial/polled CCXT observations now reject filled quantity above submitted quantity before cache mutation or callbacks. Cumulative quantity must not regress below either previously observed or successfully delivered quantity, preserving observations when callback delivery failed. Zero-fill averages cannot be negative. The callback emitter independently checks excessive quantity.
