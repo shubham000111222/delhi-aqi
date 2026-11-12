@@ -19,7 +19,7 @@ For the full Windows installation, implementation and validation procedure, see
 For the consolidated item-by-item implementation and external-evidence backlog, see
 [`REMAINING_WORK.md`](REMAINING_WORK.md). It does not mark unfinished work complete.
 
-**Last updated:** 2026-11-02 · **Suite:** 1383 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-02 · **Suite:** 1389 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -271,3 +271,6 @@ Fill this in as phases complete — it is what `docs/RESULTS.md` is built from.
 - [ ] Complete default limit-order entry semantics and end-to-end replay parity; reference recomputation is not timing-certified.
 
 - [x] Independent simulation-only/replay-only/combined checker execution modes and predeclared replay-only research policy; unused evidence not computed.
+
+- [x] Concrete isolated four-engine Time Machine runner and archive-backed no-overwrite JSON research CLI; actual hashes, per-timeframe bindings, disabled zero-trade retention and bounded candidate evidence.
+- [ ] Acquire verified data and execute meaningful recorded OOS comparisons; cold-start/modeled-fill plumbing tests are not evidence of an edge.

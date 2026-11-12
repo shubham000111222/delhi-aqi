@@ -10,7 +10,8 @@ Updated 2026-11-02. Applies to working branch `arena/200089ad-delhi-aqi`, draft 
 - [x] Bounded decision-time Parquet history provider wired through the research engine bridge; no resampling, synthetic fallback or gap filling. Real archive provenance/coverage and latency remain unverified.
 - [x] Deterministic existing-strategy context/replay bindings with versioned settings and market EMA plan parity.
 - [ ] Complete strategy-specific limit-order entry/fill semantics, default-strategy replay parity and stateful ML support; existing bindings explicitly refuse unsupported entries.
-- [ ] Phase 6 Monte Carlo, decision rules, risk-reducing integration, alert/error handling, cached 250 ms budget and four-variant point-in-time OOS retention study.
+- [x] Phase 6 standalone Monte Carlo/verdicts, simulated risk-reducing engine bridge, bounded caches/cooperative deadlines, alert callbacks, concrete four-engine research runner and evidence CLI.
+- [ ] Phase 6 hard end-to-end250ms acceptance, external alert verification, supported entry/exit parity and meaningful recorded four-variant OOS retention study.
 - [x] Phase 8 research-engine audit persistence, dashboard check panel beside Trades, computed order tickets and bounded daily skipped/down lists. External alert delivery and live integration remain unverified.
 - [ ] Verify on real recorded OOS data without final-holdout tuning before enabling; otherwise keep disabled.
 

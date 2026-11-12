@@ -453,7 +453,7 @@ class TimeMachine:
         except Exception as exc:  # noqa: BLE001 - every invalid/error outcome must skip
             timed_out = isinstance(exc, TimeoutError)
             self.overruns = self.overruns + 1 if timed_out else 0
-            result.update(verdict='SKIP', multiplier=0., reason=type(exc).__name__ + ': ' + str(exc), timed_out=timed_out)
+            result.update(verdict='SKIP', multiplier=0., check_failed=True, reason=type(exc).__name__ + ': ' + str(exc), timed_out=timed_out)
             result['alert_delivered'] = self._notify(f'Time Machine {trade_id}: SKIP: {result["reason"]}')
             if self.overruns >= 3 and self.paths == 10000 and variant != 'replay_only':
                 self.paths = 5000

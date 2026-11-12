@@ -91,3 +91,23 @@ latency acceptance or a performance guarantee. The 250 ms gate remains unfulfill
 - [x] Engine bridge/checker mode isolation: simulation-only bypasses replay, replay-only bypasses bootstrap (0 paths), combined remains default; baseline has no hook. Replay-only requires 20 completed triggers and applies the same fixed mean/tail/time/coin-flip thresholds to replay statistics; insufficient evidence skips. This is a predeclared research convention, not an enabled live rule.
 - [ ] Execute actual isolated engine/store/portfolio runs per variant on identical point-in-time recorded inputs; callbacks/declarations alone are not proof. No final-holdout tuning.
 - [ ] Resolve limit fills/queue position and 120-second timeout using adequate finer event data:5m bars cannot verify these semantics.
+
+## Four-engine study implementation
+
+- [x] Concrete independent Engine/ReplayFeed/PaperAdapter/store/clock/ledger/config runs, no injected result callback; actual frozen input/settings hashes and strategy+timeframe binding selection. Cold-start windows and modeled books/fills are explicit limitations.
+- [x] Archive-backed research CLI, bounded parameterized pre-holdout queries, required checker cost assumptions, no-overwrite JSON evidence and no enablement path. Invalid/truncated checks suppress retention. Tests of zero-trade windows only establish wiring, never an edge.
+- [ ] Real recorded OOS data, meaningful trades, limit-entry expiry/queue parity, calibrated costs and hard latency acceptance remain unverified.
+
+### Windows11 / PowerShell research CLI
+
+Use `python -m tradebot.backtest.timemachine_cli --help` from the repository with the virtual environment active. Define `$ArchiveRoot`, `$StudyStart`, `$StudyEnd`, `$HoldoutStart`, `$FeeRate` and `$SlippageRate` from your recorded dataset and documented, frozen research assumptions; timestamps must include a timezone. Checker fee/slippage rates are separate from the unchanged engine paper-execution settings; neither is verified venue cost evidence. Do not change the default limit strategies to market just to produce a passing study.
+
+```powershell
+python -m tradebot.backtest.timemachine_cli `
+  --config-dir config --archive-root $ArchiveRoot `
+  --start $StudyStart --end $StudyEnd --holdout-start $HoldoutStart `
+  --fee-rate $FeeRate --slippage-rate $SlippageRate `
+  --output reports/timemachine-study.json
+```
+
+The output refuses overwrite, always reports `filter_enabled=false` and `provenance_verified=false`, and includes retention arithmetic, input/settings hashes, per-run diagnostics and bounded candidate audit records. An incomplete study exits2. A successful command is research execution, not promotion authorization or a profit claim.

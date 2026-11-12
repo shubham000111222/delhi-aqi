@@ -558,7 +558,7 @@ class Engine:
                 raise ValueError("candidate result exceeds audit limit")
         except Exception as exc:  # noqa: BLE001 - research errors never permit entry
             multiplier = ZERO
-            payload = {"trade_id": signal.id, "multiplier": 0, "verdict": "SKIP",
+            payload = {"trade_id": signal.id, "multiplier": 0, "verdict": "SKIP", "check_failed": True,
                        "reason": type(exc).__name__ + ": " + str(exc)}
         try:
             self._log("timemachine_check", {**payload, "research_only": True}, actor="analysis")

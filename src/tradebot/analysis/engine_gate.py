@@ -30,7 +30,7 @@ class TimeMachineEngineGate:
 
     def __init__(self, machine: TimeMachine,
                  history: Callable[[str, datetime], Sequence[Candle]],
-                 bindings: Mapping[str, ReplayBinding], *, fee_rate: float,
+                 bindings: Mapping[str | tuple[str, str], ReplayBinding], *, fee_rate: float,
                  slippage_rate: float, volatility_scale: float = 1., coin_flip_skip: bool = True,
                  variant: str = 'both'):
         if variant not in ('both', 'simulation_only', 'replay_only'):
@@ -49,7 +49,7 @@ class TimeMachineEngineGate:
             raise ValueError('Time Machine research bridge supports market entries only')
         if signal.ts > decision_time:
             raise ValueError('candidate timestamp is in the future')
-        binding = self.bindings.get(signal.strategy)
+        binding = self.bindings.get((signal.strategy, signal.timeframe), self.bindings.get(signal.strategy))
         if binding is None or not binding.version:
             raise ValueError('explicit versioned strategy replay binding required')
         plan = ReplayPlan(float(mark), float(signal.stop), float(signal.target),

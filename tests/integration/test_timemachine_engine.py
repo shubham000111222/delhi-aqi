@@ -217,3 +217,18 @@ async def test_archive_provider_is_consumed_by_real_engine_gate(engine, signal, 
     assert 'insufficient closed-bar lookback' in payload['reason']
     assert payload['trade_id'] == signal.id and alerts
     assert {p: p.read_bytes() for p in archive.root.rglob('*.parquet')} == files_before
+
+
+async def test_bridge_selects_timeframe_specific_replay_binding(engine, signal):
+    from tradebot.analysis.engine_gate import ReplayBinding, TimeMachineEngineGate
+
+    checker = Mock()
+    checker.check.return_value = {'trade_id': signal.id, 'multiplier': .5}
+    wrong = Mock()
+    correct = Mock()
+    engine.set_research_candidate_gate(TimeMachineEngineGate(
+        checker, lambda *args: (), {'test': ReplayBinding(wrong, 'fallback'),
+        ('test', signal.timeframe): ReplayBinding(correct, 'exact')}, fee_rate=0, slippage_rate=0))
+    assert await engine._research_candidate_multiplier(signal, Decimal('100')) == Decimal('.5')
+    args, kwargs = checker.check.call_args
+    assert args[-1] is correct and kwargs['rule_version'] == 'exact'

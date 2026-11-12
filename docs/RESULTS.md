@@ -9,6 +9,14 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine concrete four-engine runner and evidence CLI
+
+- Added `backtest/timemachine_engine_study.py`, executing all four variants through actual Engine/ReplayFeed/PaperAdapter with fresh config, in-memory store, simulated clock, ledger and strategies each time. Temporary state/heartbeat/report paths isolate runs; no live mode. Inputs are frozen, cutoff-filtered and hashed internally, with unchanged config/cost assumptions across variants. Bindings now select by strategy AND timeframe to avoid applying a15m replay rule to a1h candidate.
+- Computes closed-trade net R and marked equity comparisons, retains bounded candidate audit records in returned evidence, and suppresses retention when operational checker failures or incomplete check coverage occur. Explicit failure flags distinguish invalid checks from ordinary policy skips. No-filter has no hook; independent mode selection attaches only to the three filtered runs.
+- Added `python -m tradebot.backtest.timemachine_cli`: parameterized bounded archive queries before study-end/holdout boundary, aware timestamp validation, explicit checker cost assumptions and no-overwrite JSON evidence output. No evidence file or run can enable trading. Provenance remains unverified.
+- Six new cases test real four-engine state isolation, disabled zero-trade retention, future append hash invariance, holdout/live rejection before building engines, timeframe-specific binding precedence, and CLI evidence/no-overwrite/naive refusal (some cases exercise multiple assertions). Full suite **1389 passed, 2 skipped**, Ruff/mypy/diff clean.
+- These integration windows are intentionally small plumbing fixtures with no meaningful trades: NOT OOS strategy evidence. Runs cold-start indicators at window start; books/fills are modeled by existing ReplayFeed/PaperAdapter, and engine-vs-checker costs are separate explicit assumptions. Default limit strategies remain unsupported by the filter, ML/stateful bindings remain refused, provider/checker budgets are not hard end-to-end timing guarantees. No venue provenance, limit queue/120-second expiry parity, real OOS advantage, production promotion or live readiness established.
+
 ## Time Machine research ablation modes
 
 - Checker and simulated engine bridge now explicitly select `simulation_only`, `replay_only` or `both` (default unchanged). Simulation-only does not call the replay rule; replay-only does not run bootstrap paths and reports path_count=0. Omitted evidence is omitted, not fabricated as a computed result. Unknown modes skip and alert.
