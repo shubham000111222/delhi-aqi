@@ -4,6 +4,16 @@ Updated 2026-11-02. Applies to working branch `arena/200089ad-delhi-aqi`, draft 
 
 **Status:** [x] implemented with local automated tests; [ ] incomplete. **External** means sandbox tests cannot establish acceptance. Live trading and live/testnet resets remain blocked. Do not manually delete holds to make checks pass.
 
+## New pre-trade Time Machine requirement
+
+- [x] Phase 5 bar/return and generic replay foundations, outside risk, tested on synthetic fixtures.
+- [ ] Complete strategy-specific replay entry/stop/target adapters.
+- [ ] Phase 6 Monte Carlo, decision rules, risk-reducing integration, alert/error handling, cached 250 ms budget and four-variant point-in-time OOS retention study.
+- [ ] Phase 8 check persistence, Trades dashboard, order tickets and daily reports.
+- [ ] Verify on real recorded OOS data without final-holdout tuning before enabling; otherwise keep disabled.
+
+Full criteria and honest limits: [TIMEMACHINE_PLAN.md](TIMEMACHINE_PLAN.md).
+
 ## D — execution, authority and durable recovery (finish before E–I integration)
 
 - [x] Confirm CCXT cancellation through a follow-up order query and deliver final observed fills; failed or unconfirmed outcomes latch the durable observation fault. Venue consistency and restart-safe cancellation recovery remain unverified.

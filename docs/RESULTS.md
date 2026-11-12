@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine Phase 5 foundation (working branch)
+
+- Added analysis/timemachine.py outside risk: closed 5m point-in-time history (60-day default, 30-day minimum), strict OHLCV/continuity validation, immutable standardized OHLC returns, full-precision input hash and deterministic trade seed. Future rows are excluded before value/hash processing.
+- Added historical rule replay using closed-prefix views, 60–180 days of bars, next-open market fills, long/short stops/targets, fees/slippage, gap fills, conservative stop-first ambiguous bars, censored horizons and a 20-completed-trigger sufficiency label. Reports net mean/median/p05 R and expected holding minutes. No-trigger metrics are null.
+- Full suite **1298 passed, 2 skipped**; Ruff, mypy and diff checks passed. Thirteen synthetic-fixture tests cover future exclusion, immutable inputs, invalid history, prefix bounds, costs, trigger sufficiency, long/short ambiguity, gap stops, censored horizons and no analysis/AI imports from risk.
+- This is not the full requested feature: Monte Carlo, verdicts, 250 ms control, cross-check cache, four-variant OOS study, strategy replay adapters, alerts and Phase 8 persistence/dashboard/report integration remain unbuilt. No filter is enabled and no performance benefit or first-touch accuracy is claimed. README documents recent-data, shared-input, news/regime and intrabar limitations; detailed pending work is in TIMEMACHINE_PLAN.md. Live gates remain blocked.
+
 ## Latest submission inspection pass (working branch)
 
 - Added `python -m tradebot pending-submissions --mode paper` (or the configured mode) for read-only SQLite/WAL inspection of unresolved intents. A single read transaction bounds rows, individual records and combined pending/identity payload bytes; validates local identifiers/digests; and reports whether retained identity text matches. Missing/mismatching identity is diagnostic, never recovery authority. No database is created when absent.

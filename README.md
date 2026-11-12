@@ -304,3 +304,18 @@ you have run it against testnet.
 ## Licence
 
 MIT. Educational project — not investment advice, no signals offered.
+
+### Pre-trade Time Machine (phased, not enabled)
+
+Phase 5 foundations live in `src/tradebot/analysis/timemachine.py`: closed 5m-bar
+validation, standardized OHLC returns and point-in-time historical rule replay.
+See [the implementation checklist](docs/TIMEMACHINE_PLAN.md) for the pending Phase 6
+Monte Carlo/decision/OOS study and Phase 8 logging/dashboard/report integration.
+The risk package imports no analysis code; no pre-trade gate is enabled yet.
+
+**Honest limits:** this uses only recent data and cannot foresee news, halts, outages
+or regime changes. Simulation and replay share data, so agreement is weaker evidence
+than it looks. OHLC bars cannot reveal which level was touched first when both stop
+and target occur inside one bar; replay flags ambiguity and assumes stop-first.
+Sampled intrabar paths will be modeled assumptions, not known execution order.
+These odds are a sanity check, never a promise of profit.
