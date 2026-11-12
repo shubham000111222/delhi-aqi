@@ -115,3 +115,19 @@ The output refuses overwrite, always reports `filter_enabled=false` and `provena
 - [x] Study integrity: contiguous valid execution coverage for every configured symbol, aligned bounds, final-close multi-symbol drain and expected emitted/processed base-bar count. Incomplete/lockdown runs cannot pass retention.
 
 - [x] Optional actual2x modeled-cost rerun across all four variants with fresh engines/portfolios, doubled paper fees/adverse market slippage and checker cost assumptions, unchanged strategy parameters and same input hash. `stress_survivors` additionally requires nominal retention and nonzero profitable stress trades without check failures. Still no verified venue costs or promotion authority.
+
+## Predeclared multi-window research
+
+- [x] `run_window_studies` and CLI `--windows-file` execute3–24 ordered non-overlapping pre-holdout windows, frozen settings with no refit/best-window selection. Every window must meet nominal retention and profitable modeled2x cost stress for the conservative research screen. Without `--cost-stress`, research screens cannot pass. Never a production gate or verified OOS proof.
+
+The JSON manifest is a list of objects with aware ISO `start` and `end` strings, fixed before evaluation. It replaces `--start`/`--end`; do not edit the declared windows after examining outcomes to obtain a passing screen. Define `$WindowsFile` and the other variables from documented research inputs, then use PowerShell:
+
+```powershell
+python -m tradebot.backtest.timemachine_cli `
+  --config-dir config --archive-root $ArchiveRoot `
+  --windows-file $WindowsFile --holdout-start $HoldoutStart `
+  --fee-rate $FeeRate --slippage-rate $SlippageRate --cost-stress `
+  --output reports/timemachine-windows.json
+```
+
+Reports preserve independent window drawdowns, not a fabricated concatenated curve. Source-data provenance, real meaningful OOS trades, entry/expiry parity and latency still require acceptance. No filter is enabled by a research screen.

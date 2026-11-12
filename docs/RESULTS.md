@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine predeclared multi-window studies
+
+- Added `backtest/timemachine_windows.py` and CLI `--windows-file` for 3–24 predeclared ordered, non-overlapping windows entirely before final holdout. Windows share frozen strategy/risk/settings and input containers; no refitting or best-window selection. Each window uses the concrete isolated engines and optional actual cost-stress rerun.
+- Reports per-window evidence without inventing pooled drawdown across independently reset portfolios. Conservative `research_screen_passed` requires nominal retention and profitable modeled2x-cost survival in EVERY window. Missing stress evidence cannot pass; incomplete windows or changed settings fail closed. No automatic activation, provenance attestation or substitute promotion gate.
+- CLI manifest is capped16KiB, refuses mixed single-window arguments, validates aware cutoffs before reading archive and retains bounded/no-overwrite evidence output. Eight new cases cover five invalid-window conditions, real three-window zero-trade engines, mocked all-window failure/settings checks and real manifest CLI execution. Full suite **1401 passed, 2 skipped**; Ruff/mypy/diff clean.
+- All real-engine fixtures here are short plumbing windows without meaningful trades, NOT the required recorded OOS studies or approximately10% net edge. Cold starts, modeled books/fills, unsupported default limit entries and unverified venue costs/data remain limitations. All filters stay disabled and holdout_used remains false.
+
 ## Time Machine actual modeled-cost stress rerun
 
 - Added optional `cost_stress=True` / research CLI `--cost-stress`: executes four additional fresh engines with doubled paper fees and adverse modeled market slippage via the existing stress_config implementation. Checker fee/slippage assumptions are doubled too; frozen strategy parameters are not refit. No post-hoc P&L subtraction or nominal ending-capital reuse.
