@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine study coverage and completion safety
+
+- Research runner now requires aligned study boundaries and contiguous, valid OHLCV execution coverage for every configured symbol from start through the final close. Missing symbols, gaps/duplicates, NaNs and invalid prices refuse before building engines.
+- Fixed the final-close boundary: prefiltered finite feeds now drain fully instead of stopping after the first symbol at the shared end timestamp. Every variant must emit AND process the expected base-candle count; incomplete runs and L3 lockdown return incomplete evidence with retention disabled. Two-symbol integration fixtures now assert all40 base bars are processed per variant.
+- New failure-injection tests verify early exit cannot pass and missing-symbol/gap/NaN input never reaches Engine.build. Full suite **1391 passed, 2 skipped**; Ruff/mypy/diff passed. This is study integrity hardening, not real recorded-data OOS evidence, execution parity or enablement.
+
 ## Time Machine concrete four-engine runner and evidence CLI
 
 - Added `backtest/timemachine_engine_study.py`, executing all four variants through actual Engine/ReplayFeed/PaperAdapter with fresh config, in-memory store, simulated clock, ledger and strategies each time. Temporary state/heartbeat/report paths isolate runs; no live mode. Inputs are frozen, cutoff-filtered and hashed internally, with unchanged config/cost assumptions across variants. Bindings now select by strategy AND timeframe to avoid applying a15m replay rule to a1h candidate.

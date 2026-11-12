@@ -111,3 +111,5 @@ python -m tradebot.backtest.timemachine_cli `
 ```
 
 The output refuses overwrite, always reports `filter_enabled=false` and `provenance_verified=false`, and includes retention arithmetic, input/settings hashes, per-run diagnostics and bounded candidate audit records. An incomplete study exits2. A successful command is research execution, not promotion authorization or a profit claim.
+
+- [x] Study integrity: contiguous valid execution coverage for every configured symbol, aligned bounds, final-close multi-symbol drain and expected emitted/processed base-bar count. Incomplete/lockdown runs cannot pass retention.
