@@ -152,3 +152,5 @@ Reports preserve independent window drawdowns, not a fabricated concatenated cur
 - [x] Research evidence publication is strict JSON,64MiB bounded, file-fsynced and atomically no-clobber installed. Unsupported hard-link filesystems fail closed; partial/scratch files are not published evidence. Windows filesystem support, power-loss durability and directory permissions remain external acceptance items.
 
 - [x] Evidence/settings identity includes bounded local Python-source digest and file manifest, checked after each engine and across nominal/stressed runs. Dependencies/interpreter, privileged mutation and venue/OOS provenance remain outside this fingerprint.
+
+- [x] Engine-boundary verdict contract: PASS1/SIZE DOWN0.5/SKIP0 only; missing/contradictory verdicts, malformed flags, positive failed/timed-out results and enablement claims skip. Does not authenticate caller evidence or bypass risk.

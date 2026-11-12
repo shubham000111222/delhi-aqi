@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Strict engine candidate-result contract
+
+- Simulated engine hook now requires canonical verdict/multiplier consistency: PASS=1, SIZE DOWN=0.5, SKIP=0. Missing/unknown/contradictory verdicts fail closed with audited SKIP/check_failed instead of relying only on numeric bounds.
+- Failure/timeout flags must be actual booleans and cannot accompany positive size. Research results cannot assert filter_enabled=true (or malformed nonboolean enablement). Ordinary risk approval remains mandatory after valid reductions; no new live enablement path or imported analysis dependency in risk.
+- Eleven new integration cases cover contradictory/missing/unknown verdicts, failure/timeout with positive size, malformed flags and attempted enablement. Existing valid/mock payloads now use canonical verdicts. Full suite **1456 passed, 2 skipped**, Ruff/mypy/diff clean. A consistent caller payload still is not authenticated research evidence; numerical validation/provenance/real OOS and latency acceptance remain separate gates.
+
 ## Research Python-source identity
 
 - Studies now fingerprint exact local tradebot Python-source bytes and relative file names, include the digest in settings identity, and retain the file/hash manifest in evidence. Content/name changes invalidate identity regardless of modification timestamps or absolute checkout location.

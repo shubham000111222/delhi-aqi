@@ -554,6 +554,17 @@ class Engine:
             multiplier = D(str(value))
             if not multiplier.is_finite() or multiplier not in (ZERO, D("0.5"), D("1")):
                 raise ValueError("candidate multiplier outside research bounds")
+            expected = {"PASS": D("1"), "SIZE DOWN": D("0.5"), "SKIP": ZERO}
+            verdict = payload.get("verdict")
+            if not isinstance(verdict, str) or verdict not in expected or expected[verdict] != multiplier:
+                raise ValueError("candidate verdict and multiplier disagree")
+            for flag in ("check_failed", "timed_out"):
+                if flag in payload and type(payload[flag]) is not bool:
+                    raise ValueError("invalid candidate failure flag")
+                if payload.get(flag) and multiplier != ZERO:
+                    raise ValueError("failed candidate check cannot permit size")
+            if payload.get("filter_enabled", False) is not False:
+                raise ValueError("research result cannot claim filter enablement")
             if len(json.dumps(payload, allow_nan=False, default=str).encode()) > 65536:
                 raise ValueError("candidate result exceeds audit limit")
         except Exception as exc:  # noqa: BLE001 - research errors never permit entry

@@ -30,7 +30,8 @@ def signal():
 
 @pytest.mark.parametrize('multiplier', [0, .5, 1])
 async def test_valid_multipliers_are_audited(engine, signal, multiplier):
-    engine.set_research_candidate_gate(lambda s, now, mark: {'trade_id': s.id, 'multiplier': multiplier})
+    engine.set_research_candidate_gate(lambda s, now, mark: {'trade_id': s.id, 'multiplier': multiplier,
+        'verdict': {0: 'SKIP', .5: 'SIZE DOWN', 1: 'PASS'}[multiplier]})
     assert await engine._research_candidate_multiplier(signal, Decimal('100')) == Decimal(str(multiplier))
     rows = [row for row in engine.store.events() if row['kind'] == 'timemachine_check']
     assert len(rows) == 1
@@ -54,7 +55,7 @@ async def test_wrong_trade_and_exception_skip(engine, signal):
 
 
 async def test_audit_failure_holds_entries(engine, signal, monkeypatch):
-    engine.set_research_candidate_gate(lambda s, *args: {'trade_id': s.id, 'multiplier': 1})
+    engine.set_research_candidate_gate(lambda s, *args: {'trade_id': s.id, 'multiplier': 1, 'verdict': 'PASS'})
     monkeypatch.setattr(engine, '_log', Mock(side_effect=OSError('disk unavailable')))
     assert await engine._research_candidate_multiplier(signal, Decimal('100')) == 0
     assert not engine.killswitch.can_open_entries()
@@ -67,13 +68,13 @@ async def test_wall_clock_attachment_refused(engine):
 
 
 async def test_mode_change_after_attachment_skips(engine, signal):
-    engine.set_research_candidate_gate(lambda s, *args: {'trade_id': s.id, 'multiplier': 1})
+    engine.set_research_candidate_gate(lambda s, *args: {'trade_id': s.id, 'multiplier': 1, 'verdict': 'PASS'})
     engine.cfg.settings.mode = Mode.LIVE
     assert await engine._research_candidate_multiplier(signal, Decimal('100')) == 0
 
 
 async def test_skip_precedes_risk_approval(engine, signal, monkeypatch):
-    engine.set_research_candidate_gate(lambda s, *args: {'trade_id': s.id, 'multiplier': 0})
+    engine.set_research_candidate_gate(lambda s, *args: {'trade_id': s.id, 'multiplier': 0, 'verdict': 'SKIP'})
     monkeypatch.setattr(engine, 'market_session_note', lambda: None)
     risk = Mock(side_effect=AssertionError('risk must not run after skip'))
     monkeypatch.setattr(engine.risk, 'approve_entry', risk)
@@ -84,7 +85,8 @@ async def test_skip_precedes_risk_approval(engine, signal, monkeypatch):
 
 @pytest.mark.parametrize('multiplier', [.5, 1])
 async def test_reduction_is_passed_to_unchanged_risk(engine, signal, monkeypatch, multiplier):
-    engine.set_research_candidate_gate(lambda s, *args: {'trade_id': s.id, 'multiplier': multiplier})
+    engine.set_research_candidate_gate(lambda s, *args: {'trade_id': s.id, 'multiplier': multiplier,
+        'verdict': {0: 'SKIP', .5: 'SIZE DOWN', 1: 'PASS'}[multiplier]})
     monkeypatch.setattr(engine, 'market_session_note', lambda: None)
     from tradebot.risk.engine import RiskContext
 
@@ -127,7 +129,7 @@ async def test_bridge_forwards_actual_plan_identity_cutoff_and_costs(engine, sig
     checker = Mock()
     def checked(provider, *args, **kwargs):
         provider()
-        return {'trade_id': signal.id, 'multiplier': .5, 'verdict': 'DOWN'}
+        return {'trade_id': signal.id, 'multiplier': .5, 'verdict': 'SIZE DOWN'}
 
     checker.check.side_effect = checked
 
@@ -227,7 +229,7 @@ async def test_bridge_selects_timeframe_specific_replay_binding(engine, signal):
     from tradebot.analysis.engine_gate import ReplayBinding, TimeMachineEngineGate
 
     checker = Mock()
-    checker.check.return_value = {'trade_id': signal.id, 'multiplier': .5}
+    checker.check.return_value = {'trade_id': signal.id, 'multiplier': .5, 'verdict': 'SIZE DOWN'}
     wrong = Mock()
     correct = Mock()
     engine.set_research_candidate_gate(TimeMachineEngineGate(
@@ -284,3 +286,22 @@ async def test_archive_provider_exception_uses_required_checker_alert_and_audit(
     payload = engine.store.events(kinds=['timemachine_check'])[0]['payload']
     assert payload['check_failed'] and payload['alert_delivered']
     assert payload['rule_version'] == 'v1' and 'archive unavailable' in alerts[0]
+
+
+@pytest.mark.parametrize('change', [
+    {'verdict': 'SKIP'}, {'verdict': 'SIZE DOWN'}, {'verdict': 'UNKNOWN'}, {'verdict': None},
+    {'check_failed': True}, {'timed_out': True}, {'timed_out': 'yes'},
+    {'check_failed': 1}, {'filter_enabled': True}, {'filter_enabled': 0},
+])
+async def test_inconsistent_or_failed_checker_result_cannot_permit_size(engine, signal, change):
+    payload = {'trade_id': signal.id, 'multiplier': 1, 'verdict': 'PASS', **change}
+    engine.set_research_candidate_gate(lambda *args: payload)
+    assert await engine._research_candidate_multiplier(signal, Decimal('100')) == 0
+    recorded = engine.store.events(kinds=['timemachine_check'])[0]['payload']
+    assert recorded['verdict'] == 'SKIP' and recorded['multiplier'] == 0
+    assert recorded['check_failed']
+
+
+async def test_missing_verdict_cannot_permit_size(engine, signal):
+    engine.set_research_candidate_gate(lambda *args: {'trade_id': signal.id, 'multiplier': 1})
+    assert await engine._research_candidate_multiplier(signal, Decimal('100')) == 0
