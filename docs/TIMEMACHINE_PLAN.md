@@ -24,13 +24,13 @@ existing strategy is safe or profitable. Risk package must never import analysis
 ## Phase 6 — pending, filter stays disabled
 
 - [ ] Cached standardized returns keyed by symbol, as-of window, input hash and settings.
-- [ ] Vectorized 10,000-path volatility-scaled block bootstrap (blocks 6–12 bars);
+- [x] Standalone vectorized 10,000-path volatility-scaled block bootstrap (blocks 6–12 bars);
   deterministic seed, sampled intrabar path assumptions, fees/slippage/gap exits.
 - [ ] Define and validate horizon and current-volatility estimator without final-holdout
   tuning. Sampled intrabar ordering is modeled uncertainty, never known first touch.
-- [ ] Output target/stop/time probabilities, net expected/median/p05 R, expected holding
-  time and side-by-side replay statistics plus input/seed/path provenance.
-- [ ] Risk-reducing verdicts only: PASS 1.0 when E[R] >= .10 and replay insufficient or
+- [x] Standalone simulation output: target/stop/time probabilities, net expected/median/p05 R, expected holding
+  time and input/seed/path provenance. Side-by-side orchestration remains pending.
+- [x] Standalone risk-reducing verdict function: PASS 1.0 when E[R] >= .10 and replay insufficient or
   nonnegative; SIZE DOWN .5 for 0 < E[R] < .10 or sign disagreement; SKIP 0 for E[R] <= 0,
   p05 < -1.5R, or time-exit probability > .60 with E[R] < .05. SKIP conditions take
   precedence over sign disagreement. |E[R]| < .05 is labelled coin flip with configured
@@ -43,8 +43,8 @@ existing strategy is safe or profitable. Risk package must never import analysis
   backtester with decision-time data only, identical costs/capital and untouched final
   holdout. Retain only if OOS expectancy improves or max DD falls while keeping at least
   50% of baseline trades; otherwise disable. No fabricated real OOS evidence.
-- [ ] Tests for Monte Carlo determinism, symmetric random-walk probabilities, strictly
-  adverse costs, prefix invariance, multiplier bounds, failure-skip and measured latency.
+- [x] Core tests for Monte Carlo determinism, symmetric random-walk probabilities, adverse costs and verdict multiplier bounds.
+- [ ] Complete end-to-end prefix-invariance, failure-skip alerts and enforced latency tests.
 
 ## Phase 8 — pending integration
 
@@ -63,3 +63,7 @@ Simulation and replay share data, so agreement is weaker evidence than independe
 confirmation. OHLC cannot prove first-touch order; sampled intrabar paths are assumptions.
 Odds are a sanity check, never a profit promise. Foundation tests are synthetic fixtures,
 not venue/OOS certification. No strategy validation or live execution is enabled here.
+
+Core-only timing observed in the sandbox: 10,000 paths, wide barriers, 48-bar horizon
+56.11 ms; 288-bar horizon 257.58 ms. These are single measurements, not end-to-end
+latency acceptance or a performance guarantee. The 250 ms gate remains unfulfilled.

@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine standalone Monte Carlo/verdict core (working branch)
+
+- Added deterministic 10,000-path (or explicitly 5,000-path) block bootstrap using 6–12-bar blocks of standardized joint OHLC returns with explicit volatility scaling. Simulated stops gap-fill at open; targets rest at target; entry/stop/time slippage and two-leg fees reduce net R. Unknown dual-touch ordering uses a fair random draw and is counted, never marked verified. Returns probabilities, net R statistics, expected holding time and input/seed/path provenance.
+- Added standalone fixed-threshold PASS/SIZE DOWN/SKIP logic. Mandatory nonpositive-expectancy/tail/time-exit skips override disagreement; coin-flip skip defaults on and can only reduce risk. Invalid metrics return SKIP. The function does not authorize execution and the filter remains disabled.
+- Full suite **1311 passed, 2 skipped**; Ruff, mypy and diff checks passed. Added 13 core tests including seed identity, costs, symmetric random walk, verdict boundaries and malformed metrics. A symmetric fixture caught an integer-array price truncation bug during development; prices now explicitly use float64.
+- Core-only single-run timings on synthetic fixtures: 10,000 paths/48 bars **56.11 ms**; 10,000 paths/288 bars **257.58 ms**. The latter exceeds the 250 ms budget before replay/preparation overhead. No timing acceptance is claimed. Cache, adaptive paths/alerts, integrated failure-skip, OOS study, strategy adapters and Phase 8 reporting remain pending; no real OOS benefit or live readiness is claimed.
+
 ## Time Machine Phase 5 foundation (working branch)
 
 - Added analysis/timemachine.py outside risk: closed 5m point-in-time history (60-day default, 30-day minimum), strict OHLCV/continuity validation, immutable standardized OHLC returns, full-precision input hash and deterministic trade seed. Future rows are excluded before value/hash processing.

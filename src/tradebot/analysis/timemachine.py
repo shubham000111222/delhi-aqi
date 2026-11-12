@@ -1,6 +1,6 @@
-"""Time Machine Phase 5: closed-bar inputs and conservative historical rule replay.
+"""Time Machine foundations: closed-bar replay and standalone block bootstrap.
 
-Not a live gate. Monte Carlo, verdicts, validation study and integrations are pending.
+Not a live gate. Runtime budgets, validation study and integrations are pending.
 OHLC cannot establish first touch within a bar: ambiguous replay bars use stop-first.
 """
 from __future__ import annotations
@@ -199,3 +199,129 @@ def replay_rule(history: History, rule: Callable[[Sequence[Candle]], ReplayPlan 
             'input_hash': history.input_hash, 'first_touch_verified': False,
             'limitation': 'OHLC ambiguity uses conservative stop-first; market next-open replay only. '
                           'Rules must not use external future data. Not a Monte Carlo verdict.'}
+
+
+def simulate_trade(history: History, plan: ReplayPlan, trade_id: str, *,
+                   fee_rate: float, slippage_rate: float, paths: int = 10000,
+                   volatility_scale: float = 1.0) -> dict[str, object]:
+    """Volatility-scaled moving block bootstrap; no market prediction or entry authority.
+
+    Blocks are independently chosen per path with length uniformly 6..12 bars.
+    OHLC excursions are sampled jointly. Unknown within-bar high/low ordering is a
+    fair random draw when both barriers touch (not inferred execution truth).
+    """
+    plan.validate()
+    if type(paths) is not int or paths not in (5000, 10000):
+        raise ValueError('path count must be 5000 or 10000')
+    if (not all(np.isfinite(x) for x in (fee_rate, slippage_rate, volatility_scale))
+            or not 0 <= fee_rate < 1 or not 0 <= slippage_rate < 1
+            or volatility_scale <= 0):
+        raise ValueError('invalid simulation costs or volatility scale')
+    source = history.standardized_ohlc
+    if (len(history.bars) < 30 * 288 or source.shape != (len(history.bars)-1, 4)
+            or not np.isfinite(source).all() or not np.isfinite(history.volatility)
+            or history.volatility <= 0):
+        raise HistoryError('invalid bootstrap history')
+    seed = trade_seed(trade_id)
+    rng = np.random.default_rng(seed)
+    previous = np.full(paths, plan.entry, dtype=np.float64)
+    exit_prices = np.zeros(paths)
+    duration = np.full(paths, plan.max_bars, dtype=np.int64)
+    outcomes = np.zeros(paths, dtype=np.int8)  # 0 time, 1 target, -1 stop
+    active = np.ones(paths, dtype=bool)
+    indices = np.zeros(paths, dtype=np.int64)
+    remaining = np.zeros(paths, dtype=np.int64)
+    ambiguous = 0
+    side = plan.side
+    scale = history.volatility * volatility_scale
+    for step in range(plan.max_bars):
+        ids = np.flatnonzero(active)
+        if not len(ids):
+            break
+        fresh = ids[remaining[ids] == 0]
+        lengths = rng.integers(6, 13, len(fresh))
+        # Leave room for the entire block; never wrap past recorded input.
+        indices[fresh] = rng.integers(0, len(source)-11, len(fresh))
+        remaining[fresh] = lengths
+        with np.errstate(over='raise', invalid='raise'):
+            sampled = previous[ids, None] * np.exp(source[indices[ids]] * scale)
+        op, high, low, close = sampled.T
+        if not np.isfinite(sampled).all() or (sampled <= 0).any():
+            raise ValueError('invalid simulated prices')
+        gap_stop = side * (op - plan.stop) <= 0
+        gap_target = side * (op - plan.target) >= 0
+        stop_touch = low <= plan.stop if side == 1 else high >= plan.stop
+        target_touch = high >= plan.target if side == 1 else low <= plan.target
+        both = stop_touch & target_touch & ~gap_stop & ~gap_target
+        ambiguous += int(both.sum())
+        stop_first = gap_stop | (~gap_target & stop_touch & (~target_touch | (rng.random(len(ids)) < .5)))
+        target_first = ~stop_first & (gap_target | target_touch)
+        hit = stop_first | target_first
+        stop_price = np.where(gap_stop, op, plan.stop) * (1 - side * slippage_rate)
+        fills = np.where(stop_first, stop_price, plan.target)
+        exited = ids[hit]
+        exit_prices[exited] = fills[hit]
+        outcomes[exited] = np.where(stop_first[hit], -1, 1)
+        duration[exited] = step + 1
+        active[exited] = False
+        previous[ids] = close
+        exit_prices[ids[~hit]] = close[~hit] * (1 - side * slippage_rate)
+        indices[ids] += 1
+        remaining[ids] -= 1
+    entry_fill = plan.entry * (1 + side * slippage_rate)
+    risk = abs(plan.entry-plan.stop)
+    net = (side * (exit_prices-entry_fill) - fee_rate * (entry_fill+exit_prices)) / risk
+    if not np.isfinite(net).all():
+        raise ValueError('invalid simulated R outcomes')
+    return {'trade_id': trade_id, 'seed': seed, 'path_count': paths,
+            'input_hash': history.input_hash,
+            'lookback_start': history.bars[0].ts.isoformat(),
+            'lookback_end': history.bars[-1].close_time.isoformat(),
+            'target_first': float(np.mean(outcomes == 1)),
+            'stop_first': float(np.mean(outcomes == -1)),
+            'time_exit': float(np.mean(outcomes == 0)),
+            'expected_net_r': float(np.mean(net)), 'median_r': float(np.median(net)),
+            'p05_r': float(np.quantile(net, .05)),
+            'expected_holding_minutes': float(np.mean(duration)*5),
+            'ambiguous_order_draws': ambiguous, 'volatility_scale': volatility_scale,
+            'first_touch_verified': False,
+            'intrabar_model': 'joint OHLC excursions; fair random ordering on dual touches',
+            'usable_for_live': False}
+
+
+def trade_verdict(simulation: dict[str, object], replay: dict[str, object], *,
+                  coin_flip_skip: bool = True) -> dict[str, object]:
+    """Fixed default thresholds; mandatory skips take precedence. Never risk authority."""
+    try:
+        def number(key: str) -> float:
+            value = simulation[key]
+            if isinstance(value, bool) or not isinstance(value, (float, int)) or not np.isfinite(value):
+                raise ValueError('invalid simulation metric')
+            return float(value)
+
+        mean, tail, timed = number('expected_net_r'), number('p05_r'), number('time_exit')
+        target, stop = number('target_first'), number('stop_first')
+        if (any(not 0 <= x <= 1 for x in (target, stop, timed))
+                or abs(target + stop + timed - 1) > 1e-8):
+            raise ValueError('invalid probabilities')
+        insufficient = replay['insufficient']
+        if type(insufficient) is not bool:
+            raise ValueError('invalid replay sufficiency')
+        historical = replay.get('expected_net_r')
+        if not insufficient and (isinstance(historical, bool) or not isinstance(historical, (float, int))
+                                 or not np.isfinite(historical)):
+            raise ValueError('invalid replay expectancy')
+        coin_flip = abs(mean) < .05
+        if mean <= 0 or tail < -1.5 or (timed > .60 and mean < .05):
+            verdict, multiplier, reason = 'SKIP', 0.0, 'mandatory expectancy/tail/time-exit rule'
+        elif coin_flip and coin_flip_skip:
+            verdict, multiplier, reason = 'SKIP', 0.0, 'coin-flip skip setting'
+        elif mean < .10 or (not insufficient and float(historical) < 0):  # type: ignore[arg-type]
+            verdict, multiplier, reason = 'SIZE DOWN', .5, 'weak expectancy or replay sign disagreement'
+        else:
+            verdict, multiplier, reason = 'PASS', 1.0, 'simulation threshold met; replay nonnegative or insufficient'
+        return {'verdict': verdict, 'multiplier': multiplier, 'label': 'coin flip' if coin_flip else verdict.lower(),
+                'reason': reason, 'filter_enabled': False}
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return {'verdict': 'SKIP', 'multiplier': 0.0, 'label': 'invalid check',
+                'reason': 'missing or invalid metrics', 'filter_enabled': False}
