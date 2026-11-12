@@ -156,3 +156,5 @@ Reports preserve independent window drawdowns, not a fabricated concatenated cur
 - [x] Engine-boundary verdict contract: PASS1/SIZE DOWN0.5/SKIP0 only; missing/contradictory verdicts, malformed flags, positive failed/timed-out results and enablement claims skip. Does not authenticate caller evidence or bypass risk.
 
 - [x] `--replay-days` selects60–180-day replay cap (minimum60 valid contiguous days); bootstrap always uses last60 days/minimum30. Separate replay/bootstrapped hashes and cache keys prevent longer replay data entering bootstrap. Default60 unchanged; select lookback before evaluating outcomes, not to tune a holdout. Longer-window latency is unverified.
+
+- [x] History requires UTC-aligned5m timestamps, not merely contiguous rows with a5m label; equal aware instants canonicalize to the same timestamp hash across timezone representations.

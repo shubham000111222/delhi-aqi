@@ -18,6 +18,7 @@ from typing import overload
 import numpy as np
 from numpy.typing import NDArray
 
+from ..core.clock import floor_ts, utc
 from ..core.models import Candle
 
 
@@ -62,6 +63,8 @@ def prepare_history(bars: Sequence[Candle], symbol: str, decision_time: datetime
             continue
         if bar.timeframe != '5m':
             raise HistoryError('5m bars required')
+        if bar.ts != floor_ts(bar.ts, 300):
+            raise HistoryError('5m timestamps must align to UTC five-minute boundaries')
         if bar.close_time <= decision_time:
             selected.append(bar)
     selected.sort(key=lambda bar: bar.ts)
@@ -83,7 +86,7 @@ def prepare_history(bars: Sequence[Candle], symbol: str, decision_time: datetime
         raise HistoryError('zero or invalid return volatility')
     # Immutable byte backing prevents downstream code from modifying cached inputs.
     standardized = np.frombuffer((logs / volatility).tobytes(), dtype=np.float64).reshape(-1, 4)
-    payload = [[bar.symbol, bar.timeframe, bar.ts.isoformat(), *map(str,
+    payload = [[bar.symbol, bar.timeframe, utc(bar.ts).isoformat(), *map(str,
                 (bar.open, bar.high, bar.low, bar.close, bar.volume))] for bar in selected]
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     return History(tuple(selected), digest, standardized, volatility)

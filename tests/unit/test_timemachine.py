@@ -442,3 +442,23 @@ def test_invalid_replay_lookback_skips_and_alerts(bars, days):
         bars, 'BTC/USDT', END, ReplayPlan(100, 99, 101), 'invalid-days', lambda past: None,
         fee_rate=0, slippage_rate=0, rule_version='v1', replay_days=days)
     assert result['multiplier'] == 0 and result['check_failed'] and alerts
+
+
+@pytest.mark.parametrize('shift', [timedelta(minutes=1), timedelta(microseconds=1)])
+def test_contiguous_but_off_grid_5m_history_is_rejected(bars, shift):
+    shifted = tuple(replace(bar, ts=bar.ts-shift) for bar in bars)
+    with pytest.raises(HistoryError, match='align'):
+        prepare_history(shifted, 'BTC/USDT', END)
+
+
+def test_timezone_equivalent_5m_grid_is_valid(bars):
+    from datetime import timezone
+
+    local = timezone(timedelta(hours=5, minutes=30))
+    converted = tuple(replace(bar, ts=bar.ts.astimezone(local)) for bar in bars)
+    result = prepare_history(converted, 'BTC/USDT', END.astimezone(local))
+    reference = prepare_history(bars, 'BTC/USDT', END)
+    assert len(result.bars) == len(reference.bars)
+    assert result.volatility == reference.volatility
+    assert result.input_hash == reference.input_hash
+    assert np.array_equal(result.standardized_ohlc, reference.standardized_ohlc)

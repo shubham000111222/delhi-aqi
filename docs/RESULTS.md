@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Five-minute grid and timezone identity validation
+
+- Prepared Time Machine history now rejects contiguous but off-grid5m timestamps, including microsecond offsets; labeling a sequence5m does not establish valid UTC bucket boundaries. Future rows are still excluded before validating values/grid, so future append invariance is retained.
+- Input-hash timestamp encoding is canonical UTC. Equal instants expressed in UTC or an aware local timezone yield identical standardized returns, volatility and input hashes, rather than timezone-format-dependent provenance. Source candle timestamps are not rewritten in the database.
+- Three new cases cover shifted-minute/microsecond rejection and UTC/India-offset equivalence. Full suite **1463 passed, 2 skipped**, Ruff/mypy/diff clean. Structural validity does not establish venue truth, intrabar fills, recorded OOS advantage or hard timing; filters remain disabled.
+
 ## Separate bootstrap/replay lookback windows
 
 - Added `replay_days=60..180` through checker, simulated bridge, isolated/stressed/multi-window runners and CLI `--replay-days`. CLI requests enough pre-study history for the declared replay window. Invalid/bool lookbacks skip/refuse; default remains60.
