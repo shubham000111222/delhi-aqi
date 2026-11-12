@@ -162,3 +162,5 @@ Reports preserve independent window drawdowns, not a fabricated concatenated cur
 - [x] Insufficient replay is not permission to ignore malformed present metrics. NaN/Infinity/boolean/text expectancy skips; coin-flip setting is strictly boolean, costs/scales cannot be booleans masquerading as numbers.
 
 - [x] Tickets show side-by-side replay probabilities, completed trigger count, mean/median/p05R and holding time plus lookbacks/hashes/seed/timing. Missing/uncomputed/no-trigger values remain unavailable; selected path budget is distinct from completed simulation paths.
+
+- [x] Cooperative replay checks include callback returns/no-signal paths, each holding bar and completion; overflowed derived R fails rather than producing cached numeric evidence. Hard preemption/latency acceptance remains open.

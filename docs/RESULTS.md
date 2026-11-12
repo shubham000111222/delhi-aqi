@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Replay callback/holding deadline and numeric outcome checks
+
+- Replay now checks cooperative deadline immediately after every strategy callback (including callbacks returning no signal), inside each holding-bar iteration and before returning completed evidence. A long callback cannot continue into another trigger/holding loop after already exceeding the budget. Blocking callbacks are still not preemptible.
+- Each net replay R must be finite before contributing to counts/summary/cache; finite input prices with an extreme gap/tiny risk denominator can otherwise overflow derived R. Invalid outcomes propagate to ordinary SKIP/alert handling in the checker, never completed cached replay evidence.
+- Three tests use injected clocks for slow no-signal callback and holding-loop timeout, plus an adversarial finite-price overflow case. Full suite **1485 passed, 2 skipped**, Ruff/mypy/diff clean. Deadline checks are not real end-to-end250ms timing certification, and structural/numeric tests do not establish OOS edge or limit-entry parity.
+
 ## Full computed side-by-side replay ticket
 
 - Replay output now includes target/stop/time-exit proportions from completed trigger counts and actual lookback bounds. No completed triggers yields unknown/null probabilities, never invented zero odds. Trigger counts, insufficiency and conservative intrabar limitations are unchanged.

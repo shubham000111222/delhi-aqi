@@ -181,6 +181,8 @@ def replay_rule(history: History, rule: Callable[[Sequence[Candle]], ReplayPlan 
         if deadline is not None and time.perf_counter() >= deadline:
             raise TimeoutError("replay budget exceeded")
         plan = rule(PastBars(bars, i + 1))
+        if deadline is not None and time.perf_counter() >= deadline:
+            raise TimeoutError("replay strategy callback budget exceeded")
         if plan is None:
             i += 1
             continue
@@ -195,6 +197,8 @@ def replay_rule(history: History, rule: Callable[[Sequence[Candle]], ReplayPlan 
         result = 'time_exit'
         exit_price = 0.0
         for j in range(i + 1, i + plan.max_bars + 1):
+            if deadline is not None and time.perf_counter() >= deadline:
+                raise TimeoutError("replay holding-period budget exceeded")
             bar = bars[j]
             op, high, low = float(bar.open), float(bar.high), float(bar.low)
             stop_gap = side * (op - plan.stop) <= 0
@@ -214,10 +218,14 @@ def replay_rule(history: History, rule: Callable[[Sequence[Candle]], ReplayPlan 
                 break
             exit_price = float(bar.close) * (1 - side * slippage_rate)
         net = (side * (exit_price - entry) - fee_rate * (entry + exit_price)) / risk
+        if not np.isfinite(net):
+            raise ValueError('nonfinite replay R outcome')
         outcomes.append(net)
         holding.append((j - i) * 5)
         counts[result] += 1
         i = j  # next trigger may be evaluated only after this exit bar closes
+    if deadline is not None and time.perf_counter() >= deadline:
+        raise TimeoutError("replay completion budget exceeded")
     n = len(outcomes)
     return {'triggers': n, 'insufficient': n < 20, 'counts': counts,
             **{name: count/n if n else None for name, count in counts.items()},

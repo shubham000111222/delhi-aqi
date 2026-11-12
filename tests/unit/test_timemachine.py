@@ -507,3 +507,51 @@ def test_replay_probabilities_use_completed_triggers_and_no_trigger_is_unknown(h
     empty = replay_rule(history, lambda past: None, fee_rate=0, slippage_rate=0)
     assert empty['triggers'] == 0
     assert all(empty[key] is None for key in ('target_first', 'stop_first', 'time_exit'))
+
+
+def test_slow_no_signal_replay_callback_is_timed_out_immediately(history, monkeypatch):
+    from types import SimpleNamespace
+
+    import tradebot.analysis.timemachine as tm
+
+    clock = [0.]
+    calls = []
+    monkeypatch.setattr(tm, 'time', SimpleNamespace(perf_counter=lambda: clock[0]))
+
+    def slow(past):
+        calls.append(len(past))
+        clock[0] = 1.
+        return None
+
+    with pytest.raises(TimeoutError, match='callback'):
+        tm.replay_rule(history, slow, fee_rate=0, slippage_rate=0, deadline=.25)
+    assert calls == [1]
+
+
+def test_replay_holding_loop_checks_deadline(history, monkeypatch):
+    from types import SimpleNamespace
+
+    import tradebot.analysis.timemachine as tm
+
+    reads = [0]
+
+    def clock():
+        reads[0] += 1
+        return 1. if reads[0] >= 4 else 0.
+
+    monkeypatch.setattr(tm, 'time', SimpleNamespace(perf_counter=clock))
+    with pytest.raises(TimeoutError, match='holding-period'):
+        tm.replay_rule(history, lambda past: ReplayPlan(100, 1, 10000, max_bars=2016),
+                       fee_rate=0, slippage_rate=0, deadline=.25)
+    assert reads[0] == 4
+
+
+def test_nonfinite_replay_outcome_is_rejected(history):
+    # Finite inputs can still overflow R when a tiny risk denominator divides
+    # a large adverse gap. Refuse the result rather than return infinite metrics.
+    gap = replace(history.bars[1], open=Decimal('1e308'), high=Decimal('1e308'),
+                  low=Decimal('1e308'), close=Decimal('1e308'))
+    changed = replace(history, bars=(history.bars[0], gap, *history.bars[2:]))
+    with pytest.raises(ValueError, match='nonfinite replay'):
+        replay_rule(changed, lambda past: ReplayPlan(1., 1.-1e-15, 2., max_bars=1)
+                    if len(past) == 1 else None, fee_rate=0, slippage_rate=0)
