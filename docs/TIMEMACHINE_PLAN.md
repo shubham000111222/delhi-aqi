@@ -150,3 +150,5 @@ Reports preserve independent window drawdowns, not a fabricated concatenated cur
 - [x] Metrics evidence structural validation refuses missing/invalid monetary fields and identities, nonfinite exposure, naive/missing timestamps and backwards chronology; no current-time/zero repair of missing evidence. Does not attest venue truth.
 
 - [x] Research evidence publication is strict JSON,64MiB bounded, file-fsynced and atomically no-clobber installed. Unsupported hard-link filesystems fail closed; partial/scratch files are not published evidence. Windows filesystem support, power-loss durability and directory permissions remain external acceptance items.
+
+- [x] Evidence/settings identity includes bounded local Python-source digest and file manifest, checked after each engine and across nominal/stressed runs. Dependencies/interpreter, privileged mutation and venue/OOS provenance remain outside this fingerprint.

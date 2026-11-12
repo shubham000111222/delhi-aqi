@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Research Python-source identity
+
+- Studies now fingerprint exact local tradebot Python-source bytes and relative file names, include the digest in settings identity, and retain the file/hash manifest in evidence. Content/name changes invalidate identity regardless of modification timestamps or absolute checkout location.
+- Source scans refuse symlinks, empty trees, over512 Python files, files over2MiB or total Python bytes over16MiB. After each engine run, source identity is rechecked; nominal/stressed studies must also have identical source snapshots. Multi-window unchanged-settings checks now bind Python source through settings hash. Source mismatch makes evidence incomplete and retention false.
+- Four unit cases cover deterministic content/name identity, empty/oversized trees, symlink refusal and real package coverage. One injected mid-run source-change test verifies fail-closed propagation. Full suite **1445 passed, 2 skipped**; Ruff/mypy/diff clean.
+- This is local reproducibility metadata, NOT authentication, dependency/interpreter identity, venue/OOS provenance or protection from privileged file swapping/in-memory monkeypatching. No final-holdout evidence or enablement is created. Runner revision advanced in settings hash.
+
 ## Atomic bounded research evidence publication
 
 - Research CLI now streams strict JSON to a same-directory hidden temporary file, enforces64MiB byte limit, flushes/fsyncs file contents, then atomically publishes via no-clobber hard link. Serialization failures, NaNs, oversized output and racing destination creators cannot leave a partial destination or overwrite an existing report. No rename/overwrite fallback when filesystem hard links are unsupported.

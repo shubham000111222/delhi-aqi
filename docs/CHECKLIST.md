@@ -19,7 +19,7 @@ For the full Windows installation, implementation and validation procedure, see
 For the consolidated item-by-item implementation and external-evidence backlog, see
 [`REMAINING_WORK.md`](REMAINING_WORK.md). It does not mark unfinished work complete.
 
-**Last updated:** 2026-11-02 · **Suite:** 1440 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-02 · **Suite:** 1445 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -296,3 +296,5 @@ Fill this in as phases complete — it is what `docs/RESULTS.md` is built from.
 - [x] Shared metrics collector rejects missing/nonfinite values, naive/missing/backwards timestamps and absent trade identities; no fabricated wall-clock/zero evidence.
 
 - [x] Atomic bounded research JSON publication: strict encoding, file fsync, same-directory no-clobber installation, race/no-partial-output tests; host filesystem/power-loss acceptance remains open.
+
+- [x] Bounded local Python-source fingerprint/manifest in study settings identity, mid-run and nominal/stress consistency checks; not authenticated provenance or dependency coverage.

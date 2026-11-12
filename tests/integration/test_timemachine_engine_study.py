@@ -305,3 +305,20 @@ async def test_metrics_evidence_overflow_makes_study_incomplete(fast_cfg, monkey
     assert not result['complete'] and 'EvidenceLimitError' in result['error']
     assert not result['filter_enabled']
     assert not any(result['retention_criteria_passed'].values())
+
+
+async def test_code_changes_during_execution_invalidate_study(fast_cfg, monkeypatch):
+    import tradebot.backtest.timemachine_engine_study as module
+
+    calls = [0]
+
+    def changed_source():
+        calls[0] += 1
+        return {'sha256': 'before' if calls[0] == 1 else 'after', 'files': {}, 'bytes': 0}
+
+    monkeypatch.setattr(module, 'source_fingerprint', changed_source)
+    result = await run_engine_study(fast_cfg, tape(), {}, start=START, end=END,
+                                    final_holdout_start=END, fee_rate=.001, slippage_rate=0)
+    assert not result['complete'] and 'source changed' in result['error']
+    assert not any(result['retention_criteria_passed'].values())
+    assert not result['filter_enabled']

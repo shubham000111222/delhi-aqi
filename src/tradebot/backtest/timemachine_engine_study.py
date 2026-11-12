@@ -35,6 +35,7 @@ from .metrics import (
     monte_carlo_drawdown,
 )
 from .runner import collect
+from .source_evidence import source_fingerprint
 from .timemachine_study import VARIANTS, StudyWindow, VariantRun, run_study
 
 
@@ -66,6 +67,7 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
         if (any(isinstance(v, bool) or not math.isfinite(v) or not 0 <= v < 1
                 for v in (fee_rate, slippage_rate))):
             raise ValueError('invalid checker cost assumptions')
+        source = source_fingerprint()
         capital = float(cfg.settings.starting_capital_usdt)
         window = StudyWindow(start, end, final_holdout_start, 'pending', 'pending', capital)
         window.validate()
@@ -104,7 +106,8 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
                                  'strategies': cfg.strategies.model_dump(mode='json'),
                                  'symbols': cfg.symbols.model_dump(mode='json'),
                                  'checker_costs': [fee_rate, slippage_rate], 'max_bars': max_bars,
-                                 'volatility_scale': volatility_scale, 'runner': 'isolated-cold-start-v2'})
+                                 'volatility_scale': volatility_scale, 'source_hash': source['sha256'],
+                                 'runner': 'isolated-cold-start-v3'})
         window = StudyWindow(start, end, final_holdout_start, input_hash, settings_hash, capital)
         with TemporaryDirectory(prefix='timemachine-study-') as temporary:
             for variant in VARIANTS:
@@ -129,6 +132,8 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
                     # Finite prefiltered feed: drain every symbol at the final close.
                     # stop_at=end would stop after the first symbol at that timestamp.
                     await engine.run(idle_timeout=.01)
+                    if source_fingerprint() != source:
+                        raise ValueError('Python source changed during research run')
                     expected_bars = sum(len(bars) for bars in execution.values())
                     if (feed.emitted != expected_bars or engine.stats.bars != expected_bars
                             or engine.killswitch.level is KillLevel.L3):
@@ -177,7 +182,7 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
                     else:
                         store.close()
         result = run_study(window, lambda variant, _: runs[variant])
-        result.update(input_hash=input_hash, settings_hash=settings_hash, diagnostics=diagnostics,
+        result.update(input_hash=input_hash, settings_hash=settings_hash, source=source, diagnostics=diagnostics,
                       engine_isolation=True, cold_start=True,
                       limitation='Cold-start paper engines with modeled books/fills. Venue provenance, '
                                  'real OOS status, execution parity and latency are not verified.')
@@ -195,6 +200,8 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
                 final_holdout_start=final_holdout_start, fee_rate=fee_rate * 2,
                 slippage_rate=slippage_rate * 2, max_bars=max_bars, cost_stress=False,
                 volatility_scale=volatility_scale)
+            if stressed.get('complete') and stressed.get('source') != source:
+                raise ValueError('Python source changed between nominal and stressed studies')
             result['cost_stress'] = {'multiplier': 2, 'study': stressed,
                                      'model': '2x paper fees and adverse modeled market slippage; '
                                               'limit prices unchanged; checker fee/slippage assumptions doubled',
