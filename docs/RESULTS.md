@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine reporting integration
+
+- Added bounded read-only persisted-check views and plain-word order tickets with actual simulation/replay statistics. Missing/nonfinite metrics say unavailable. No illustrative or AI-generated odds. Candidate identity, verdict/multiplier, modeled-first-touch caveat and no-profit-promise text appear with the computed ticket.
+- Dashboard snapshot and escaped check panel beside Trades show newest checks and disclose truncation; a skipped candidate is not mislabeled an executed trade. Daily JSON/Markdown/HTML include a day-bounded check page (up to 1,000); skipped/down lists are included in text renderers, with Telegram capped to 20 and an explicit full-report pointer. Reports disclose the cap rather than claiming exhaustive history.
+- Added exclusive `until` event query boundary so later-day activity cannot crowd earlier-day checks out of the report. Seven new tests cover tickets, missing/NaN numbers, bounded/read-only/history-window behavior, API/escaped UI and report integration.
+- Full suite **1355 passed, 2 skipped**; Ruff/mypy/diff passed. The full dataset and strategies remain synthetic/test-only; no real OOS advantage, production alert delivery, <=250 ms timing or live enablement claimed. Current strategies predominantly emit limit orders; market-only bootstrap/replay must not silently substitute for limit execution.
+
 ## Time Machine simulated-engine bridge
 
 - Added explicit `Engine.set_research_candidate_gate` injection restricted at attachment and execution to paper mode, SimClock and PaperAdapter. Candidate checks precede risk approval; SKIP returns before sizing and DOWN multiplies the ordinary risk context size multiplier. No risk package imports analysis, no default/CLI/live enablement, and existing kill/session gates remain authoritative.

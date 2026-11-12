@@ -9,7 +9,7 @@ Updated 2026-11-02. Applies to working branch `arena/200089ad-delhi-aqi`, draft 
 - [x] Phase 5 bar/return and generic replay foundations, outside risk, tested on synthetic fixtures.
 - [ ] Complete strategy-specific replay entry/stop/target adapters.
 - [ ] Phase 6 Monte Carlo, decision rules, risk-reducing integration, alert/error handling, cached 250 ms budget and four-variant point-in-time OOS retention study.
-- [ ] Phase 8 check persistence, Trades dashboard, order tickets and daily reports.
+- [x] Phase 8 research-engine audit persistence, dashboard check panel beside Trades, computed order tickets and bounded daily skipped/down lists. External alert delivery and live integration remain unverified.
 - [ ] Verify on real recorded OOS data without final-holdout tuning before enabling; otherwise keep disabled.
 
 Full criteria and honest limits: [TIMEMACHINE_PLAN.md](TIMEMACHINE_PLAN.md).

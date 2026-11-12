@@ -319,3 +319,7 @@ than it looks. OHLC bars cannot reveal which level was touched first when both s
 and target occur inside one bar; replay flags ambiguity and assumes stop-first.
 Sampled intrabar paths will be modeled assumptions, not known execution order.
 These odds are a sanity check, never a promise of profit.
+
+### Time Machine research reporting
+
+Explicit simulated-paper candidate checks are persisted in the event audit and displayed beside Trades with plain-word computed tickets. Missing statistics say unavailable; no demo odds are invented. Daily reports contain skipped/down candidate lists with bounded-history/truncation disclosure. This reporting does not enable the filter or certify a strategy: strategy replay/limit-fill parity, real recorded OOS retention studies and end-to-end latency acceptance remain open. See `docs/TIMEMACHINE_PLAN.md` and `docs/REMAINING_WORK.md`.

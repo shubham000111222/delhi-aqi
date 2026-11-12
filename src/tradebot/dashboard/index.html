@@ -123,6 +123,11 @@
   </section>
 
   <section class="card half">
+    <h2>Time Machine <span class="muted">research checks — not enabled live</span></h2>
+    <div id="timemachine"><p class="empty">No computed checks recorded.</p></div>
+  </section>
+
+  <section class="card half">
     <h2>Execution cost <span class="muted">(slippage vs decision price)</span></h2>
     <div id="slippage"><p class="empty">no fills with a decision price yet</p></div>
   </section>
@@ -433,6 +438,11 @@ async function tick() {
     renderSpark(data.equity_curve);
     renderPositions(data.positions);
     renderTrades(data.trades);
+    const tm = data.timemachine || {};
+    el("timemachine").innerHTML = (tm.checks || []).map(row =>
+      `<details><summary>${esc(row.check.trade_id || "unknown")} · ${esc(row.check.verdict || "unavailable")} · x${esc(String(row.check.multiplier ?? "?"))}</summary><p>${esc(row.ticket)}</p></details>`
+    ).join("") || '<p class="empty">No computed checks recorded; no odds invented.</p>';
+    if (tm.truncated) el("timemachine").innerHTML += '<p class="muted">Showing newest checks only.</p>';
     renderSignals(data.signals);
     renderRisk(data);
     renderSlippage(data.slippage);

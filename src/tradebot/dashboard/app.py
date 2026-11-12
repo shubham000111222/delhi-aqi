@@ -28,6 +28,7 @@ from ..config import Config
 from ..core.clock import iso
 from ..core.money import D, to_str
 from ..core.store import Store
+from ..reporting.timemachine import check_history
 
 TEMPLATE = Path(__file__).parent / "index.html"
 
@@ -254,6 +255,7 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
                     ],
                     "positions": positions,
                     "trades": trades[:25],
+                    "timemachine": check_history(store, limit=25),
                     "by_strategy": dict(by_strategy),
                     "signals": [
                         {

@@ -9,7 +9,7 @@ existing strategy is safe or profitable. Risk package must never import analysis
 - [x] Point-in-time 5m closed-bar selection, last 60 days by default, minimum 30.
 - [x] Refuse missing/duplicate/stale bars, invalid OHLCV, NaNs and zero volatility.
 - [x] Full-precision input hash, deterministic trade-ID seed and immutable standardized
-  log-OHLC returns relative to previous close. Cross-check cache is not implemented yet.
+  log-OHLC returns relative to previous close; bounded cross-check cache implemented.
 - [x] Historical rule callback sees only a closed prefix; next-open market execution,
   long/short, two-leg fees, adverse entry/stop/time slippage, gap stop fills at open,
   no overlapping positions, bounded holding horizon, and censored-tail accounting.
@@ -29,7 +29,7 @@ existing strategy is safe or profitable. Risk package must never import analysis
 - [ ] Define and validate horizon and current-volatility estimator without final-holdout
   tuning. Sampled intrabar ordering is modeled uncertainty, never known first touch.
 - [x] Standalone simulation output: target/stop/time probabilities, net expected/median/p05 R, expected holding
-  time and input/seed/path provenance. Side-by-side orchestration remains pending.
+  time and input/seed/path provenance; side-by-side orchestration implemented.
 - [x] Standalone risk-reducing verdict function: PASS 1.0 when E[R] >= .10 and replay insufficient or
   nonnegative; SIZE DOWN .5 for 0 < E[R] < .10 or sign disagreement; SKIP 0 for E[R] <= 0,
   p05 < -1.5R, or time-exit probability > .60 with E[R] < .05. SKIP conditions take
@@ -50,11 +50,11 @@ existing strategy is safe or profitable. Risk package must never import analysis
 
 ## Phase 8 — pending integration
 
-- [ ] Persist every check: trade ID, seed, paths, lookback, hash, probabilities, net mean
+- [x] Persist every research-engine check in the event audit: trade ID, seed, paths, lookback, hash, probabilities, net mean
   and p05 R, replay statistics, verdict, multiplier, timing and error/skip reason.
-- [ ] Dashboard Trades page verdict and daily-report list of skipped/sized-down trades.
-- [ ] Plain-word order ticket from computed results only; no illustrative numbers
-  presented as actual runs. Alert delivery for invalid inputs/errors/path degradation.
+- [x] Dashboard check/verdict panel beside Trades and daily-report list of skipped/sized-down candidates. Views disclose bounded history/truncation and distinguish candidate checks from actual fills.
+- [x] Plain-word research order ticket from persisted computed results only; missing metrics explicitly unavailable, no illustrative odds.
+- [ ] Verify external alert delivery for invalid inputs/errors/path degradation.
 - [ ] End-to-end backtest and engine tests prove the risk engine still runs and the
   filter cannot increase size, resume trading, clear holds or loosen limits.
 

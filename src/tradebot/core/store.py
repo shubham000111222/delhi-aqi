@@ -319,6 +319,7 @@ class Store:
         kinds: Iterable[str] | None = None,
         since: datetime | None = None,
         level: str | None = None,
+        until: datetime | None = None,
     ) -> list[dict[str, Any]]:
         sql = "SELECT * FROM events WHERE 1=1"
         params: list[Any] = []
@@ -329,6 +330,9 @@ class Store:
         if since:
             sql += " AND ts >= ?"
             params.append(iso(since))
+        if until:
+            sql += " AND ts < ?"
+            params.append(iso(until))
         if level:
             sql += " AND level = ?"
             params.append(level)

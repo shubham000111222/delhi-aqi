@@ -327,3 +327,38 @@ def test_empty_recovery_status_is_not_a_reconciliation_certificate(client):
     assert data['reconciliation_verified'] is False
     assert 'not entry permission' in data['limitation']
     assert 'No listed holds — not entry permission' in client.get('/').text
+
+
+def test_dashboard_exposes_persisted_timemachine_ticket_not_sample_odds(client):
+    store = client.app.state.dashboard.store
+    store.log_event('timemachine_check', {'trade_id': '<candidate>', 'verdict': 'SKIP',
+                    'multiplier': 0, 'research_only': True, 'reason': 'short history'})
+    result = client.get('/api/snapshot').json()['timemachine']
+    assert result['checks'][0]['check']['trade_id'] == '<candidate>'
+    assert 'unavailable' in result['checks'][0]['ticket']
+    assert result['filter_enabled'] is False
+    page = client.get('/').text
+    assert 'id="timemachine"' in page
+    assert 'esc(row.ticket)' in page
+
+
+def test_daily_report_includes_only_day_checks_and_computed_tickets(fast_cfg):
+    from datetime import timedelta
+
+    store = Store(':memory:')
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    store.log_event('timemachine_check', {'trade_id': 'today', 'verdict': 'DOWN', 'multiplier': .5,
+                    'simulation': {'expected_net_r': .08}}, ts=start)
+    store.log_event('timemachine_check', {'trade_id': 'tomorrow', 'multiplier': 0},
+                    ts=start + timedelta(days=1))
+    try:
+        report = build_daily_report(store, fast_cfg, day_start=start, day_end=start + timedelta(days=1),
+                                    start_equity=D(1000), end_equity=D(1000), ledger_cash=D(1000),
+                                    realized=D(0), unrealized=D(0), fees=D(0), tax_reserve=D(0), tds=D(0),
+                                    peak_equity=D(1000), marks={}, open_positions=[])
+        assert len(report.to_dict()['timemachine']['checks']) == 1
+        assert 'today' in report.markdown() and 'tomorrow' not in report.markdown()
+        assert '0.080 R' in report.markdown() and 'today' in report.telegram()
+        assert 'Time Machine' in report.html()
+    finally:
+        store.close()
