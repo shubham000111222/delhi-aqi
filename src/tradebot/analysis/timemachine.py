@@ -389,7 +389,7 @@ class TimeMachine:
         except Exception:  # noqa: BLE001 - alert failure cannot allow a trade
             return False
 
-    def check(self, bars: Sequence[Candle], symbol: str, decision_time: datetime,
+    def check(self, bars: Sequence[Candle] | Callable[[], Sequence[Candle]], symbol: str, decision_time: datetime,
               plan: ReplayPlan, trade_id: str, rule: Callable[[Sequence[Candle]], ReplayPlan | None], *,
               fee_rate: float, slippage_rate: float, rule_version: str, volatility_scale: float = 1.,
               coin_flip_skip: bool = True, variant: str = 'both') -> dict[str, object]:
@@ -404,6 +404,12 @@ class TimeMachine:
             result['seed'] = trade_seed(trade_id)
             if not isinstance(rule_version, str) or not rule_version:
                 raise ValueError('immutable replay rule version is required')
+            # Lazy providers execute inside the same error/deadline/alert boundary.
+            # Cannot preempt a blocking provider, but never run cores after it overruns.
+            if callable(bars):
+                bars = bars()
+            if time.perf_counter() >= deadline:
+                raise TimeoutError('history provider budget exceeded')
             # Immutable values, not just timestamps, key standardized-return reuse.
             # Future rows do not invalidate a past decision's cache entry.
             closed = tuple(b for b in bars if b.symbol == symbol

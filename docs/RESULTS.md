@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine provider-inclusive cooperative deadline
+
+- Engine bridge now supplies history lazily to the checker. The checker starts its clock before invoking the provider, catches provider errors inside the required alert/error boundary and tests the deadline immediately on provider return, before preparation/hash/replay/bootstrap.
+- Slow reads therefore return SKIP with elapsed time including I/O; three consecutive provider overruns share the ordinary10,000-to5,000 path degradation/alert logic. Provider failures preserve candidate/seed/rule identity and alert delivery status in the engine audit rather than relying only on optional notifier handling.
+- Two integration cases with injected clocks/providers verify300ms reads never call replay or simulation, three overruns degrade paths, and archive exceptions invoke the required callback and persist failure provenance. Full suite **1405 passed, 2 skipped**, Ruff/mypy/diff clean.
+- This fixes deadline accounting, not hard preemption: blocking I/O, indicator computation and alert delivery cannot be interrupted at250ms. Bridge plan validation and engine audit/notifier handling remain outside the checker's timer. Real end-to-end latency acceptance remains unfulfilled; no production enablement.
+
 ## Time Machine terminal censoring and unresolved state
 
 - Per-variant diagnostics now include terminal open positions (actual marks), pending entry count, venue/stored open order counts and durable pending-fill/submission flags. Any such unresolved state marks the variant terminal_censored and comparison-ineligible; no synthetic liquidation or fabricated final closed trade is applied.

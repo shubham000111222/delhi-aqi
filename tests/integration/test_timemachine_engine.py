@@ -125,7 +125,11 @@ async def test_bridge_forwards_actual_plan_identity_cutoff_and_costs(engine, sig
 
     calls = []
     checker = Mock()
-    checker.check.return_value = {'trade_id': signal.id, 'multiplier': .5, 'verdict': 'DOWN'}
+    def checked(provider, *args, **kwargs):
+        provider()
+        return {'trade_id': signal.id, 'multiplier': .5, 'verdict': 'DOWN'}
+
+    checker.check.side_effect = checked
 
     def history(symbol, cutoff):
         calls.append((symbol, cutoff))
@@ -232,3 +236,51 @@ async def test_bridge_selects_timeframe_specific_replay_binding(engine, signal):
     assert await engine._research_candidate_multiplier(signal, Decimal('100')) == Decimal('.5')
     args, kwargs = checker.check.call_args
     assert args[-1] is correct and kwargs['rule_version'] == 'exact'
+
+
+async def test_slow_archive_provider_skips_before_cores_and_degrades_paths(engine, signal, monkeypatch):
+    import tradebot.analysis.timemachine as tm
+    from tradebot.analysis.engine_gate import ReplayBinding, TimeMachineEngineGate
+
+    now = [0.]
+    monkeypatch.setattr(tm, 'time', SimpleNamespace(perf_counter=lambda: now[0]))
+    replay = Mock(side_effect=AssertionError('expired provider must not reach replay'))
+    simulate = Mock(side_effect=AssertionError('expired provider must not reach simulation'))
+    monkeypatch.setattr(tm, 'replay_rule', replay)
+    monkeypatch.setattr(tm, 'simulate_trade', simulate)
+
+    def slow_provider(symbol, cutoff):
+        now[0] += .3
+        return ()
+
+    alerts = []
+    machine = tm.TimeMachine(alerts.append)
+    engine.set_research_candidate_gate(TimeMachineEngineGate(
+        machine, slow_provider, {'test': ReplayBinding(lambda past: None, 'v1')}, fee_rate=0, slippage_rate=0))
+    for _ in range(3):
+        assert await engine._research_candidate_multiplier(signal, Decimal('100')) == 0
+    assert machine.paths == 5000
+    assert len(alerts) == 4
+    replay.assert_not_called()
+    simulate.assert_not_called()
+    payload = engine.store.events(kinds=['timemachine_check'])[0]['payload']
+    assert payload['check_failed'] and payload['timed_out']
+    assert payload['elapsed_ms'] >= 299
+    assert payload['next_path_count'] == 5000
+
+
+async def test_archive_provider_exception_uses_required_checker_alert_and_audit(engine, signal):
+    from tradebot.analysis.engine_gate import ReplayBinding, TimeMachineEngineGate
+    from tradebot.analysis.timemachine import TimeMachine
+
+    def fail(symbol, cutoff):
+        raise OSError('archive unavailable')
+
+    alerts = []
+    engine.set_research_candidate_gate(TimeMachineEngineGate(
+        TimeMachine(alerts.append), fail, {'test': ReplayBinding(lambda past: None, 'v1')},
+        fee_rate=0, slippage_rate=0))
+    assert await engine._research_candidate_multiplier(signal, Decimal('100')) == 0
+    payload = engine.store.events(kinds=['timemachine_check'])[0]['payload']
+    assert payload['check_failed'] and payload['alert_delivered']
+    assert payload['rule_version'] == 'v1' and 'archive unavailable' in alerts[0]

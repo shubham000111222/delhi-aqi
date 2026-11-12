@@ -56,7 +56,7 @@ class TimeMachineEngineGate:
                           1 if signal.side is Side.BUY else -1, binding.max_bars)
         plan.validate()
         result = self.machine.check(
-            self.history(signal.symbol, decision_time), signal.symbol, decision_time,
+            lambda: self.history(signal.symbol, decision_time), signal.symbol, decision_time,
             plan, signal.id, binding.rule, fee_rate=self.fee_rate,
             slippage_rate=self.slippage_rate, rule_version=binding.version,
             volatility_scale=self.volatility_scale, coin_flip_skip=self.coin_flip_skip, variant=self.variant)
