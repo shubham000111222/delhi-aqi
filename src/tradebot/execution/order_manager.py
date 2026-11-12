@@ -308,6 +308,20 @@ class OrderManager:
             attempt += 1
             try:
                 order = await self.adapter.place_order(request)
+                if not self._recovered_order_matches(request, order):
+                    # A successful transport is not proof that the adapter returned
+                    # this intent. It may already have executed: never blindly retry.
+                    self.killswitch.latch_execution_observation_fault(request.client_order_id)
+                    self.store.log_event(
+                        "order_response_conflict", {"client_order_id": request.client_order_id},
+                        level="CRIT", actor="execution", ts=self.clock.now(),
+                    )
+                    self.killswitch.trigger(
+                        KillLevel.L1, trigger="order_outcome_unknown",
+                        reason=f"submission response conflicts with {request.client_order_id}",
+                        actor="execution",
+                    )
+                    return None
                 self.stats.submitted += 1
                 self.orders_window.add()
                 self.store.upsert_order(order)
@@ -422,7 +436,7 @@ class OrderManager:
                 and order.price == (round_price(request.price, rules.tick_size, request.side.value)
                                     if request.price else None)
             )
-        except (ArithmeticError, TypeError, ValueError, KeyError):
+        except (ArithmeticError, TypeError, ValueError, KeyError, AttributeError):
             return False
 
     async def _safe_get_order(self, client_order_id: str) -> Order | None:

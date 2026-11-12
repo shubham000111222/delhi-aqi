@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest successful-response consistency pass (working branch)
+
+- Order-manager successful placement now uses the same intent consistency check as timeout recovery before persisting an order or counting it submitted. Conflicting/absent responses latch the durable observation fault, record a conflict, attempt L1 escalation and return without a resend. An already-executed external fill cannot be undone by this check.
+- Full suite **1264 passed, 2 skipped**; Ruff, mypy and diff checks passed. Nine fake-adapter cases cover inconsistent returned identity/fields and absent response, verifying one submit, no successful-submission event/count, and blocked entries.
+- This is local response consistency, not verified fills, authoritative venue/account identity or authenticated recovery. Adapter callbacks may already have occurred before the response check; fill ingestion/replay and independent reconciliation remain unfinished. Live gates stay blocked and D–I are incomplete. Dashboard server remains on port 8000, paper/synthetic/read-only/1×, predating this pass; Arena gateway/browser access remains unresolved.
+
 ## Latest timeout recovery consistency pass (working branch)
 
 - The order manager now checks lookup results against submitted intent before recording recovery: client ID, symbol, side/type, strategy/signal, strict boolean reduce-only, stop, rounded quantity and price. A conflicting result latches the observation hold, records a recovery conflict, and follows unknown-outcome handling without assuming venue absence or retrying even in paper mode.
