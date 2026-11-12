@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine actual modeled-cost stress rerun
+
+- Added optional `cost_stress=True` / research CLI `--cost-stress`: executes four additional fresh engines with doubled paper fees and adverse modeled market slippage via the existing stress_config implementation. Checker fee/slippage assumptions are doubled too; frozen strategy parameters are not refit. No post-hoc P&L subtraction or nominal ending-capital reuse.
+- Nested evidence retains nominal/stressed results and distinct settings hashes with identical input hashes. `stress_survivors` requires nominal retention, completed stressed study, nonzero stressed trades, positive stressed ending profit and no invalid stressed checks. This is an additional research test, not all promotion gates; filter_enabled remains false. A failed/out-of-range stress model makes the study incomplete and cannot pass retention.
+- Integration test observes eight fresh stores/engines and actual changes in paper/checker costs, source-config preservation, hash identity, disabled zero-trade survivors. Failure-injection covers the bounded slippage model; CLI test exercises stress JSON output/no overwrite. Full suite **1393 passed, 2 skipped**, Ruff/mypy/diff clean.
+- These tests still use zero-trade plumbing fixtures, not real OOS evidence or cost calibration. Limit prices remain unchanged (no invented queue/expiry behavior); real venue costs and execution parity remain unverified. No profit, final-holdout benefit or deployment readiness claim.
+
 ## Time Machine study coverage and completion safety
 
 - Research runner now requires aligned study boundaries and contiguous, valid OHLCV execution coverage for every configured symbol from start through the final close. Missing symbols, gaps/duplicates, NaNs and invalid prices refuse before building engines.

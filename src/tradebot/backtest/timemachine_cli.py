@@ -26,6 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--fee-rate', type=float, required=True, help='checker fee assumption per leg')
     parser.add_argument('--slippage-rate', type=float, required=True, help='checker adverse slippage assumption')
     parser.add_argument('--max-bars', type=int, default=288)
+    parser.add_argument('--cost-stress', action='store_true', help='rerun all four variants at 2x modeled costs')
     parser.add_argument('--output', type=Path, required=True, help='new JSON evidence file; refuses overwrite')
     args = parser.parse_args(argv)
     try:
@@ -58,7 +59,8 @@ def main(argv: list[str] | None = None) -> int:
         history = load('5m', start-timedelta(days=60))
         result = asyncio.run(run_engine_study(config, execution, history, start=start, end=end,
                                               final_holdout_start=holdout, fee_rate=args.fee_rate,
-                                              slippage_rate=args.slippage_rate, max_bars=args.max_bars))
+                                              slippage_rate=args.slippage_rate, max_bars=args.max_bars,
+                                              cost_stress=args.cost_stress))
         args.output.parent.mkdir(parents=True, exist_ok=True)
         with args.output.open('x', encoding='utf-8') as stream:
             json.dump(result, stream, indent=2, default=str, allow_nan=False)

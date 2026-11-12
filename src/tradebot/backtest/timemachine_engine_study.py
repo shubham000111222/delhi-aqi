@@ -36,7 +36,7 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
                            history_5m: Mapping[str, Sequence[Candle]], *, start: datetime,
                            end: datetime, final_holdout_start: datetime,
                            fee_rate: float, slippage_rate: float,
-                           max_bars: int = 288) -> dict[str, Any]:
+                           max_bars: int = 288, cost_stress: bool = False) -> dict[str, Any]:
     """No injected engine/result callback. Each variant starts from fresh capital.
 
     Input hashes are computed, not accepted as assertions. Archive/venue provenance
@@ -151,6 +151,30 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
         for variant in result['retention_criteria_passed']:
             if diagnostics[variant]['invalid_checks']:
                 result['retention_criteria_passed'][variant] = False
+        if cost_stress:
+            from .robustness import stress_config
+
+            # A new four-engine run changes modeled fills/fees and candidate decisions.
+            # Never subtract fees from nominal outcomes or refit the strategy.
+            stressed = await run_engine_study(
+                stress_config(cfg, 2.), execution, history, start=start, end=end,
+                final_holdout_start=final_holdout_start, fee_rate=fee_rate * 2,
+                slippage_rate=slippage_rate * 2, max_bars=max_bars, cost_stress=False)
+            result['cost_stress'] = {'multiplier': 2, 'study': stressed,
+                                     'model': '2x paper fees and adverse modeled market slippage; '
+                                              'limit prices unchanged; checker fee/slippage assumptions doubled',
+                                     'venue_costs_verified': False, 'parameters_refit': False}
+            result['stress_survivors'] = {
+                variant: bool(result['retention_criteria_passed'][variant]
+                              and stressed.get('complete')
+                              and stressed['input_hash'] == result['input_hash']
+                              and stressed['variants'][variant]['trade_count'] > 0
+                              and stressed['variants'][variant]['ending_equity'] > capital
+                              and stressed['diagnostics'][variant]['invalid_checks'] == 0)
+                for variant in result['retention_criteria_passed']}
+            if not stressed.get('complete'):
+                result['complete'] = False
+                result['retention_criteria_passed'] = {v: False for v in result['retention_criteria_passed']}
         return result
     except Exception as exc:  # noqa: BLE001 - failed research never authorizes trading
         return {'complete': False, 'filter_enabled': False, 'provenance_verified': False,

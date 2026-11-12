@@ -19,7 +19,7 @@ For the full Windows installation, implementation and validation procedure, see
 For the consolidated item-by-item implementation and external-evidence backlog, see
 [`REMAINING_WORK.md`](REMAINING_WORK.md). It does not mark unfinished work complete.
 
-**Last updated:** 2026-11-02 · **Suite:** 1391 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-02 · **Suite:** 1393 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -276,3 +276,5 @@ Fill this in as phases complete — it is what `docs/RESULTS.md` is built from.
 - [ ] Acquire verified data and execute meaningful recorded OOS comparisons; cold-start/modeled-fill plumbing tests are not evidence of an edge.
 
 - [x] Research engine study refuses incomplete per-symbol candle coverage, corrupt execution input and early/L3 termination; drains all symbols at the final close.
+
+- [x] Optional actual four-variant2x modeled-cost rerun (eight fresh engines), identical input hashes/frozen strategy settings and explicit stress-survivor research results; no post-hoc adjustment.

@@ -106,10 +106,12 @@ Use `python -m tradebot.backtest.timemachine_cli --help` from the repository wit
 python -m tradebot.backtest.timemachine_cli `
   --config-dir config --archive-root $ArchiveRoot `
   --start $StudyStart --end $StudyEnd --holdout-start $HoldoutStart `
-  --fee-rate $FeeRate --slippage-rate $SlippageRate `
+  --fee-rate $FeeRate --slippage-rate $SlippageRate --cost-stress `
   --output reports/timemachine-study.json
 ```
 
 The output refuses overwrite, always reports `filter_enabled=false` and `provenance_verified=false`, and includes retention arithmetic, input/settings hashes, per-run diagnostics and bounded candidate audit records. An incomplete study exits2. A successful command is research execution, not promotion authorization or a profit claim.
 
 - [x] Study integrity: contiguous valid execution coverage for every configured symbol, aligned bounds, final-close multi-symbol drain and expected emitted/processed base-bar count. Incomplete/lockdown runs cannot pass retention.
+
+- [x] Optional actual2x modeled-cost rerun across all four variants with fresh engines/portfolios, doubled paper fees/adverse market slippage and checker cost assumptions, unchanged strategy parameters and same input hash. `stress_survivors` additionally requires nominal retention and nonzero profitable stress trades without check failures. Still no verified venue costs or promotion authority.

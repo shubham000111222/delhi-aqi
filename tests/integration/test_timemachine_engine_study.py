@@ -84,10 +84,11 @@ def test_research_cli_writes_disabled_evidence_and_refuses_overwrite(fast_cfg, t
     output = tmp_path / 'study.json'
     args = ['--config-dir', str(fast_cfg.settings.config_dir), '--archive-root', str(archive.root),
             '--start', START.isoformat(), '--end', END.isoformat(), '--holdout-start', END.isoformat(),
-            '--fee-rate', '.001', '--slippage-rate', '.0005', '--output', str(output)]
+            '--fee-rate', '.001', '--slippage-rate', '.0005', '--cost-stress', '--output', str(output)]
     assert main(args) == 0
     evidence = json.loads(output.read_text())
     assert evidence['complete'] and not evidence['filter_enabled']
+    assert evidence['cost_stress']['multiplier'] == 2
     before = output.read_bytes()
     assert main(args) == 2
     assert output.read_bytes() == before
@@ -136,3 +137,44 @@ async def test_missing_symbol_gap_and_invalid_prices_refused_before_engine_build
         assert not result['complete']
         assert 'AssertionError' not in result['error']
         assert not any(result['retention_criteria_passed'].values())
+
+
+async def test_cost_stress_runs_eight_fresh_engines_with_changed_costs(fast_cfg, monkeypatch):
+    built = []
+    original = Engine.build
+
+    async def build(*args, **kwargs):
+        engine = await original(*args, **kwargs)
+        built.append(engine)
+        return engine
+
+    monkeypatch.setattr(Engine, 'build', build)
+    original_fee = fast_cfg.settings.paper.taker_fee
+    result = await run_engine_study(fast_cfg, tape(), {}, start=START, end=END,
+                                    final_holdout_start=END, fee_rate=.001, slippage_rate=.0005,
+                                    cost_stress=True)
+    assert result.get('complete'), result
+    assert len(built) == 8 and len({id(e.store) for e in built}) == 8
+    assert all(e.cfg.settings.paper.taker_fee == original_fee for e in built[:4])
+    assert all(e.cfg.settings.paper.taker_fee == original_fee*2 for e in built[4:])
+    assert all(e.cfg.settings.paper.slippage_multiplier == fast_cfg.settings.paper.slippage_multiplier*2
+               for e in built[4:])
+    assert built[5]._research_candidate_gate.fee_rate == .002
+    assert built[5]._research_candidate_gate.slippage_rate == .001
+    assert fast_cfg.settings.paper.taker_fee == original_fee
+    stressed = result['cost_stress']['study']
+    assert result['input_hash'] == stressed['input_hash']
+    assert result['settings_hash'] != stressed['settings_hash']
+    assert not any(result['stress_survivors'].values())
+    assert not result['filter_enabled'] and not result['cost_stress']['venue_costs_verified']
+
+
+async def test_cost_stress_failure_invalidates_retention(fast_cfg):
+    # Doubling this already-high multiplier exceeds the simulator's bounded model.
+    fast_cfg.settings.paper.slippage_multiplier = Decimal('6')
+    result = await run_engine_study(fast_cfg, tape(), {}, start=START, end=END,
+                                    final_holdout_start=END, fee_rate=.001, slippage_rate=0,
+                                    cost_stress=True)
+    assert not result['complete']
+    assert not any(result['retention_criteria_passed'].values())
+    assert not result['filter_enabled']
