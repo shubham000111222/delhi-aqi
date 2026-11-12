@@ -28,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--fee-rate', type=float, required=True, help='checker fee assumption per leg')
     parser.add_argument('--slippage-rate', type=float, required=True, help='checker adverse slippage assumption')
     parser.add_argument('--windows-file', type=Path, help='predeclared JSON list of 3..24 start/end windows; replaces --start/--end')
+    parser.add_argument('--replay-days', type=int, choices=range(60, 181), default=60, metavar='60..180')
     parser.add_argument('--max-bars', type=int, default=288)
     parser.add_argument('--current-volatility', action='store_true', help='use fixed trailing24h closed5m volatility ratio')
     parser.add_argument('--cost-stress', action='store_true', help='rerun all four variants at 2x modeled costs')
@@ -80,19 +81,19 @@ def main(argv: list[str] | None = None) -> int:
             return result
 
         execution = load(config.settings.base_timeframe, start)
-        history = load('5m', start-timedelta(days=60))
+        history = load('5m', start-timedelta(days=args.replay_days))
         if windows is None:
             result = asyncio.run(run_engine_study(config, execution, history, start=start, end=end,
                                                   final_holdout_start=holdout, fee_rate=args.fee_rate,
                                                   slippage_rate=args.slippage_rate, max_bars=args.max_bars,
                                                   cost_stress=args.cost_stress,
-                                                  volatility_scale=None if args.current_volatility else 1.))
+                                                  volatility_scale=None if args.current_volatility else 1., replay_days=args.replay_days))
         else:
             result = asyncio.run(run_window_studies(config, execution, history, windows=windows,
                                                    final_holdout_start=holdout, fee_rate=args.fee_rate,
                                                    slippage_rate=args.slippage_rate, max_bars=args.max_bars,
                                                    cost_stress=args.cost_stress,
-                                                  volatility_scale=None if args.current_volatility else 1.))
+                                                  volatility_scale=None if args.current_volatility else 1., replay_days=args.replay_days))
         publish_evidence(args.output, result)
         print(f"Research complete={result['complete']}; filter_enabled=False; report={args.output}")
         return 0 if result['complete'] else 2

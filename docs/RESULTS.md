@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Separate bootstrap/replay lookback windows
+
+- Added `replay_days=60..180` through checker, simulated bridge, isolated/stressed/multi-window runners and CLI `--replay-days`. CLI requests enough pre-study history for the declared replay window. Invalid/bool lookbacks skip/refuse; default remains60.
+- Bootstrap preparation remains last60 days with minimum30. Longer replay uses independently prepared contiguous history with minimum60 days, separate input hash and window/minimum-sensitive bounded cache keys. A requested120/180-day cap may contain fewer days if at least60 valid contiguous days are available; recorded dates/hash disclose actual coverage. Replay-only omits bootstrap simulation as before.
+- Four cases verify a120-day replay receives120 days while bootstrap receives only60, replay cache reuse/invalidation is window-specific, bootstrap hash stays unchanged and invalid lookbacks alert/skip. Full suite **1460 passed, 2 skipped**, Ruff/mypy/diff clean. Longer preparation may exceed cooperative budget and skip; no cold180-day timing guarantee, OOS edge, limit parity or activation claimed.
+
 ## Strict engine candidate-result contract
 
 - Simulated engine hook now requires canonical verdict/multiplier consistency: PASS=1, SIZE DOWN=0.5, SKIP=0. Missing/unknown/contradictory verdicts fail closed with audited SKIP/check_failed instead of relying only on numeric bounds.

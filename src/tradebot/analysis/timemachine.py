@@ -409,10 +409,25 @@ class TimeMachine:
         except Exception:  # noqa: BLE001 - alert failure cannot allow a trade
             return False
 
+    def _prepared(self, bars: Sequence[Candle], symbol: str, decision_time: datetime,
+                  days: int, *, minimum_days: int = 30) -> History:
+        closed = tuple(b for b in bars if b.symbol == symbol
+                       and decision_time - timedelta(days=days) <= b.ts < decision_time
+                       and b.close_time <= decision_time)
+        key = (symbol, decision_time, days, minimum_days, closed)
+        history = self._history_cache.get(key)
+        if history is None:
+            history = prepare_history(closed, symbol, decision_time, days=days, minimum_days=minimum_days)
+            self._history_cache[key] = history
+            if len(self._history_cache) > self.cache_entries:
+                self._history_cache.popitem(last=False)
+        self._history_cache.move_to_end(key)
+        return history
+
     def check(self, bars: Sequence[Candle] | Callable[[], Sequence[Candle]], symbol: str, decision_time: datetime,
               plan: ReplayPlan, trade_id: str, rule: Callable[[Sequence[Candle]], ReplayPlan | None], *,
               fee_rate: float, slippage_rate: float, rule_version: str, volatility_scale: float | None = 1.,
-              coin_flip_skip: bool = True, variant: str = 'both') -> dict[str, object]:
+              coin_flip_skip: bool = True, variant: str = 'both', replay_days: int = 60) -> dict[str, object]:
         started = time.perf_counter()
         deadline = started + self.budget_ms / 1000
         paths = self.paths
@@ -421,6 +436,9 @@ class TimeMachine:
         try:
             if variant not in ('both', 'simulation_only', 'replay_only'):
                 raise ValueError('unknown research check variant')
+            if type(replay_days) is not int or not 60 <= replay_days <= 180:
+                raise ValueError('replay lookback must be60..180 days')
+            result.update(bootstrap_days=60, replay_days=replay_days)
             result['seed'] = trade_seed(trade_id)
             if not isinstance(rule_version, str) or not rule_version:
                 raise ValueError('immutable replay rule version is required')
@@ -430,19 +448,7 @@ class TimeMachine:
                 bars = bars()
             if time.perf_counter() >= deadline:
                 raise TimeoutError('history provider budget exceeded')
-            # Immutable values, not just timestamps, key standardized-return reuse.
-            # Future rows do not invalidate a past decision's cache entry.
-            closed = tuple(b for b in bars if b.symbol == symbol
-                           and decision_time - timedelta(days=60) <= b.ts < decision_time
-                           and b.close_time <= decision_time)
-            key = (symbol, decision_time, closed)
-            history = self._history_cache.get(key)
-            if history is None:
-                history = prepare_history(closed, symbol, decision_time)
-                self._history_cache[key] = history
-                if len(self._history_cache) > self.cache_entries:
-                    self._history_cache.popitem(last=False)
-            self._history_cache.move_to_end(key)
+            history = self._prepared(bars, symbol, decision_time, 60)
             result['input_hash'] = history.input_hash
             if variant != 'replay_only' and volatility_scale is None:
                 estimator = current_volatility_scale(history)
@@ -454,10 +460,15 @@ class TimeMachine:
                 raise TimeoutError('history preparation budget exceeded')
             replay: dict[str, object] = {'insufficient': True}
             if variant != 'simulation_only':
-                replay_key = (history.input_hash, rule, rule_version, fee_rate, slippage_rate)
+                replay_history = (history if replay_days == 60 else
+                                  self._prepared(bars, symbol, decision_time, replay_days, minimum_days=60))
+                if time.perf_counter() >= deadline:
+                    raise TimeoutError('replay history preparation budget exceeded')
+                result['replay_input_hash'] = replay_history.input_hash
+                replay_key = (replay_history.input_hash, rule, rule_version, fee_rate, slippage_rate)
                 cached_replay = self._replay_cache.get(replay_key)
                 if cached_replay is None:
-                    cached_replay = replay_rule(history, rule, fee_rate=fee_rate, slippage_rate=slippage_rate,
+                    cached_replay = replay_rule(replay_history, rule, fee_rate=fee_rate, slippage_rate=slippage_rate,
                                                 deadline=deadline)
                     self._replay_cache[replay_key] = cached_replay
                     if len(self._replay_cache) > self.cache_entries:

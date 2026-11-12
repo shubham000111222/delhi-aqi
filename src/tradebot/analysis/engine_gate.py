@@ -32,9 +32,10 @@ class TimeMachineEngineGate:
                  history: Callable[[str, datetime], Sequence[Candle]],
                  bindings: Mapping[str | tuple[str, str], ReplayBinding], *, fee_rate: float,
                  slippage_rate: float, volatility_scale: float | None = 1., coin_flip_skip: bool = True,
-                 variant: str = 'both'):
+                 variant: str = 'both', replay_days: int = 60):
         if variant not in ('both', 'simulation_only', 'replay_only'):
             raise ValueError('unsupported research check variant')
+        self.replay_days = replay_days
         self.variant = variant
         self.machine = machine
         self.history = history
@@ -59,7 +60,7 @@ class TimeMachineEngineGate:
             lambda: self.history(signal.symbol, decision_time), signal.symbol, decision_time,
             plan, signal.id, binding.rule, fee_rate=self.fee_rate,
             slippage_rate=self.slippage_rate, rule_version=binding.version,
-            volatility_scale=self.volatility_scale, coin_flip_skip=self.coin_flip_skip, variant=self.variant)
+            volatility_scale=self.volatility_scale, coin_flip_skip=self.coin_flip_skip, variant=self.variant, replay_days=self.replay_days)
         return {**result, 'strategy': signal.strategy, 'symbol': signal.symbol,
                 'decision_time': decision_time.isoformat(), 'rule_version': binding.version,
                 'fee_rate': self.fee_rate, 'slippage_rate': self.slippage_rate,

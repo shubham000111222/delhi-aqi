@@ -148,7 +148,7 @@ async def test_bridge_forwards_actual_plan_identity_cutoff_and_costs(engine, sig
     assert (args[3].entry, args[3].stop, args[3].target, args[3].side, args[3].max_bars) == (100, 99, 102, 1, 48)
     assert args[4:] == (signal.id, rule)
     assert kwargs == {'fee_rate': .002, 'slippage_rate': .001, 'rule_version': 'frozen-v2',
-                      'volatility_scale': 1.2, 'coin_flip_skip': False, 'variant': 'both'}
+                      'volatility_scale': 1.2, 'coin_flip_skip': False, 'variant': 'both', 'replay_days': 60}
 
 
 @pytest.mark.parametrize('unsupported', ['limit', 'missing_rule', 'future'])

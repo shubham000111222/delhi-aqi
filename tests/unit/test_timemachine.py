@@ -393,3 +393,52 @@ def test_checker_auto_volatility_is_logged_and_forwarded(bars, monkeypatch):
     assert result['multiplier'] == 1
     assert result['volatility_estimator']['scale'] == simulate.call_args.kwargs['volatility_scale']
     assert result['volatility_estimator']['return_observations'] == 288
+
+
+def test_longer_replay_never_expands_bootstrap_history_and_cache_is_window_specific(bars, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import tradebot.analysis.timemachine as tm
+
+    monkeypatch.setattr(tm, 'time', SimpleNamespace(perf_counter=lambda: 0.))
+    older = tuple(replace(b, ts=b.ts-timedelta(days=60)) for b in bars)
+    data = (*older, *bars)
+    simulate = Mock(return_value={'expected_net_r': .2, 'p05_r': -1., 'time_exit': .1,
+                                  'target_first': .5, 'stop_first': .4})
+    replay = Mock(return_value={'insufficient': True, 'expected_net_r': None})
+    monkeypatch.setattr(tm, 'simulate_trade', simulate)
+    monkeypatch.setattr(tm, 'replay_rule', replay)
+    machine = tm.TimeMachine(lambda message: None)
+
+    def rule(past):
+        return None
+
+    def check(days):
+        return machine.check(data, 'BTC/USDT', END, ReplayPlan(100, 99, 101), 'long-window', rule,
+                             fee_rate=0, slippage_rate=0, rule_version='v1', replay_days=days)
+
+    long = check(120)
+    assert long['multiplier'] == 1
+    assert len(simulate.call_args.args[0].bars) == 60*288
+    assert len(replay.call_args.args[0].bars) == 120*288
+    assert long['input_hash'] != long['replay_input_hash']
+    assert check(120)['replay_input_hash'] == long['replay_input_hash']
+    assert replay.call_count == 1
+    short = check(60)
+    assert replay.call_count == 2
+    assert len(replay.call_args.args[0].bars) == 60*288
+    assert short['input_hash'] == long['input_hash']
+    assert short['replay_input_hash'] != long['replay_input_hash']
+    assert len(machine._history_cache) <= machine.cache_entries
+
+
+@pytest.mark.parametrize('days', [59, 181, True])
+def test_invalid_replay_lookback_skips_and_alerts(bars, days):
+    from tradebot.analysis.timemachine import TimeMachine
+
+    alerts = []
+    result = TimeMachine(alerts.append).check(
+        bars, 'BTC/USDT', END, ReplayPlan(100, 99, 101), 'invalid-days', lambda past: None,
+        fee_rate=0, slippage_rate=0, rule_version='v1', replay_days=days)
+    assert result['multiplier'] == 0 and result['check_failed'] and alerts

@@ -154,3 +154,5 @@ Reports preserve independent window drawdowns, not a fabricated concatenated cur
 - [x] Evidence/settings identity includes bounded local Python-source digest and file manifest, checked after each engine and across nominal/stressed runs. Dependencies/interpreter, privileged mutation and venue/OOS provenance remain outside this fingerprint.
 
 - [x] Engine-boundary verdict contract: PASS1/SIZE DOWN0.5/SKIP0 only; missing/contradictory verdicts, malformed flags, positive failed/timed-out results and enablement claims skip. Does not authenticate caller evidence or bypass risk.
+
+- [x] `--replay-days` selects60–180-day replay cap (minimum60 valid contiguous days); bootstrap always uses last60 days/minimum30. Separate replay/bootstrapped hashes and cache keys prevent longer replay data entering bootstrap. Default60 unchanged; select lookback before evaluating outcomes, not to tune a holdout. Longer-window latency is unverified.
