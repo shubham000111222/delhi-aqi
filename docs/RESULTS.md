@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Atomic bounded research evidence publication
+
+- Research CLI now streams strict JSON to a same-directory hidden temporary file, enforces64MiB byte limit, flushes/fsyncs file contents, then atomically publishes via no-clobber hard link. Serialization failures, NaNs, oversized output and racing destination creators cannot leave a partial destination or overwrite an existing report. No rename/overwrite fallback when filesystem hard links are unsupported.
+- Normal/error cleanup removes scratch files; an actual process crash can leave hidden scratch files requiring operator inspection. File fsync is not a claim of power-loss directory durability, authenticated evidence or tamper protection. Destination-directory trust and Windows/filesystem hard-link support still require actual host verification; unsupported publication refuses.
+- Six new unit cases cover success/no-overwrite, three encoding/size failures, a racing creator and unsupported filesystem; existing single/multi-window CLI integration covers publication. Full suite **1440 passed, 2 skipped**; Ruff/mypy/diff clean. This is evidence export safety, not OOS/latency/live certification.
+
 ## Strict recorded metrics values and timestamps
 
 - Shared collector now refuses missing/invalid/naive timestamps instead of substituting wall-clock now; aware timestamps normalize to UTC. Backwards equity sequences and trades ending before opening are rejected.

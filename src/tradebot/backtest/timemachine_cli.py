@@ -12,6 +12,7 @@ from ..config import load_config
 from ..core.clock import parse_iso
 from ..core.models import Candle
 from ..data.archive import Archive
+from .evidence_export import publish_evidence
 from .timemachine_engine_study import run_engine_study
 from .timemachine_study import StudyWindow
 from .timemachine_windows import ResearchWindow, run_window_studies, validate_windows
@@ -92,9 +93,7 @@ def main(argv: list[str] | None = None) -> int:
                                                    slippage_rate=args.slippage_rate, max_bars=args.max_bars,
                                                    cost_stress=args.cost_stress,
                                                   volatility_scale=None if args.current_volatility else 1.))
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        with args.output.open('x', encoding='utf-8') as stream:
-            json.dump(result, stream, indent=2, default=str, allow_nan=False)
+        publish_evidence(args.output, result)
         print(f"Research complete={result['complete']}; filter_enabled=False; report={args.output}")
         return 0 if result['complete'] else 2
     except Exception as exc:  # noqa: BLE001 - CLI never converts failure into enablement
