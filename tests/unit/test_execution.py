@@ -733,3 +733,43 @@ async def test_paper_adapter_direct_refuses_non_boolean_reduce_only(cfg, invalid
     with pytest.raises(PermanentExchangeError, match="reduce_only must be boolean"):
         await adapter.place_order(request)
     assert not adapter.orders
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field,value', [
+    ('client_order_id', 'wrong'), ('symbol', 'ETH/USDT'), ('side', Side.SELL),
+    ('qty', D('0.5')), ('strategy', 'wrong'), ('signal_id', 'wrong'),
+    ('reduce_only', 'false'), ('price', D('1')),
+])
+async def test_timeout_lookup_conflict_is_not_recovery_or_safe_retry(cfg, field, value):
+    from dataclasses import replace
+
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(':memory:')
+    switch = KillSwitch(store, clock=clock, mode=Mode.PAPER, kill_file=None)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    original = adapter.place_order
+    original_get = adapter.get_order
+    calls = []
+
+    async def timeout(request):
+        calls.append(request.client_order_id)
+        await original(request)
+        raise TransientExchangeError('timeout after acceptance')
+
+    async def conflicting(client_id):
+        return replace(await original_get(client_id), **{field: value})
+
+    adapter.place_order = timeout
+    adapter.get_order = conflicting
+    signal = Signal(id='conflict', strategy='S1', symbol='BTC/USDT', timeframe='15m',
+                    side=Side.BUY, entry_type=OrderType.MARKET, ts=NOW,
+                    stop=D('59000'), target=D('62000'))
+    assert await manager.submit_entry(signal, D('0.001'), price=D('60000')) is None
+    assert len(calls) == 1
+    assert store.count_events('order_recovery_conflict') == 1
+    assert store.count_events('order_recovered') == 0
+    assert store.has_execution_observation_fault()
+    assert not switch.can_open_entries()
+    store.close()

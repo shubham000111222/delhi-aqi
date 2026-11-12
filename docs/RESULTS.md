@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest timeout recovery consistency pass (working branch)
+
+- The order manager now checks lookup results against submitted intent before recording recovery: client ID, symbol, side/type, strategy/signal, strict boolean reduce-only, stop, rounded quantity and price. A conflicting result latches the observation hold, records a recovery conflict, and follows unknown-outcome handling without assuming venue absence or retrying even in paper mode.
+- Full suite **1255 passed, 2 skipped**; Ruff, mypy and diff checks passed. Eight conflicting-field timeout cases verify no second submit, no recovered event and blocked entries. Existing matching recovery tests still pass.
+- Local consistency is not independently verified venue completeness, account identity or authenticated recovery. Stop/time-in-force venue semantics, raw process/database mutation and in-flight orders remain outside the proof. Phase D and phases E–I remain incomplete; live gates stay blocked. The server continues on port 8000 in paper/synthetic/read-only/1× mode, but the user's reported Arena gateway timeout/QUIC failure remains unresolved; local HTTP success is not browser-access evidence.
+
 ## Latest cached client-ID intent pass (working branch)
 
 - CCXT cached-ID return now compares symbol, side/type, stop price, reduce-only assertion, strategy/signal identity and rounded quantity/price against the original tracked order. A conflict refuses, preserves the original order and latches the durable observation hold. Equivalent rounded requests retain the ordinary process-local idempotent return.

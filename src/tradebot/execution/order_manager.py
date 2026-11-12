@@ -341,6 +341,14 @@ class OrderManager:
                     lookup_ok = False
                 else:
                     lookup_ok = True
+                if existing is not None and not self._recovered_order_matches(request, existing):
+                    self.killswitch.latch_execution_observation_fault(request.client_order_id)
+                    self.store.log_event(
+                        "order_recovery_conflict", {"client_order_id": request.client_order_id},
+                        level="CRIT", actor="execution", ts=self.clock.now(),
+                    )
+                    existing = None
+                    lookup_ok = False  # a conflicting result is not authoritative absence
                 if existing is not None:
                     self.store.upsert_order(existing)
                     self.store.log_event(
@@ -399,6 +407,23 @@ class OrderManager:
                 trigger="reject_storm",
                 reason=f"{self.rejects_window.count()} rejects in {self.cfg.risk.rejects_window_seconds}s",
             )
+
+    def _recovered_order_matches(self, request: OrderRequest, order: Order) -> bool:
+        """Local intent consistency only; does not certify venue identity/coverage."""
+        try:
+            rules = self.adapter.get_market_rules(request.symbol)
+            return (
+                type(order.reduce_only) is bool
+                and (order.client_order_id, order.symbol, order.side, order.type,
+                     order.strategy, order.signal_id, order.reduce_only, order.stop_price)
+                == (request.client_order_id, request.symbol, request.side, request.type,
+                    request.strategy, request.signal_id, request.reduce_only, request.stop_price)
+                and order.qty == round_qty(request.qty, rules.lot_step)
+                and order.price == (round_price(request.price, rules.tick_size, request.side.value)
+                                    if request.price else None)
+            )
+        except (ArithmeticError, TypeError, ValueError, KeyError):
+            return False
 
     async def _safe_get_order(self, client_order_id: str) -> Order | None:
         try:
