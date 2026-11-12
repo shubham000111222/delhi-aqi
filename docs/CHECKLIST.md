@@ -19,7 +19,7 @@ For the full Windows installation, implementation and validation procedure, see
 For the consolidated item-by-item implementation and external-evidence backlog, see
 [`REMAINING_WORK.md`](REMAINING_WORK.md). It does not mark unfinished work complete.
 
-**Last updated:** 2026-11-02 · **Suite:** 1264 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-02 · **Suite:** 1275 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -30,6 +30,7 @@ machine; this workspace has no real-price archive.
 - [x] Add action-bound, single-use offline-signed reductions of an enabled strategy size; this cannot authorize increases or release holds.
 - [x] Serialize consecutive-loss updates and threshold actions across engines with a single SQLite transaction; corrupt streak records block normal entries.
 - [x] Commit the normal persisted position closure and loss-streak controls in one SQLite transaction; refuse a repeated close of the same open row.
+- [x] Reject unknown order status and nonfinite/negative/inconsistent execution totals at order-manager successful-response and timeout-recovery checks; overfills and missing positive averages cannot report success.
 - [x] Apply intent consistency checks to successful adapter responses before order-manager persistence/success reporting; conflicting or absent results hold entries and do not authorize a resend.
 - [x] Validate order-manager timeout lookup results against requested client ID, symbol, side/type, strategy/signal, boolean reduce-only, stop and rounded quantity/price; conflicts hold entries and cannot authorize a retry.
 - [x] Refuse conflicting reuse of a cached CCXT client ID (symbol, side/type, rounded quantity/price, stop, strategy/signal and reduce-only assertion); preserve the original order and latch the observation hold.

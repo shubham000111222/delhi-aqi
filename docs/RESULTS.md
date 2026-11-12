@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest execution-total response validation (working branch)
+
+- Shared order-manager response/recovery consistency now requires an OrderStatus enum, finite Decimal quantity/fill/average/fee, positive submitted quantity, fill quantity within [0, submitted], nonnegative average/fee, positive average for nonzero fills, and finite positive optional order price. Invalid results follow the existing durable observation hold and conflict path without a resend.
+- Full suite **1275 passed, 2 skipped**; Ruff, mypy and diff checks passed. Eleven malformed fake-adapter responses cover unknown status, boolean/negative/nonfinite/overfilled quantity, missing positive average, invalid fees and infinite price. Ordinary submissions and matching timeout recovery remain passing.
+- Nonnegative fee policy is deliberately conservative: negative maker rebates need separately specified authoritative accounting before acceptance. This checks returned order totals, not pre-callback CCXT fill bounds, prior external execution or venue completeness. No independently verified reconciliation, authenticated hold release or replay is supplied; D–I remain incomplete and live gates blocked. Port 8000 server continues paper/synthetic/read-only/1× and predates this pass; Arena browser access remains unresolved.
+
 ## Latest successful-response consistency pass (working branch)
 
 - Order-manager successful placement now uses the same intent consistency check as timeout recovery before persisting an order or counting it submitted. Conflicting/absent responses latch the durable observation fault, record a conflict, attempt L1 escalation and return without a resend. An already-executed external fill cannot be undone by this check.

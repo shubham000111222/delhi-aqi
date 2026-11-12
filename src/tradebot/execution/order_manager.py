@@ -426,6 +426,19 @@ class OrderManager:
         """Local intent consistency only; does not certify venue identity/coverage."""
         try:
             rules = self.adapter.get_market_rules(request.symbol)
+            if not isinstance(order.status, OrderStatus):
+                return False
+            numbers = (order.qty, order.filled_qty, order.avg_fill_price, order.fee)
+            if not all(isinstance(value, Decimal) and value.is_finite() for value in numbers):
+                return False
+            if (order.qty <= 0 or order.filled_qty < 0 or order.filled_qty > order.qty
+                    or order.avg_fill_price < 0 or order.fee < 0
+                    or (order.filled_qty > 0 and order.avg_fill_price <= 0)):
+                return False
+            if order.price is not None and (
+                not isinstance(order.price, Decimal) or not order.price.is_finite() or order.price <= 0
+            ):
+                return False
             return (
                 type(order.reduce_only) is bool
                 and (order.client_order_id, order.symbol, order.side, order.type,

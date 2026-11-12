@@ -809,3 +809,38 @@ async def test_successful_submit_conflict_is_not_recorded_or_retried(cfg, field,
     assert store.has_execution_observation_fault()
     assert not switch.can_open_entries()
     store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('field,value', [
+    ('status', 'closed'), ('qty', D('NaN')), ('filled_qty', D('NaN')),
+    ('filled_qty', D('-1')), ('filled_qty', D('100')), ('filled_qty', True),
+    ('avg_fill_price', D('Infinity')), ('avg_fill_price', D('0')),
+    ('fee', D('-1')), ('fee', D('NaN')), ('price', D('Infinity')),
+])
+async def test_invalid_execution_totals_hold_instead_of_reporting_success(cfg, field, value):
+    from dataclasses import replace
+
+    clock = SimClock(NOW)
+    adapter = _adapter(cfg, _market(), clock)
+    store = Store(':memory:')
+    switch = KillSwitch(store, clock=clock, mode=Mode.PAPER, kill_file=None)
+    manager = OrderManager(cfg, adapter, store, switch, clock)
+    original = adapter.place_order
+    calls = []
+
+    async def malformed(request):
+        calls.append(request.client_order_id)
+        order = await original(request)
+        return replace(order, **{field: value})
+
+    adapter.place_order = malformed
+    signal = Signal(id='bad-totals', strategy='S1', symbol='BTC/USDT', timeframe='15m',
+                    side=Side.BUY, entry_type=OrderType.MARKET, ts=NOW,
+                    stop=D('59000'), target=D('62000'))
+    assert await manager.submit_entry(signal, D('0.001'), price=D('60000')) is None
+    assert len(calls) == 1
+    assert store.count_events('order_response_conflict') == 1
+    assert store.count_events('order_submitted') == 0
+    assert not switch.can_open_entries()
+    store.close()
