@@ -127,13 +127,13 @@ class Archive:
         return written
 
     # --- reads ---------------------------------------------------------------
-    def query(self, sql: str) -> list[dict[str, Any]]:
+    def query(self, sql: str, parameters: Sequence[Any] | None = None) -> list[dict[str, Any]]:
         """Run SQL against the archive; ``candles`` and ``books`` are views."""
         duckdb = _require("duckdb")
         connection = duckdb.connect()
         try:
             self._create_views(connection)
-            rows = connection.execute(sql).fetchall()
+            rows = connection.execute(sql, parameters or []).fetchall()
             columns = [description[0] for description in connection.description]
             return [dict(zip(columns, row, strict=False)) for row in rows]
         finally:
@@ -145,9 +145,10 @@ class Archive:
             if not any(self.root.glob(f"{kind}/**/*.parquet")):
                 connection.execute(f"CREATE OR REPLACE VIEW {view} AS SELECT NULL AS empty WHERE false")
                 continue
+            escaped_pattern = str(pattern).replace("'", "''")
             connection.execute(
                 f"CREATE OR REPLACE VIEW {view} AS "
-                f"SELECT * FROM read_parquet('{pattern}', hive_partitioning=true)"
+                f"SELECT * FROM read_parquet('{escaped_pattern}', hive_partitioning=true)"
             )
 
     def candles(

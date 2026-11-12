@@ -75,3 +75,8 @@ latency acceptance or a performance guarantee. The 250 ms gate remains unfulfill
 - [x] Explicit opt-in paper/SimClock/PaperAdapter-only hook before risk approval; SKIP prevents approval and DOWN reduces existing size multiplier. Audit failure holds entries.
 - [x] Real checker bridge for market entries, explicit recorded-history provider/versioned replay binding, actual candidate stop/target and persisted provenance. 24 integration cases; no implicit strategy or default activation.
 - [ ] Implement and verify each actual strategy replay binding, archived history provider and independent engine study runner; validate OOS retention/benefit and timing. Trades dashboard and daily report integration remain open.
+
+## Recorded history increment
+
+- [x] `ArchiveHistoryProvider` loads only closed5m symbol bars in the as-of window with bounded row count, exact Decimal values and no synthetic/resample/fill fallback. Archive provenance remains caller-supplied/unverified.
+- [ ] Validate supplied archive coverage/provenance on real data and include provider I/O in end-to-end latency acceptance; actual strategy-specific replay/limit-entry semantics and independent study wiring remain open.

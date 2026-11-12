@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine recorded archive provider
+
+- Added `analysis/archive_history.py` callable provider for the research engine bridge. Queries only the selected symbol's closed 5m rows at the decision cutoff, with 30–180-day bounded windows (default 60) and an extra-row overflow guard. Preserves Decimal prices, duplicates and gaps for independent checker validation; never resamples, forward-fills, deduplicates or falls back to synthetic input.
+- Archive queries now support bound parameters; the provider binds symbol/window/limit values and view creation escapes apostrophes in archive paths. Future/unclosed rows are excluded by the database query before conversion. Existing archive query callers remain compatible.
+- Nine new cases cover exact precision, symbol/timeframe/cutoff isolation, future appends/invalid future values, SQL-like symbol strings, quoted paths, missing archives, naive timestamps, lookback bounds, preserved duplicates/gaps and real engine/checker short-history rejection without archive writes.
+- Full suite **1364 passed, 2 skipped**, Ruff/mypy/diff clean. Tests use locally written fixture Parquet, not independently verified venue data. Reading archive data does not attest provenance/completeness; checker still rejects insufficient/stale/corrupt history. File reads/query time are not inside the checker's cooperative timing budget; no end-to-end 250 ms acceptance claimed. No default activation or strategy replay/limit-entry certification.
+
 ## Time Machine reporting integration
 
 - Added bounded read-only persisted-check views and plain-word order tickets with actual simulation/replay statistics. Missing/nonfinite metrics say unavailable. No illustrative or AI-generated odds. Candidate identity, verdict/multiplier, modeled-first-touch caveat and no-profit-promise text appear with the computed ticket.

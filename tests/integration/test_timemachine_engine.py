@@ -192,3 +192,28 @@ async def test_real_bootstrap_reaches_engine_audit_with_point_in_time_history(en
     assert len(payload['input_hash']) == 64
     assert 'simulation' in payload and 'replay' in payload
     assert payload['decision_time'] == START.isoformat()
+
+
+async def test_archive_provider_is_consumed_by_real_engine_gate(engine, signal, tmp_path):
+    from datetime import timedelta
+
+    from tradebot.analysis.archive_history import ArchiveHistoryProvider
+    from tradebot.analysis.engine_gate import ReplayBinding, TimeMachineEngineGate
+    from tradebot.analysis.timemachine import TimeMachine
+    from tradebot.core.models import Candle
+    from tradebot.data.archive import Archive
+
+    archive = Archive(tmp_path / 'recorded')
+    archive.write_candles([Candle(signal.symbol, '5m', START - timedelta(minutes=5),
+                                  Decimal('100'), Decimal('101'), Decimal('99'),
+                                  Decimal('100.1'), Decimal('1'))])
+    files_before = {p: p.read_bytes() for p in archive.root.rglob('*.parquet')}
+    alerts = []
+    engine.set_research_candidate_gate(TimeMachineEngineGate(
+        TimeMachine(alerts.append), ArchiveHistoryProvider(archive),
+        {'test': ReplayBinding(lambda past: None, 'v1')}, fee_rate=.001, slippage_rate=.0005))
+    assert await engine._research_candidate_multiplier(signal, Decimal('100')) == 0
+    payload = engine.store.events(kinds=['timemachine_check'])[0]['payload']
+    assert 'insufficient closed-bar lookback' in payload['reason']
+    assert payload['trade_id'] == signal.id and alerts
+    assert {p: p.read_bytes() for p in archive.root.rglob('*.parquet')} == files_before
