@@ -291,8 +291,13 @@ class LiveGuardChecker:
 
         ks = KillSwitch(self.store, mode=self.cfg.mode)
         open_allowed = ks.can_open_entries()
-        results.append(GuardResult("preflight_killswitch", open_allowed, f"kill level {ks.level.value}; "
-                                   + ("entry permitted" if open_allowed else "entry blocked")))
+        blockers = ks.entry_blockers()
+        results.append(GuardResult(
+            "preflight_killswitch", open_allowed and not blockers,
+            f"kill level {ks.level.value}; blockers: " + (", ".join(blockers) or "none observed")
+            + "; " + ("this gate passed" if open_allowed and not blockers else "entry blocked")
+            + "; point-in-time startup check excludes other-process local holds; not live authorization",
+        ))
         results.append(
             GuardResult(
                 "preflight_feed",

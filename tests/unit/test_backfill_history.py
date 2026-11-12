@@ -9,6 +9,7 @@ a partial chunk complete.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,9 @@ def history_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
     )
     config.ensure_dirs()
     monkeypatch.setattr(cli, "_config", lambda args: config)
+    # Fixed closed historical endpoint: wall-clock minute rollover must not change
+    # how many demo candles the CLI expects while the test is paging.
+    monkeypatch.setattr(cli, "utcnow", lambda: datetime(2024, 11, 2, tzinfo=UTC))
     return config
 
 

@@ -879,3 +879,35 @@ async def test_live_reconciliation_requirement_cannot_be_configured_away(cfg):
     checks = await LiveGuardChecker(cfg, store).check(reconciliation_clean=None)
     assert not next(row for row in checks if row.name == "preflight_reconciliation").passed
     store.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_names_durable_observation_fault(cfg, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(':memory:')
+    try:
+        store.latch_execution_observation_fault('ambiguous-order')
+        checks = await LiveGuardChecker(cfg, store).check()
+        gate = next(row for row in checks if row.name == 'preflight_killswitch')
+        assert not gate.passed
+        assert 'execution_observation_fault' in gate.detail
+        assert 'not live authorization' in gate.detail
+        assert store.has_execution_observation_fault()
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_empty_blockers_does_not_claim_live_authorization(cfg, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(':memory:')
+    try:
+        checks = await LiveGuardChecker(cfg, store).check()
+        gate = next(row for row in checks if row.name == 'preflight_killswitch')
+        assert gate.passed
+        assert 'none observed' in gate.detail and 'this gate passed' in gate.detail
+        assert 'other-process local holds' in gate.detail
+        assert 'entry permitted' not in gate.detail
+        assert 'not live authorization' in gate.detail
+    finally:
+        store.close()
