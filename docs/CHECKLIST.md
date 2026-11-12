@@ -19,7 +19,7 @@ For the full Windows installation, implementation and validation procedure, see
 For the consolidated item-by-item implementation and external-evidence backlog, see
 [`REMAINING_WORK.md`](REMAINING_WORK.md). It does not mark unfinished work complete.
 
-**Last updated:** 2026-11-02 · **Suite:** 1324 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-02 · **Suite:** 1348 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -259,3 +259,6 @@ Fill this in as phases complete — it is what `docs/RESULTS.md` is built from.
 | --- | --- | --- | --- | --- |
 | 2026-11-03 | 1 | `backfill --days 30 --write` | 5 symbols, 216,198 bars, gaps 0, coverage 1.0 | complete (2 symbols mislabelled `STUCK` — fixed in Phase 0) |
 |  |  |  |  |  |
+
+- [x] Simulated-paper engine candidate hook and TimeMachine checker bridge, bounded multiplier before unchanged risk sizing, audited results and 24 integration cases.
+- [ ] Supply verified strategy-specific replay rules and recorded-history providers; execute independent four-variant engine studies, validate OOS and latency before any enablement.

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import shutil
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -47,6 +48,7 @@ from .core.store import Store
 from .data.feed import BaseFeed, make_feed
 from .data.hub import MarketData
 from .execution.adapters.base import ExchangeAdapter
+from .execution.adapters.paper import PaperAdapter
 from .execution.order_manager import OrderManager
 from .execution.slippage import SlippageRecorder, size_for_budget
 from .heal import Playbook, Row
@@ -138,6 +140,7 @@ class Engine:
         self.om = order_manager
         self.strategies = strategies
         self.notifier = notifier
+        self._research_candidate_gate: Any = None
         self.stats = EngineStats()
         # §20.2: every component answers liveness / readiness / correctness, and the
         # model remembers only what changed. It holds no policy - the playbook does.
@@ -528,6 +531,47 @@ class Engine:
     # ------------------------------------------------------------------
     # entry path
     # ------------------------------------------------------------------
+    def set_research_candidate_gate(self, gate: Any) -> None:
+        """Explicit experimental injection only; no configuration/live enable path."""
+        if (self.cfg.mode is not Mode.PAPER or not isinstance(self.clock, SimClock)
+                or not isinstance(self.adapter, PaperAdapter) or self.adapter.mode is not Mode.PAPER
+                or not callable(gate)):
+            raise PermissionError("candidate research gate requires simulated paper execution")
+        self._research_candidate_gate = gate
+
+    async def _research_candidate_multiplier(self, signal: Signal, mark: Decimal) -> Decimal:
+        payload: dict[str, Any]
+        try:
+            if (self.cfg.mode is not Mode.PAPER or not isinstance(self.clock, SimClock)
+                    or not isinstance(self.adapter, PaperAdapter) or self.adapter.mode is not Mode.PAPER):
+                raise PermissionError("research gate runtime is not simulated paper")
+            payload = self._research_candidate_gate(signal, self.clock.now(), mark)
+            if not isinstance(payload, dict) or payload.get("trade_id") != signal.id:
+                raise ValueError("candidate check identity mismatch")
+            value = payload.get("multiplier")
+            if isinstance(value, bool) or not isinstance(value, (float, int, Decimal)):
+                raise ValueError("invalid candidate multiplier")
+            multiplier = D(str(value))
+            if not multiplier.is_finite() or multiplier not in (ZERO, D("0.5"), D("1")):
+                raise ValueError("candidate multiplier outside research bounds")
+            if len(json.dumps(payload, allow_nan=False, default=str).encode()) > 65536:
+                raise ValueError("candidate result exceeds audit limit")
+        except Exception as exc:  # noqa: BLE001 - research errors never permit entry
+            multiplier = ZERO
+            payload = {"trade_id": signal.id, "multiplier": 0, "verdict": "SKIP",
+                       "reason": type(exc).__name__ + ": " + str(exc)}
+        try:
+            self._log("timemachine_check", {**payload, "research_only": True}, actor="analysis")
+        except Exception:  # noqa: BLE001 - unlogged decisions may not execute
+            self.killswitch.latch_local_entry_hold()
+            multiplier = ZERO
+        if multiplier == 0 and self.notifier is not None:
+            try:
+                await self.notifier.send(f"Time Machine research: SKIP {signal.id}", level="WARN")
+            except Exception:  # noqa: BLE001 - notifier failure never allows a trade
+                self.killswitch.latch_local_entry_hold()
+        return multiplier
+
     async def _try_enter(self, signal: Signal, ctx: StrategyContext) -> None:
         # market-hours gate (§18.8): an entry outside the venue's session is not a trade,
         # it is a rejection waiting to happen. Crypto is always open, so this is free.
@@ -545,9 +589,17 @@ class Engine:
             self.stats.vetoes += 1
             self.store.save_verdict(signal.id, self._veto("kill_switch", f"kill level {self.killswitch.level.value}"))
             return
+        research_multiplier = D("1")
+        if self._research_candidate_gate is not None:
+            research_multiplier = await self._research_candidate_multiplier(signal, ctx.mark)
+            if research_multiplier == 0:
+                self.stats.vetoes += 1
+                self.store.save_verdict(signal.id, self._veto("timemachine", "research check skipped candidate"))
+                return
         rules = self.adapter.get_market_rules(signal.symbol)
         try:
             risk_ctx = self._risk_context(signal.symbol, signal.strategy)
+            risk_ctx = replace(risk_ctx, size_multiplier=risk_ctx.size_multiplier * research_multiplier)
         except (ValueError, ArithmeticError):
             self.stats.vetoes += 1
             self.store.save_verdict(signal.id, self._veto("strategy_size", "invalid strategy size multiplier"))

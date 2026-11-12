@@ -9,6 +9,14 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine simulated-engine bridge
+
+- Added explicit `Engine.set_research_candidate_gate` injection restricted at attachment and execution to paper mode, SimClock and PaperAdapter. Candidate checks precede risk approval; SKIP returns before sizing and DOWN multiplies the ordinary risk context size multiplier. No risk package imports analysis, no default/CLI/live enablement, and existing kill/session gates remain authoritative.
+- Added `analysis/engine_gate.py`: supplies actual candidate identity, reference mark, side, stop, target, recorded-history provider, explicit versioned strategy replay binding, costs and horizon to the real TimeMachine checker. Unsupported limit entries, future candidates, missing bindings and provider errors skip through the engine. No generic replacement strategy is invented.
+- Results are persisted in the event audit as `timemachine_check`, including checker provenance and input/settings fields. Identity mismatch, invalid/out-of-bounds multiplier, malformed/oversized results and checker errors skip; audit failure latches a local entry hold. Optional notifier exceptions also hold entries. This is event persistence, not the pending Trades UI/daily report integration or verified external alert delivery.
+- Recreated and extended `tests/integration/test_timemachine_engine.py`: **24 integration cases**, including real 10,000-path bootstrap through the bridge with 60 days of synthetic bars and ignored invalid future data. That test freezes the budget clock to test wiring, not performance. Full suite **1348 passed, 2 skipped**, Ruff and mypy clean. Original missing file contents were not recoverable; these are new tests.
+- Actual strategy-specific replay bindings, recorded-data providers, four independent engine study runs, real OOS benefit and hard latency acceptance remain unfinished. The research hook is not attached by default, including in the running dashboard. Live remains blocked.
+
 ## Time Machine four-variant research comparison (working branch)
 
 - Added a backtest study driver invoking no-filter, simulation-only, replay-only and combined runner callbacks independently. It requires identical declared window, input/settings hashes and starting capital, unique run IDs and finite trade/equity results. Declared study windows overlapping the final holdout are rejected before invoking a runner.

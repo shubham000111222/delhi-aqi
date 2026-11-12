@@ -69,3 +69,9 @@ not venue/OOS certification. No strategy validation or live execution is enabled
 Core-only timing observed in the sandbox: 10,000 paths, wide barriers, 48-bar horizon
 56.11 ms; 288-bar horizon 257.58 ms. These are single measurements, not end-to-end
 latency acceptance or a performance guarantee. The 250 ms gate remains unfulfilled.
+
+## Simulated engine bridge increment
+
+- [x] Explicit opt-in paper/SimClock/PaperAdapter-only hook before risk approval; SKIP prevents approval and DOWN reduces existing size multiplier. Audit failure holds entries.
+- [x] Real checker bridge for market entries, explicit recorded-history provider/versioned replay binding, actual candidate stop/target and persisted provenance. 24 integration cases; no implicit strategy or default activation.
+- [ ] Implement and verify each actual strategy replay binding, archived history provider and independent engine study runner; validate OOS retention/benefit and timing. Trades dashboard and daily report integration remain open.
