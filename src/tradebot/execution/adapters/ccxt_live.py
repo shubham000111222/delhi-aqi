@@ -206,8 +206,26 @@ class CcxtLiveAdapter(ExchangeAdapter):
             self._refuse_order(request, "reduce-only buy is not a supported protective action")
         existing = self.orders.get(request.client_order_id)
         if existing is not None:
-            # A terminal order is still the outcome of this client ID; resubmitting it
-            # can duplicate an already executed order.
+            # Idempotence means the same intent, not merely the same string ID.
+            # Compare submitted fields, not mutable status/fill totals.
+            same_intent = (
+                (request.symbol, request.side, request.type, request.stop_price,
+                 request.reduce_only, request.strategy, request.signal_id)
+                == (existing.symbol, existing.side, existing.type, existing.stop_price,
+                    existing.reduce_only, existing.strategy, existing.signal_id)
+            )
+            if same_intent:
+                rules = self.get_market_rules(request.symbol)
+                same_intent = (
+                    round_qty(request.qty, rules.lot_step) == existing.qty
+                    and (round_price(request.price, rules.tick_size, request.side.value)
+                         if request.price else None) == existing.price
+                )
+            if not same_intent:
+                if self.killswitch is not None:
+                    self.killswitch.latch_execution_observation_fault(request.client_order_id)
+                self._refuse_order(request, "client ID reused with conflicting order intent")
+            # A terminal order is still the outcome; never resubmit it.
             return existing
         # A sell's label is NOT proof that the venue enforces reduce-only or that
         # an independently verified balance/position exists.

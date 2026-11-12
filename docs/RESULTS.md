@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Latest cached client-ID intent pass (working branch)
+
+- CCXT cached-ID return now compares symbol, side/type, stop price, reduce-only assertion, strategy/signal identity and rounded quantity/price against the original tracked order. A conflict refuses, preserves the original order and latches the durable observation hold. Equivalent rounded requests retain the ordinary process-local idempotent return.
+- Full suite **1247 passed, 2 skipped**; Ruff, mypy and diff checks passed. Nine conflicting-field cases and one rounded-equivalence case use fake exchanges; no real venue certification is claimed.
+- This validates the normal adapter cache only, not mutable Python objects, raw venue/store access or order-manager unknown-outcome lookup matching. Restarted adapters still refuse previously reserved identities instead of returning a reconstructed order. Sizing assertions are not quantity proofs; time-in-force/reason are not compared here. Verified reconciliation, authenticated recovery and the remaining D–I work are unfinished. Live gates stay blocked; port 8000 dashboard continues paper/synthetic/read-only/1× and predates this pass.
+
 ## Latest submission snapshot consistency pass (working branch)
 
 - CCXT pre-network intents now retain mode, symbol, side/type, rounded decimal quantity/price, stop reference, reduce-only assertion, strategy and signal identity. Acknowledgement requires matching retained and pending records, expected fields and the venue/client digest; missing/changed records cannot silently release the pending marker.

@@ -864,3 +864,29 @@ def test_submission_snapshot_records_rounded_wire_values():
     assert payload['symbol'] == SYMBOL
     assert payload['reduce_only'] is False
     assert float(payload['qty']) == exchange.calls[-1][1][3]
+
+
+@pytest.mark.parametrize('change', [
+    {'symbol': 'ETH/USDT'}, {'side': Side.SELL}, {'type': OrderType.MARKET},
+    {'qty': Decimal('0.01')}, {'price': Decimal('45000')},
+    {'stop_price': Decimal('43000')}, {'strategy': 'different'},
+    {'signal_id': 'another-signal'}, {'side': Side.SELL, 'reduce_only': True},
+])
+def test_cached_client_id_cannot_silently_change_intent(change):
+    adapter, exchange = adapter_with()
+    original = asyncio.run(adapter.place_order(request()))
+    with pytest.raises(PermanentExchangeError, match='conflicting order intent'):
+        asyncio.run(adapter.place_order(request(**change)))
+    assert len(exchange.created) == 1
+    assert adapter.orders[original.client_order_id] is original
+    assert adapter.killswitch.store.has_execution_observation_fault()
+    assert not adapter.killswitch.can_open_entries()
+
+
+def test_cached_id_accepts_equivalent_rounded_wire_intent():
+    adapter, exchange = adapter_with()
+    original = asyncio.run(adapter.place_order(request()))
+    result = asyncio.run(adapter.place_order(request(qty=original.qty, price=original.price)))
+    assert result is original
+    assert len(exchange.created) == 1
+    assert not adapter.killswitch.store.has_execution_observation_fault()
