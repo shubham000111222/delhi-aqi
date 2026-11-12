@@ -158,3 +158,5 @@ Reports preserve independent window drawdowns, not a fabricated concatenated cur
 - [x] `--replay-days` selects60–180-day replay cap (minimum60 valid contiguous days); bootstrap always uses last60 days/minimum30. Separate replay/bootstrapped hashes and cache keys prevent longer replay data entering bootstrap. Default60 unchanged; select lookback before evaluating outcomes, not to tune a holdout. Longer-window latency is unverified.
 
 - [x] History requires UTC-aligned5m timestamps, not merely contiguous rows with a5m label; equal aware instants canonicalize to the same timestamp hash across timezone representations.
+
+- [x] Insufficient replay is not permission to ignore malformed present metrics. NaN/Infinity/boolean/text expectancy skips; coin-flip setting is strictly boolean, costs/scales cannot be booleans masquerading as numbers.

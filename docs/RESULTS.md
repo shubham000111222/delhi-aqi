@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Malformed insufficient-replay and scalar input refusal
+
+- Fixed verdict validation so insufficient replay permits genuinely absent expectancy (`null`), not a present NaN/Infinity/boolean/string expectancy. Invalid replay metrics cannot be excused as insufficient and turn a simulation result into PASS.
+- Coin-flip setting must be an actual boolean; text false/numeric0/null are invalid settings, not implicit truthiness choices. Replay/simulation cost and simulation volatility-scale parameters reject boolean-as-number inputs. Ordinary numeric zero costs and valid boolean policy choices remain supported; thresholds unchanged.
+- Eleven cases cover four invalid historical expectancy types, three malformed policy settings, three boolean simulation inputs and boolean replay cost refusal. Full suite **1479 passed, 2 skipped**, Ruff/mypy/diff clean. No recorded OOS evidence, execution parity or hard timing acceptance supplied; filter remains disabled.
+
 ## Entry-blocker visibility and study integrity
 
 - Added KillSwitch.entry_blockers read-only diagnostic for process-local hold, kill file/level, incident-tracking failure, flapping, pending incident/fill/submission, observation fault and invalid ramp tracking. Failed reads propagate rather than implying safe/empty state. This does not change ordinary entry authority or release/reset anything; merely reading a kill file does not mutate kill state.

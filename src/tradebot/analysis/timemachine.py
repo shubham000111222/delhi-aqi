@@ -164,7 +164,8 @@ def replay_rule(history: History, rule: Callable[[Sequence[Candle]], ReplayPlan 
     Fees apply to both legs; adverse slippage applies to entry/stop/time exits;
     resting targets fill at the target (never invented price improvement).
     """
-    if (not np.isfinite(fee_rate) or not np.isfinite(slippage_rate)
+    if (any(isinstance(v, bool) for v in (fee_rate, slippage_rate))
+            or not np.isfinite(fee_rate) or not np.isfinite(slippage_rate)
             or not 0 <= fee_rate < 1 or not 0 <= slippage_rate < 1):
         raise ValueError('invalid replay costs')
     bars = history.bars
@@ -241,7 +242,8 @@ def simulate_trade(history: History, plan: ReplayPlan, trade_id: str, *,
     plan.validate()
     if type(paths) is not int or paths not in (5000, 10000):
         raise ValueError('path count must be 5000 or 10000')
-    if (not all(np.isfinite(x) for x in (fee_rate, slippage_rate, volatility_scale))
+    if (any(isinstance(v, bool) for v in (fee_rate, slippage_rate, volatility_scale))
+            or not all(np.isfinite(x) for x in (fee_rate, slippage_rate, volatility_scale))
             or not 0 <= fee_rate < 1 or not 0 <= slippage_rate < 1
             or volatility_scale <= 0):
         raise ValueError('invalid simulation costs or volatility scale')
@@ -323,6 +325,9 @@ def trade_verdict(simulation: dict[str, object], replay: dict[str, object], *,
                   coin_flip_skip: bool = True) -> dict[str, object]:
     """Fixed default thresholds; mandatory skips take precedence. Never risk authority."""
     try:
+        if type(coin_flip_skip) is not bool:
+            raise ValueError('coin-flip setting must be boolean')
+
         def number(key: str) -> float:
             value = simulation[key]
             if isinstance(value, bool) or not isinstance(value, (float, int)) or not np.isfinite(value):
@@ -338,9 +343,11 @@ def trade_verdict(simulation: dict[str, object], replay: dict[str, object], *,
         if type(insufficient) is not bool:
             raise ValueError('invalid replay sufficiency')
         historical = replay.get('expected_net_r')
-        if not insufficient and (isinstance(historical, bool) or not isinstance(historical, (float, int))
-                                 or not np.isfinite(historical)):
+        if historical is not None and (isinstance(historical, bool) or not isinstance(historical, (float, int))
+                                       or not np.isfinite(historical)):
             raise ValueError('invalid replay expectancy')
+        if not insufficient and historical is None:
+            raise ValueError('missing replay expectancy')
         coin_flip = abs(mean) < .05
         if mean <= 0 or tail < -1.5 or (timed > .60 and mean < .05):
             verdict, multiplier, reason = 'SKIP', 0.0, 'mandatory expectancy/tail/time-exit rule'
@@ -439,6 +446,8 @@ class TimeMachine:
         try:
             if variant not in ('both', 'simulation_only', 'replay_only'):
                 raise ValueError('unknown research check variant')
+            if type(coin_flip_skip) is not bool:
+                raise ValueError('coin-flip setting must be boolean')
             if type(replay_days) is not int or not 60 <= replay_days <= 180:
                 raise ValueError('replay lookback must be60..180 days')
             result.update(bootstrap_days=60, replay_days=replay_days)

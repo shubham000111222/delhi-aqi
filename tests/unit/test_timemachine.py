@@ -462,3 +462,35 @@ def test_timezone_equivalent_5m_grid_is_valid(bars):
     assert result.volatility == reference.volatility
     assert result.input_hash == reference.input_hash
     assert np.array_equal(result.standardized_ohlc, reference.standardized_ohlc)
+
+
+@pytest.mark.parametrize('historical', [float('nan'), float('inf'), True, '0.2'])
+def test_insufficient_replay_does_not_excuse_malformed_present_expectancy(historical):
+    from tradebot.analysis.timemachine import trade_verdict
+
+    sim = {'expected_net_r': .2, 'p05_r': -1., 'time_exit': .1, 'target_first': .5, 'stop_first': .4}
+    assert trade_verdict(sim, {'insufficient': True, 'expected_net_r': historical})['multiplier'] == 0
+    assert trade_verdict(sim, {'insufficient': True, 'expected_net_r': None})['multiplier'] == 1
+
+
+@pytest.mark.parametrize('setting', ['false', 0, None])
+def test_coin_flip_setting_must_be_boolean(setting):
+    from tradebot.analysis.timemachine import trade_verdict
+
+    sim = {'expected_net_r': .2, 'p05_r': -1., 'time_exit': .1, 'target_first': .5, 'stop_first': .4}
+    assert trade_verdict(sim, {'insufficient': True}, coin_flip_skip=setting)['multiplier'] == 0
+
+
+@pytest.mark.parametrize('field', ['fee_rate', 'slippage_rate', 'volatility_scale'])
+def test_boolean_simulation_cost_or_scale_refused(history, field):
+    from tradebot.analysis.timemachine import simulate_trade
+
+    params = {'fee_rate': .001, 'slippage_rate': .001, 'volatility_scale': 1.}
+    params[field] = False
+    with pytest.raises(ValueError):
+        simulate_trade(history, ReplayPlan(100, 99, 101, max_bars=1), 'boolean-cost', **params)
+
+
+def test_boolean_replay_cost_refused(history):
+    with pytest.raises(ValueError):
+        replay_rule(history, lambda past: None, fee_rate=False, slippage_rate=0)
