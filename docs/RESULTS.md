@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine deterministic strategy replay bindings
+
+- Added `analysis/strategy_replay.py`: constructs contexts from complete aligned strategy-timeframe candles aggregated from the supplied closed 5m prefix. Rejects gaps/duplicates/mixed symbols/timeframes, drops incomplete edge buckets, bounds indicator history to 1,500 candles and evaluates only at a newly closed strategy bar.
+- Reuses the existing EMA/mean-reversion/breakout implementations and regime detector, with fresh rule instances and deep-copied settings. Config/regime/timeframe/horizon/adapter revision determine a logged replay version hash. ML/custom stateful classes are refused; a frozen binding can be supplied to TimeMachineEngineGate.
+- Market EMA parity is tested against direct existing-strategy evaluation for identical entry, stop and target. Limit-emitting strategies are explicitly rejected instead of silently converted to market. Default strategies predominantly use limits, so their supported execution replay is still incomplete. This replays strategy opinions, not full portfolio/managed-exit behavior, order books or venue execution; the context uses flat/no-book state and fixed reference equity for these deterministic rules only.
+- Nine new tests cover exact EMA plan parity, complete aggregation/no repeated partial-tail signal, config snapshot/version changes, prefix stability, limit refusal, four corrupt input cases, unsupported class/timeframe. Full suite **1373 passed, 2 skipped**, Ruff/mypy/diff clean. No real-data evidence or timing acceptance. Aggregation/indicator recomputation is a bounded reference implementation, not optimized for a 60-day replay in 250 ms; cooperative timeout still skips.
+
 ## Time Machine recorded archive provider
 
 - Added `analysis/archive_history.py` callable provider for the research engine bridge. Queries only the selected symbol's closed 5m rows at the decision cutoff, with 30–180-day bounded windows (default 60) and an extra-row overflow guard. Preserves Decimal prices, duplicates and gaps for independent checker validation; never resamples, forward-fills, deduplicates or falls back to synthetic input.

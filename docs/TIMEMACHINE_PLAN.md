@@ -80,3 +80,8 @@ latency acceptance or a performance guarantee. The 250 ms gate remains unfulfill
 
 - [x] `ArchiveHistoryProvider` loads only closed5m symbol bars in the as-of window with bounded row count, exact Decimal values and no synthetic/resample/fill fallback. Archive provenance remains caller-supplied/unverified.
 - [ ] Validate supplied archive coverage/provenance on real data and include provider I/O in end-to-end latency acceptance; actual strategy-specific replay/limit-entry semantics and independent study wiring remain open.
+
+## Existing strategy opinion replay increment
+
+- [x] Versioned frozen settings, existing deterministic strategy/regime evaluation, complete5m-to-strategy-timeframe aggregation and market EMA plan parity. Fresh instances; no repeated signal from an incomplete latest bucket.
+- [ ] Limit-fill/queue semantics for default strategies, stateful ML replay and full portfolio/exit-management parity remain unsupported. No silent market substitution. Optimize/measure cold replay before latency acceptance.
