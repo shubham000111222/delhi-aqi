@@ -19,7 +19,7 @@ For the full Windows installation, implementation and validation procedure, see
 For the consolidated item-by-item implementation and external-evidence backlog, see
 [`REMAINING_WORK.md`](REMAINING_WORK.md). It does not mark unfinished work complete.
 
-**Last updated:** 2026-11-02 · **Suite:** 1485 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-02 · **Suite:** 1487 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -312,3 +312,5 @@ Fill this in as phases complete — it is what `docs/RESULTS.md` is built from.
 - [x] Full side-by-side computed replay ticket statistics and actual lookback/provenance, with null no-trigger probabilities and selected-vs-completed path disclosure.
 
 - [x] Replay deadline checks after callbacks, within holding loops and at completion; nonfinite derived R refused before replay summaries/cache.
+
+- [x] Health engine/CLI/component API expose point-in-time entry blockers independently of healthy component scores; no release authority.

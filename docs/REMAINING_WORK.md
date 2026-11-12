@@ -34,7 +34,8 @@ Full criteria and honest limits: [TIMEMACHINE_PLAN.md](TIMEMACHINE_PLAN.md).
 - [ ] Cover all supported mutation paths/adapters and healer actions with forbidden-action tests; document remaining raw SQL/Python/venue privilege boundary and constrain deployment credentials.
 - [ ] Migrate or explicitly quarantine legacy audit/incident/fault/streak history; do not fabricate missing history.
 - [x] Read-only process/durable entry-blocker reasons surfaced in dashboard and research-study integrity; no release authority.
-- [ ] Ensure durable faults and promotion evidence are consistently represented in CLI, preflight, health, dashboard and alerts.
+- [x] Carry read-only entry-blocker reasons through engine health, health CLI and component Health API separately from component scores.
+- [ ] Complete durable-fault/promotion evidence coverage in preflight and alerts; verify consistency across all consumers.
 
 ## Remaining self-healing requirements (§20)
 

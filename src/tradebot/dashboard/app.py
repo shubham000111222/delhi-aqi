@@ -344,7 +344,10 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
             now=engine.clock.now(), restart_budget=getattr(engine, "strategy_faults", None)
         )
         return JSONResponse(
-            _json_safe({"available": True, **snapshot}),
+            _json_safe({"available": True, **snapshot,
+                        "entry_blockers": {"available": True,
+                                           "reasons": list(engine.killswitch.entry_blockers()),
+                                           "note": "Point-in-time diagnostic only; not entry authorization."}}),
             headers={"cache-control": "no-store, max-age=0"},
         )
 

@@ -1309,6 +1309,8 @@ class Engine:
         flapping = self._hold_on_flapping(now=now)
         healed = await self.playbook.tick(self) if self.running else []
         health = {
+            "entry_blockers": {"available": True, "reasons": list(self.killswitch.entry_blockers()),
+                               "note": "Point-in-time diagnostic only; not entry authorization."},
             "ts": iso(now),
             "flapping_held": flapping,
             "autonomy": self.autonomy.summary(),

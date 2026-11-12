@@ -462,3 +462,21 @@ async def test_fill_journal_and_kill_write_failure_still_latches_local_hold(engi
     assert not engine.killswitch.can_open_entries()
     with pytest.raises(PermissionError, match="local safety hold"):
         engine.killswitch.reset(reason="test")
+
+
+async def test_health_reports_entry_hold_even_with_healthy_components(engine):
+    engine.killswitch.latch_local_entry_hold()
+    health = await engine.health_check()
+    assert health['components']['overall'] == 'HEALTHY'
+    assert health['entry_blockers']['available'] is True
+    assert 'local_entry_hold' in health['entry_blockers']['reasons']
+    assert 'not entry authorization' in health['entry_blockers']['note']
+    assert not engine.killswitch.can_open_entries()
+
+
+async def test_health_reports_durable_observation_fault_without_release(engine):
+    engine.store.latch_execution_observation_fault('unverified-observation')
+    health = await engine.health_check()
+    assert 'execution_observation_fault' in health['entry_blockers']['reasons']
+    assert engine.store.has_execution_observation_fault()
+    assert not engine.killswitch.can_open_entries()

@@ -712,3 +712,7 @@ tracking is *not* on this list any more: a tracking server runs locally, so it w
 rather than deferred. Each is listed
 with its next step in `ROADMAP.md` → "Not built". The live ccxt adapter's logic is covered
 by 27 tests through a fake exchange, but no test here can prove what Binance will answer.
+
+## Entry-blocker health visibility
+
+Engine health output, human-readable health CLI and component Health API now carry read-only point-in-time entry-blocker reasons separately from component scores. A HEALTHY score is not entry authorization; local and durable holds remain authoritative. Failed blocker reads propagate instead of returning an empty/safe result. Existing health-check side effects are unchanged; the new diagnostic performs no release/reset. Two engine integration tests prove a healthy component score can coexist with a local hold and that durable observation faults remain latched. Full suite **1487 passed, 2 skipped**, Ruff/mypy/diff clean. Preflight/alert/promotion coverage and authenticated recovery remain unfinished; this is visibility, not verified venue reconciliation or deployment approval.

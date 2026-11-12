@@ -724,6 +724,12 @@ def cmd_health(args: argparse.Namespace) -> int:
         _print(health)
         return 0
 
+    blockers = health.get("entry_blockers", {})
+    if blockers.get("available") is True:
+        print("entry blockers: " + (", ".join(blockers.get("reasons", [])) or "none observed"))
+    else:
+        print("entry blockers: unavailable")
+    print("Point-in-time diagnostic only; not entry authorization.")
     components: dict[str, Any] = health.get("components", {})
     print(f"overall: {components.get('overall', 'UNKNOWN')} | score {components.get('score', '?')}")
     if components.get("flapping"):
