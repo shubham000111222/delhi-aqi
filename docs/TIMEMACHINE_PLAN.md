@@ -160,3 +160,5 @@ Reports preserve independent window drawdowns, not a fabricated concatenated cur
 - [x] History requires UTC-aligned5m timestamps, not merely contiguous rows with a5m label; equal aware instants canonicalize to the same timestamp hash across timezone representations.
 
 - [x] Insufficient replay is not permission to ignore malformed present metrics. NaN/Infinity/boolean/text expectancy skips; coin-flip setting is strictly boolean, costs/scales cannot be booleans masquerading as numbers.
+
+- [x] Tickets show side-by-side replay probabilities, completed trigger count, mean/median/p05R and holding time plus lookbacks/hashes/seed/timing. Missing/uncomputed/no-trigger values remain unavailable; selected path budget is distinct from completed simulation paths.

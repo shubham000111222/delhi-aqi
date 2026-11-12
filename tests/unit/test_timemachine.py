@@ -494,3 +494,16 @@ def test_boolean_simulation_cost_or_scale_refused(history, field):
 def test_boolean_replay_cost_refused(history):
     with pytest.raises(ValueError):
         replay_rule(history, lambda past: None, fee_rate=False, slippage_rate=0)
+
+
+def test_replay_probabilities_use_completed_triggers_and_no_trigger_is_unknown(history):
+    result = replay_rule(history, lambda past: ReplayPlan(100, 90, 110, max_bars=1)
+                         if len(past) % 500 == 0 else None, fee_rate=0, slippage_rate=0)
+    assert result['triggers'] >= 20
+    for key in ('target_first', 'stop_first', 'time_exit'):
+        assert result[key] == result['counts'][key] / result['triggers']
+    assert sum(result[key] for key in ('target_first', 'stop_first', 'time_exit')) == pytest.approx(1.)
+    assert result['lookback_end'] == END.isoformat()
+    empty = replay_rule(history, lambda past: None, fee_rate=0, slippage_rate=0)
+    assert empty['triggers'] == 0
+    assert all(empty[key] is None for key in ('target_first', 'stop_first', 'time_exit'))

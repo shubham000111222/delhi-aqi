@@ -220,6 +220,9 @@ def replay_rule(history: History, rule: Callable[[Sequence[Candle]], ReplayPlan 
         i = j  # next trigger may be evaluated only after this exit bar closes
     n = len(outcomes)
     return {'triggers': n, 'insufficient': n < 20, 'counts': counts,
+            **{name: count/n if n else None for name, count in counts.items()},
+            'lookback_start': history.bars[0].ts.isoformat(),
+            'lookback_end': history.bars[-1].close_time.isoformat(),
             'ambiguous_stop_first': ambiguous, 'censored_triggers': censored,
             'expected_net_r': float(np.mean(outcomes)) if n else None,
             'median_r': float(np.median(outcomes)) if n else None,

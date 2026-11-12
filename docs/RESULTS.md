@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Full computed side-by-side replay ticket
+
+- Replay output now includes target/stop/time-exit proportions from completed trigger counts and actual lookback bounds. No completed triggers yields unknown/null probabilities, never invented zero odds. Trigger counts, insufficiency and conservative intrabar limitations are unchanged.
+- Plain-word persisted tickets now show replay trigger count, probabilities, mean/median/p05 R and holding time beside simulation statistics, plus seed, selected path budget versus completed simulation paths, bootstrap/replay lookbacks and hashes, and checker elapsed time. Failed/unused simulation paths explicitly remain unavailable rather than claiming the configured path count completed.
+- Three new tests cover completed-trigger probability arithmetic/no-trigger nulls, computed provenance/full replay rendering, and failed-check path-budget wording. Full suite **1482 passed, 2 skipped**, Ruff/mypy/diff clean. Tickets retain first-touch/model/no-profit-promise caveats; report detail is not OOS evidence, limit parity or latency certification.
+
 ## Malformed insufficient-replay and scalar input refusal
 
 - Fixed verdict validation so insufficient replay permits genuinely absent expectancy (`null`), not a present NaN/Infinity/boolean/string expectancy. Invalid replay metrics cannot be excused as insufficient and turn a simulation result into PASS.

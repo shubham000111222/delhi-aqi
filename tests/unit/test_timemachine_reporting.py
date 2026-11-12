@@ -46,3 +46,24 @@ def test_limit_validation(limit):
             check_history(store, limit=limit)
     finally:
         store.close()
+
+
+def test_ticket_shows_replay_statistics_and_computed_provenance():
+    check = {'trade_id': 'computed', 'seed': 123, 'path_count': 10000, 'elapsed_ms': 12.5,
+             'input_hash': 'bootstrap-hash', 'replay_input_hash': 'replay-hash',
+             'simulation': {'path_count': 10000, 'lookback_start': 'start', 'lookback_end': 'cutoff'},
+             'replay': {'triggers': 20, 'target_first': .6, 'stop_first': .3, 'time_exit': .1,
+                        'expected_net_r': .2, 'median_r': .1, 'p05_r': -1.,
+                        'expected_holding_minutes': 30., 'lookback_start': 'older', 'lookback_end': 'cutoff'}}
+    ticket = order_ticket(check)
+    assert 'completed triggers 20' in ticket and 'target first 60.0%' in ticket
+    assert 'Replay net mean 0.200 R, median 0.100 R, 5th percentile -1.000 R' in ticket
+    assert 'Seed 123' in ticket and 'completed simulation paths 10000' in ticket
+    assert 'older to cutoff' in ticket and 'replay-hash' in ticket
+    assert '12.500 ms' in ticket
+
+
+def test_failed_check_path_budget_is_not_claimed_as_completed_simulation():
+    ticket = order_ticket({'trade_id': 'failed', 'path_count': 10000, 'verdict': 'SKIP', 'multiplier': 0})
+    assert 'selected path budget 10000' in ticket
+    assert 'completed simulation paths unavailable' in ticket

@@ -19,7 +19,7 @@ For the full Windows installation, implementation and validation procedure, see
 For the consolidated item-by-item implementation and external-evidence backlog, see
 [`REMAINING_WORK.md`](REMAINING_WORK.md). It does not mark unfinished work complete.
 
-**Last updated:** 2026-11-02 · **Suite:** 1479 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-02 · **Suite:** 1482 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -308,3 +308,5 @@ Fill this in as phases complete — it is what `docs/RESULTS.md` is built from.
 - [x] Read-only entry-blocker reasons in dashboard/studies; held comparisons disqualified without clearing holds, resetting kill state or granting entry authority.
 
 - [x] Invalid present replay expectancy skips even when sample is insufficient; strict boolean policy and nonboolean numerical cost/scale validation.
+
+- [x] Full side-by-side computed replay ticket statistics and actual lookback/provenance, with null no-trigger probabilities and selected-vs-completed path disclosure.
