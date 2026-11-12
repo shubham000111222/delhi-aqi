@@ -21,9 +21,18 @@ from ..analysis.timemachine import TimeMachine
 from ..config import Config, Mode
 from ..core.clock import SimClock, timeframe_seconds
 from ..core.models import Candle, KillLevel
+from ..core.money import D
 from ..core.store import Store
 from ..data.feed import ReplayFeed
 from ..engine import Engine
+from .metrics import (
+    GateResult,
+    Metrics,
+    acceptance_gates,
+    all_gates_passed,
+    compute_metrics,
+    monte_carlo_drawdown,
+)
 from .runner import collect
 from .timemachine_study import VARIANTS, StudyWindow, VariantRun, run_study
 
@@ -48,6 +57,7 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
     """
     runs: dict[str, VariantRun] = {}
     diagnostics: dict[str, Any] = {}
+    performance: dict[str, Metrics] = {}
     try:
         cfg = copy.deepcopy(config)
         if cfg.mode is not Mode.PAPER:
@@ -93,7 +103,7 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
                                  'strategies': cfg.strategies.model_dump(mode='json'),
                                  'symbols': cfg.symbols.model_dump(mode='json'),
                                  'checker_costs': [fee_rate, slippage_rate], 'max_bars': max_bars,
-                                 'volatility_scale': volatility_scale, 'runner': 'isolated-cold-start-v1'})
+                                 'volatility_scale': volatility_scale, 'runner': 'isolated-cold-start-v2'})
         window = StudyWindow(start, end, final_holdout_start, input_hash, settings_hash, capital)
         with TemporaryDirectory(prefix='timemachine-study-') as temporary:
             for variant in VARIANTS:
@@ -122,7 +132,13 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
                     if (feed.emitted != expected_bars or engine.stats.bars != expected_bars
                             or engine.killswitch.level is KillLevel.L3):
                         raise ValueError('incomplete engine execution or lockdown: ' + variant)
-                    curve, trades, _ = collect(store)
+                    curve, trades, exposure = collect(store)
+                    ending = engine.ledger.equity(engine.marks)
+                    performance[variant] = compute_metrics(
+                        [(start, cfg.settings.starting_capital_usdt), *curve, (end, ending)], trades,
+                        starting_equity=cfg.settings.starting_capital_usdt, ending_equity=ending,
+                        tax_rate=cfg.risk.tax_reserve_pct, exposure_series=exposure)
+                    mc = monte_carlo_drawdown([float(t.pnl) for t in trades], capital) if trades else None
                     run_id = _digest([variant, input_hash, settings_hash, start, end])
                     runs[variant] = VariantRun(variant, run_id, input_hash, settings_hash, start, end,
                                                capital, tuple(float(t.r_multiple) for t in trades),
@@ -144,7 +160,8 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
                         'pending_submission': store.has_pending_submission(),
                     }
                     censored = bool(any(terminal.values()))
-                    diagnostics[variant] = {'terminal_state': terminal, 'terminal_censored': censored,
+                    diagnostics[variant] = {'metrics': performance[variant].to_dict(), 'monte_carlo': mc,
+                                            'terminal_state': terminal, 'terminal_censored': censored,
                                             'comparison_eligible': not censored and invalid == 0,
                                             'stats': engine.stats.to_dict(), 'checks': len(errors),
                                             'invalid_checks': invalid, 'alerts': len(alerts),
@@ -191,6 +208,26 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
             if not stressed.get('complete'):
                 result['complete'] = False
                 result['retention_criteria_passed'] = {v: False for v in result['retention_criteria_passed']}
+        # Existing project gates remain separate from the narrower retention screen.
+        for variant in VARIANTS:
+            diagnostic = diagnostics[variant]
+            stressed_metrics = None
+            if cost_stress:
+                stressed_study = result.get('cost_stress', {}).get('study', {})
+                if (stressed_study.get('complete') and stressed_study.get('input_hash') == input_hash
+                        and stressed_study['diagnostics'][variant]['comparison_eligible']
+                        and stressed_study['diagnostics']['no_filter']['comparison_eligible']):
+                    stressed_metrics = Metrics(total_return=D(str(
+                        stressed_study['diagnostics'][variant]['metrics']['total_return'])))
+            gates = acceptance_gates(performance[variant], mc=diagnostic['monte_carlo'],
+                                     cost_stress_metrics=stressed_metrics)
+            gates.append(GateResult('study_comparison_integrity',
+                                     diagnostic['comparison_eligible']
+                                     and diagnostics['no_filter']['comparison_eligible'],
+                                     'requires valid checks and uncensored baseline/variant terminal state'))
+            diagnostic['acceptance_gates'] = [gate.to_dict() for gate in gates]
+            diagnostic['acceptance_gates_passed'] = all_gates_passed(gates)
+        result['acceptance_gates_passed'] = all(row['acceptance_gates_passed'] for row in diagnostics.values())
         return result
     except Exception as exc:  # noqa: BLE001 - failed research never authorizes trading
         return {'complete': False, 'filter_enabled': False, 'provenance_verified': False,

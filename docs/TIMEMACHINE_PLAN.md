@@ -140,3 +140,5 @@ Reports preserve independent window drawdowns, not a fabricated concatenated cur
 
 - [x] Optional `--current-volatility` uses288 closed5m close-log returns (trailing24h, sample sigma/ddof1) relative to prepared history sigma. Zero/nonfinite estimates skip; future appends cannot change past ratios. Estimator revision, observations, cutoff and baseline/current sigma/scale are persisted with computed checks. Fixed-scale default remains1 unless the option is explicitly chosen.
 - [ ] Validate this predeclared reference estimator and horizon on recorded non-holdout inputs; no automatic performance claim. Add `--current-volatility` to either research CLI example to freeze this option across nominal/stressed windows. Changing it after inspecting outcomes is parameter selection, not fresh OOS evidence.
+
+- [x] Concrete study diagnostics include existing performance metrics, trade-P&L bootstrap MC (unavailable without trades), and unchanged project acceptance gates. Actual eligible same-input stressed return feeds cost-stress gate; OOS provenance remains false. Research retention/screen flags do not override acceptance gates or enable trading.

@@ -229,3 +229,23 @@ async def test_open_terminal_position_is_disclosed_without_invented_liquidation(
         assert len(row['terminal_state']['positions']) == 1
         assert row['stats']['trades_closed'] == 0
     assert not any(result['retention_criteria_passed'].values())
+
+
+async def test_project_gates_remain_distinct_from_research_retention(fast_cfg):
+    result = await run_engine_study(fast_cfg, tape(), {}, start=START, end=END,
+                                    final_holdout_start=END, fee_rate=.001, slippage_rate=0,
+                                    cost_stress=True)
+    assert result.get('complete'), result
+    assert not result['acceptance_gates_passed']
+    for row in result['diagnostics'].values():
+        gates = {g['name']: g for g in row['acceptance_gates']}
+        assert row['metrics']['trade_count'] == 0
+        assert row['monte_carlo'] is None  # no manufactured MC evidence from no trades
+        assert not row['acceptance_gates_passed']
+        for name in ('out_of_sample_provenance', 'trade_count', 'profit_factor',
+                     'sharpe', 'monte_carlo_drawdown', 'cost_stress_2x'):
+            assert not gates[name]['passed']
+        assert '200' in gates['trade_count']['detail']
+        assert '1.3' in gates['profit_factor']['detail']
+        assert gates['study_comparison_integrity']['passed']
+    assert not result['filter_enabled']

@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine existing project acceptance gates
+
+- Concrete studies now compute ordinary project performance metrics and trade-P&L bootstrap drawdown per variant, separately from10,000-path candidate simulation. Initial capital/final marked equity are included explicitly in the metrics curve. No trades means unavailable Monte Carlo evidence (`null`), not a fabricated zero-drawdown pass.
+- Reports include existing unchanged acceptance_gates: PF>1.3, Sharpe>1, DD<15%, >=200 trades, MCp95DD<20%, actual modeled2x-cost positive return and independently verified OOS provenance. Eligible same-input completed stressed runs supply their measured total return; missing/censored/invalid stress evidence cannot satisfy that gate. A separate comparison-integrity gate exposes unresolved/check-failure state.
+- Acceptance results remain DISTINCT from filter-retention/research screens. OOS provenance always fails here; there is no automatic activation, relaxed threshold or assertion that research retention is deployment approval. Runner revision bumped in settings hash.
+- New integration test verifies all expected zero-trade/provenance/MC/stress failures despite clean plumbing, with unchanged200-trade/PF1.3 thresholds. Full suite **1410 passed, 2 skipped**, Ruff/mypy/diff clean. No real OOS edge, live readiness or final-holdout evidence established.
+
 ## Time Machine current-volatility scaling
 
 - Added fixed trailing24h estimator: sample standard deviation (ddof1) of the last288 closed5m close-log returns divided by the prepared history's sigma. Bootstrap OHLC is scaled by this ratio, preserving the joint sampled excursion model. No final-holdout fitting or future rows are used. Zero/nonfinite recent volatility refuses instead of inventing a scale.
