@@ -133,7 +133,18 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
                                   or row['payload'].get('label') == 'invalid check' for row in errors)
                     if len(errors) > 10000:
                         invalid += 1  # incomplete diagnostic coverage cannot support retention
-                    diagnostics[variant] = {'stats': engine.stats.to_dict(), 'checks': len(errors),
+                    terminal = {
+                        'positions': [p.to_dict(engine.marks.get(p.symbol)) for p in engine.ledger.open_positions],
+                        'pending_entries': len(engine.om.pending),
+                        'venue_open_orders': len(await engine.adapter.get_open_orders()),
+                        'stored_open_orders': len(store.open_orders()),
+                        'pending_fill': store.has_pending_fill(),
+                        'pending_submission': store.has_pending_submission(),
+                    }
+                    censored = bool(any(terminal.values()))
+                    diagnostics[variant] = {'terminal_state': terminal, 'terminal_censored': censored,
+                                            'comparison_eligible': not censored and invalid == 0,
+                                            'stats': engine.stats.to_dict(), 'checks': len(errors),
                                             'invalid_checks': invalid, 'alerts': len(alerts),
                                             'candidate_checks': errors[:10000],
                                             'checks_truncated': len(errors) > 10000,
@@ -149,7 +160,8 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
                       limitation='Cold-start paper engines with modeled books/fills. Venue provenance, '
                                  'real OOS status, execution parity and latency are not verified.')
         for variant in result['retention_criteria_passed']:
-            if diagnostics[variant]['invalid_checks']:
+            if (not diagnostics['no_filter']['comparison_eligible']
+                    or not diagnostics[variant]['comparison_eligible']):
                 result['retention_criteria_passed'][variant] = False
         if cost_stress:
             from .robustness import stress_config
@@ -170,7 +182,8 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
                               and stressed['input_hash'] == result['input_hash']
                               and stressed['variants'][variant]['trade_count'] > 0
                               and stressed['variants'][variant]['ending_equity'] > capital
-                              and stressed['diagnostics'][variant]['invalid_checks'] == 0)
+                              and stressed['diagnostics'][variant]['comparison_eligible']
+                              and stressed['diagnostics']['no_filter']['comparison_eligible'])
                 for variant in result['retention_criteria_passed']}
             if not stressed.get('complete'):
                 result['complete'] = False

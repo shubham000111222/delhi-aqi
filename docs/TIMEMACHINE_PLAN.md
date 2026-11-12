@@ -131,3 +131,5 @@ python -m tradebot.backtest.timemachine_cli `
 ```
 
 Reports preserve independent window drawdowns, not a fabricated concatenated curve. Source-data provenance, real meaningful OOS trades, entry/expiry parity and latency still require acceptance. No filter is enabled by a research screen.
+
+- [x] Terminal censoring: reports preserve marked open positions and unresolved order/fill/submission flags. A fully consumed feed may be complete but comparison-ineligible. Retention/stress screens require uncensored baseline and variant; no automatic liquidation at invented prices.

@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Time Machine terminal censoring and unresolved state
+
+- Per-variant diagnostics now include terminal open positions (actual marks), pending entry count, venue/stored open order counts and durable pending-fill/submission flags. Any such unresolved state marks the variant terminal_censored and comparison-ineligible; no synthetic liquidation or fabricated final closed trade is applied.
+- Nominal retention requires both baseline and filtered variant eligible. Actual2x modeled-cost stress survival additionally requires eligible stressed baseline and variant, preventing unrealized or unfinished execution from earning apparent stress profitability. `complete` still means all input bars were processed, not that all trade lifecycles completed; `comparison_eligible` distinguishes those facts explicitly.
+- Two failure-injection tests verify an unresolved baseline blocks otherwise permissive comparison results, and marked open positions remain disclosed without incrementing closed-trade counts. Full suite **1403 passed, 2 skipped**; Ruff/mypy/diff clean. This conservative screen may reject legitimate boundary-open strategies; entry cutoff/liquidation policies require predeclaration and execution modeling, not after-the-fact tuning. Still no real OOS edge, venue parity or live enablement.
+
 ## Time Machine predeclared multi-window studies
 
 - Added `backtest/timemachine_windows.py` and CLI `--windows-file` for 3–24 predeclared ordered, non-overlapping windows entirely before final holdout. Windows share frozen strategy/risk/settings and input containers; no refitting or best-window selection. Each window uses the concrete isolated engines and optional actual cost-stress rerun.

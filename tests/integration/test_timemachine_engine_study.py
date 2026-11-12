@@ -178,3 +178,54 @@ async def test_cost_stress_failure_invalidates_retention(fast_cfg):
     assert not result['complete']
     assert not any(result['retention_criteria_passed'].values())
     assert not result['filter_enabled']
+
+
+async def test_terminal_orders_cannot_qualify_even_with_permissive_metric_comparison(fast_cfg, monkeypatch):
+    import tradebot.backtest.timemachine_engine_study as module
+
+    original = Engine.run
+    counter = [0]
+
+    async def run(self, **kwargs):
+        await original(self, **kwargs)
+        # Inject an unresolved pending entry into the BASELINE after all bars close.
+        if counter[0] == 0:
+            self.om.pending['unfinished'] = object()
+        counter[0] += 1
+        return self.stats
+
+    def permissive(window, callback):
+        return {'complete': True, 'retention_criteria_passed': {
+            'simulation_only': True, 'replay_only': True, 'both': True}}
+
+    monkeypatch.setattr(Engine, 'run', run)
+    monkeypatch.setattr(module, 'run_study', permissive)
+    result = await run_engine_study(fast_cfg, tape(), {}, start=START, end=END,
+                                    final_holdout_start=END, fee_rate=.001, slippage_rate=0)
+    assert result.get('complete'), result
+    assert result['diagnostics']['no_filter']['terminal_censored']
+    assert result['diagnostics']['no_filter']['terminal_state']['pending_entries'] == 1
+    assert not any(result['retention_criteria_passed'].values())
+
+
+async def test_open_terminal_position_is_disclosed_without_invented_liquidation(fast_cfg, monkeypatch):
+    from tradebot.core.models import Position
+
+    original = Engine.run
+
+    async def run(self, **kwargs):
+        await original(self, **kwargs)
+        self.ledger.positions[('BTC/USDT', 'injected')] = Position(
+            'BTC/USDT', 'injected', Decimal('1'), Decimal('90'), Decimal('80'),
+            Decimal('120'), Decimal('80'), START)
+        return self.stats
+
+    monkeypatch.setattr(Engine, 'run', run)
+    result = await run_engine_study(fast_cfg, tape(), {}, start=START, end=END,
+                                    final_holdout_start=END, fee_rate=.001, slippage_rate=0)
+    assert result.get('complete'), result
+    for row in result['diagnostics'].values():
+        assert row['terminal_censored'] and not row['comparison_eligible']
+        assert len(row['terminal_state']['positions']) == 1
+        assert row['stats']['trades_closed'] == 0
+    assert not any(result['retention_criteria_passed'].values())
