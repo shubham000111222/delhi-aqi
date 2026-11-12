@@ -45,3 +45,42 @@ def test_empty_evidence_is_not_manufactured():
     store.equity_series.return_value = []
     store.closed_positions.return_value = []
     assert collect(store) == ([], [], [])
+
+
+@pytest.mark.parametrize('field,value', [('ts', None), ('ts', '2024-01-01'),
+                                        ('equity', 'NaN'), ('positions_value', 'Infinity'), ('equity', True)])
+def test_invalid_equity_evidence_refused(field, value):
+    from tradebot.backtest.runner import EvidenceDataError
+
+    store = Mock()
+    store.equity_series.return_value = [{**POINT, field: value}]
+    store.closed_positions.return_value = []
+    with pytest.raises(EvidenceDataError):
+        collect(store)
+
+
+@pytest.mark.parametrize('field,value', [('opened_at', None), ('closed_at', ''),
+                                        ('pnl', None), ('r_multiple', 'NaN'), ('fees', None),
+                                        ('symbol', None), ('strategy', '')])
+def test_invalid_trade_evidence_never_defaults_to_zero_or_current_time(field, value):
+    from tradebot.backtest.runner import EvidenceDataError
+
+    store = Mock()
+    store.equity_series.return_value = []
+    store.closed_positions.return_value = [{**TRADE, field: value}]
+    with pytest.raises(EvidenceDataError):
+        collect(store)
+
+
+def test_backwards_equity_and_trade_times_refused():
+    from tradebot.backtest.runner import EvidenceDataError
+
+    store = Mock()
+    store.equity_series.return_value = [{**POINT, 'ts': '2024-01-02T00:00:00Z'}, POINT]
+    store.closed_positions.return_value = []
+    with pytest.raises(EvidenceDataError, match='chronological'):
+        collect(store)
+    store.equity_series.return_value = []
+    store.closed_positions.return_value = [{**TRADE, 'opened_at': '2024-01-02T00:00:00Z'}]
+    with pytest.raises(EvidenceDataError, match='before'):
+        collect(store)

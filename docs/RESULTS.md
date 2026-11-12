@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Strict recorded metrics values and timestamps
+
+- Shared collector now refuses missing/invalid/naive timestamps instead of substituting wall-clock now; aware timestamps normalize to UTC. Backwards equity sequences and trades ending before opening are rejected.
+- Missing trade P&L/R/fees and symbol/strategy identities no longer default to zero or string None. Numeric evidence and calculated exposure must be finite/representable; boolean/null values fail. Legitimate numeric zeros and empty datasets remain valid. No database records are rewritten or missing legacy evidence fabricated; rejected legacy rows require investigation.
+- Thirteen new cases cover malformed/missing dates, NaN/Infinity/boolean equity data, missing trade values/identities and backwards chronology. Full suite **1434 passed, 2 skipped**, Ruff/mypy/diff clean. These checks validate local record structure, not venue truth or independently verified OOS provenance; all existing acceptance thresholds remain unchanged and Time Machine stays disabled.
+
 ## Complete bounded metrics evidence
 
 - Shared backtest collector no longer silently calculates metrics from the last100,000 equity rows or closed trades. It fetches one extra row per table and raises EvidenceLimitError on overflow. Exact-limit inputs remain valid; caller-selected smaller bounds are validated. This affects metrics/backtest/walk-forward consumers as well as Time Machine, keeping promotion gates from using a truncated evidence tail.

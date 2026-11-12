@@ -146,3 +146,5 @@ Reports preserve independent window drawdowns, not a fabricated concatenated cur
 - [x] Study evidence includes bounded closed-trade records and truncation flag; nonzero artificial-market integration confirms ordinary strategy/risk/orders/fills/fees/closed-trade metrics and missing-history filter suppression. Test-only market settings do not alter defaults or certify limit/OOS execution.
 
 - [x] Complete bounded metrics evidence: shared collector fetches one extra equity/trade record and refuses overflow; display pagination/truncation is not used as the metrics dataset. Streaming large-dataset evaluation remains future work.
+
+- [x] Metrics evidence structural validation refuses missing/invalid monetary fields and identities, nonfinite exposure, naive/missing timestamps and backwards chronology; no current-time/zero repair of missing evidence. Does not attest venue truth.
