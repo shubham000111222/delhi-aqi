@@ -9,6 +9,12 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Complete bounded metrics evidence
+
+- Shared backtest collector no longer silently calculates metrics from the last100,000 equity rows or closed trades. It fetches one extra row per table and raises EvidenceLimitError on overflow. Exact-limit inputs remain valid; caller-selected smaller bounds are validated. This affects metrics/backtest/walk-forward consumers as well as Time Machine, keeping promotion gates from using a truncated evidence tail.
+- Display-only closed-trade/check record pages remain explicitly bounded/truncated; they are distinct from metrics input completeness. No thresholds are relaxed and no partial input is relabeled a complete study. Time Machine catches overflow as incomplete, disables retention and never enables the filter. Large studies require an explicit future streaming/pagination design, not a larger hidden cap.
+- Nine unit cases cover exact-limit collection, equity/trade overflow, five invalid limits and empty input; one study failure-injection covers fail-closed propagation. Full suite **1421 passed, 2 skipped**; Ruff/mypy/diff clean. This is evidence-integrity hardening, not OOS/profit or latency certification.
+
 ## Time Machine nonzero executed-trade plumbing test
 
 - Concrete study evidence now retains up to1,000 closed-trade records per variant (symbol/strategy, net P&L/R, fees, open/close timestamps and exit reason), with explicit trade_records_truncated disclosure. Metrics continue to use the collected trade set rather than just the displayed record page.

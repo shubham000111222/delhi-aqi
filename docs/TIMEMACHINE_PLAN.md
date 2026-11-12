@@ -144,3 +144,5 @@ Reports preserve independent window drawdowns, not a fabricated concatenated cur
 - [x] Concrete study diagnostics include existing performance metrics, trade-P&L bootstrap MC (unavailable without trades), and unchanged project acceptance gates. Actual eligible same-input stressed return feeds cost-stress gate; OOS provenance remains false. Research retention/screen flags do not override acceptance gates or enable trading.
 
 - [x] Study evidence includes bounded closed-trade records and truncation flag; nonzero artificial-market integration confirms ordinary strategy/risk/orders/fills/fees/closed-trade metrics and missing-history filter suppression. Test-only market settings do not alter defaults or certify limit/OOS execution.
+
+- [x] Complete bounded metrics evidence: shared collector fetches one extra equity/trade record and refuses overflow; display pagination/truncation is not used as the metrics dataset. Streaming large-dataset evaluation remains future work.

@@ -31,12 +31,28 @@ def _parse(ts: str | None) -> datetime:
     return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
 
 
-def collect(store: Store) -> tuple[list[tuple[datetime, Decimal]], list[TradeRecord], list[float]]:
-    points = store.equity_series(limit=100_000)
+class EvidenceLimitError(ValueError):
+    """Metrics cannot be computed from a silently truncated evidence ledger."""
+
+
+def collect(store: Store, *, max_records: int = 100_000) -> tuple[list[tuple[datetime, Decimal]], list[TradeRecord], list[float]]:
+    """Collect complete bounded inputs or refuse; never calculate from a tail page.
+
+    One extra row detects overflow in both tables. This is independent of bounded
+    display/audit pages, which may truncate explicitly without changing metrics.
+    """
+    if type(max_records) is not int or not 1 <= max_records <= 100_000:
+        raise ValueError('metrics evidence limit must be1..100000 records')
+    points = store.equity_series(limit=max_records + 1)
+    if len(points) > max_records:
+        raise EvidenceLimitError('equity evidence exceeds metrics record limit')
+    closed = store.closed_positions(limit=max_records + 1)
+    if len(closed) > max_records:
+        raise EvidenceLimitError('closed-trade evidence exceeds metrics record limit')
     curve = [(_parse(p["ts"]), p["equity"]) for p in points]
     exposure = [float(p["positions_value"] / p["equity"]) if p["equity"] else 0.0 for p in points]
     trades: list[TradeRecord] = []
-    for row in store.closed_positions(limit=100_000):
+    for row in closed:
         trades.append(
             TradeRecord(
                 symbol=str(row.get("symbol")),

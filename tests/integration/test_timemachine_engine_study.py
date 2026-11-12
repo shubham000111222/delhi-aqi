@@ -290,3 +290,18 @@ async def test_nonzero_trade_engine_path_and_short_history_filter_suppression(fa
         assert row['stats']['orders'] == 0
         assert not result['retention_criteria_passed'][variant]
     assert not result['filter_enabled'] and not result['acceptance_gates_passed']
+
+
+async def test_metrics_evidence_overflow_makes_study_incomplete(fast_cfg, monkeypatch):
+    import tradebot.backtest.timemachine_engine_study as module
+    from tradebot.backtest.runner import EvidenceLimitError
+
+    def overflow(*args, **kwargs):
+        raise EvidenceLimitError('equity evidence exceeds metrics record limit')
+
+    monkeypatch.setattr(module, 'collect', overflow)
+    result = await run_engine_study(fast_cfg, tape(), {}, start=START, end=END,
+                                    final_holdout_start=END, fee_rate=.001, slippage_rate=0)
+    assert not result['complete'] and 'EvidenceLimitError' in result['error']
+    assert not result['filter_enabled']
+    assert not any(result['retention_criteria_passed'].values())
