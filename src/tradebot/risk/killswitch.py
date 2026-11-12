@@ -110,6 +110,35 @@ class KillSwitch:
                 and not self.store.has_execution_observation_fault()
                 and not self.store.has_invalid_ramp_tracking())
 
+    def entry_blockers(self) -> tuple[str, ...]:
+        """Read-only diagnostic; never escalates, clears holds or grants authority.
+
+        Errors propagate rather than reporting an empty/safe blocker list. Ordinary
+        can_open_entries remains authoritative and rechecks its own state.
+        """
+        reasons = []
+        state = self.state
+        if self._local_entry_hold:
+            reasons.append('local_entry_hold')
+        if self.kill_file is not None and self.kill_file.exists():
+            reasons.append('kill_file_present')
+        if state.get('level') != KillLevel.L0.value:
+            reasons.append('kill_level_' + str(state.get('level', 'unknown')))
+        if state.get('incident_tracking_failed'):
+            reasons.append('incident_tracking_failed')
+        checks = (
+            ('health_flapping_hold', self.flapping_hold_active),
+            ('pending_kill_incident', self.store.has_pending_kill_incident),
+            ('pending_fill', self.store.has_pending_fill),
+            ('pending_submission', self.store.has_pending_submission),
+            ('execution_observation_fault', self.store.has_execution_observation_fault),
+            ('invalid_ramp_tracking', self.store.has_invalid_ramp_tracking),
+        )
+        for name, check in checks:
+            if check():
+                reasons.append(name)
+        return tuple(reasons)
+
     def must_flatten(self) -> bool:
         return self.level in (KillLevel.L2, KillLevel.L3)
 

@@ -256,6 +256,8 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
                     "positions": positions,
                     "trades": trades[:25],
                     "timemachine": check_history(store, limit=25),
+                    "entry_blockers": {"available": engine is not None,
+                                       "reasons": list(engine.killswitch.entry_blockers()) if engine is not None else []},
                     "by_strategy": dict(by_strategy),
                     "signals": [
                         {

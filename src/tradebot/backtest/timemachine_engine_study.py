@@ -168,11 +168,13 @@ async def run_engine_study(config: Config, execution_bars: Mapping[str, Sequence
                         'pending_submission': store.has_pending_submission(),
                     }
                     censored = bool(any(terminal.values()))
+                    entry_blockers = engine.killswitch.entry_blockers()
                     diagnostics[variant] = {'metrics': performance[variant].to_dict(), 'monte_carlo': mc,
                                             'closed_trades': [asdict(trade) for trade in trades[:1000]],
                                             'trade_records_truncated': len(trades) > 1000,
                                             'terminal_state': terminal, 'terminal_censored': censored,
-                                            'comparison_eligible': not censored and invalid == 0,
+                                            'entry_blockers': entry_blockers,
+                                            'comparison_eligible': not censored and invalid == 0 and not entry_blockers,
                                             'stats': engine.stats.to_dict(), 'checks': len(errors),
                                             'invalid_checks': invalid, 'alerts': len(alerts),
                                             'candidate_checks': errors[:10000],

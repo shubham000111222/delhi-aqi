@@ -123,6 +123,11 @@
   </section>
 
   <section class="card half">
+    <h2>Entry blockers <span class="muted">read-only safety state</span></h2>
+    <p id="entry-blockers" class="muted">Not sampled.</p>
+  </section>
+
+  <section class="card half">
     <h2>Time Machine <span class="muted">research checks — not enabled live</span></h2>
     <div id="timemachine"><p class="empty">No computed checks recorded.</p></div>
   </section>
@@ -438,6 +443,10 @@ async function tick() {
     renderSpark(data.equity_curve);
     renderPositions(data.positions);
     renderTrades(data.trades);
+    const blockers = data.entry_blockers || {};
+    el("entry-blockers").textContent = blockers.available
+      ? ((blockers.reasons || []).join(", ") || "No reported blockers; ordinary risk checks still apply.")
+      : "Unavailable: no engine attached. This does not authorize entries.";
     const tm = data.timemachine || {};
     el("timemachine").innerHTML = (tm.checks || []).map(row =>
       `<details><summary>${esc(row.check.trade_id || "unknown")} · ${esc(row.check.verdict || "unavailable")} · x${esc(String(row.check.multiplier ?? "?"))}</summary><p>${esc(row.ticket)}</p></details>`

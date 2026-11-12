@@ -33,6 +33,7 @@ Full criteria and honest limits: [TIMEMACHINE_PLAN.md](TIMEMACHINE_PLAN.md).
 - [ ] Enforce actual quantity and protective SELL constraints rather than trusting caller labels or multiplier assertions; prove venue semantics. **External:** validate exchange-side behavior.
 - [ ] Cover all supported mutation paths/adapters and healer actions with forbidden-action tests; document remaining raw SQL/Python/venue privilege boundary and constrain deployment credentials.
 - [ ] Migrate or explicitly quarantine legacy audit/incident/fault/streak history; do not fabricate missing history.
+- [x] Read-only process/durable entry-blocker reasons surfaced in dashboard and research-study integrity; no release authority.
 - [ ] Ensure durable faults and promotion evidence are consistently represented in CLI, preflight, health, dashboard and alerts.
 
 ## Remaining self-healing requirements (§20)

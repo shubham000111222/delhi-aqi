@@ -362,3 +362,11 @@ def test_daily_report_includes_only_day_checks_and_computed_tickets(fast_cfg):
         assert 'Time Machine' in report.html()
     finally:
         store.close()
+
+
+def test_entry_blocker_view_never_implies_readonly_engine_is_ready(client):
+    data = client.get('/api/snapshot').json()
+    assert data['entry_blockers'] == {'available': False, 'reasons': []}
+    page = client.get('/').text
+    assert 'id="entry-blockers"' in page
+    assert 'This does not authorize entries.' in page

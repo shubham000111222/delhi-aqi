@@ -9,6 +9,13 @@ establish an edge.
 Reproduce any row with the command in it. If a number here disagrees with a rerun, the
 rerun is right and this file is stale — fix it rather than the other way round.
 
+## Entry-blocker visibility and study integrity
+
+- Added KillSwitch.entry_blockers read-only diagnostic for process-local hold, kill file/level, incident-tracking failure, flapping, pending incident/fill/submission, observation fault and invalid ramp tracking. Failed reads propagate rather than implying safe/empty state. This does not change ordinary entry authority or release/reset anything; merely reading a kill file does not mutate kill state.
+- Per-variant studies retain blocker reasons and disqualify held baseline/variant comparisons, including stress and existing comparison-integrity gate. A local hold cannot earn apparent edge by silently suppressing trades independently of the candidate filter.
+- Dashboard snapshot and escaped text panel expose blocker availability/reasons. No-engine views explicitly say unavailable/not authorization; an empty list still requires ordinary risk approval. No controls or new release path added.
+- Five new cases cover local/durable visibility without release, nonmutating kill-file reads, read failure propagation, held-study disqualification and read-only dashboard wording. Full suite **1468 passed, 2 skipped**, Ruff/mypy/diff clean. This is diagnostic/integrity coverage, not authenticated recovery, venue reconciliation or deployment readiness.
+
 ## Five-minute grid and timezone identity validation
 
 - Prepared Time Machine history now rejects contiguous but off-grid5m timestamps, including microsecond offsets; labeling a sequence5m does not establish valid UTC bucket boundaries. Future rows are still excluded before validating values/grid, so future append invariance is retained.

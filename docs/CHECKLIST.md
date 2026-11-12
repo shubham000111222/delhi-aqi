@@ -19,7 +19,7 @@ For the full Windows installation, implementation and validation procedure, see
 For the consolidated item-by-item implementation and external-evidence backlog, see
 [`REMAINING_WORK.md`](REMAINING_WORK.md). It does not mark unfinished work complete.
 
-**Last updated:** 2026-11-02 · **Suite:** 1463 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-02 · **Suite:** 1468 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -304,3 +304,5 @@ Fill this in as phases complete — it is what `docs/RESULTS.md` is built from.
 - [x] Configurable60–180-day historical replay separate from last60-day bootstrap, bounded window-sensitive caches, hash provenance and research CLI propagation.
 
 - [x] Time Machine5m grid validation rejects shifted/microsecond buckets; canonical UTC timestamp hashing preserves timezone-equivalent input identity.
+
+- [x] Read-only entry-blocker reasons in dashboard/studies; held comparisons disqualified without clearing holds, resetting kill state or granting entry authority.

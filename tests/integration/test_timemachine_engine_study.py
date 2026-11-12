@@ -322,3 +322,22 @@ async def test_code_changes_during_execution_invalidate_study(fast_cfg, monkeypa
     assert not result['complete'] and 'source changed' in result['error']
     assert not any(result['retention_criteria_passed'].values())
     assert not result['filter_enabled']
+
+
+async def test_local_entry_hold_is_disclosed_and_disqualifies_study(fast_cfg, monkeypatch):
+    original = Engine.run
+
+    async def held_run(self, **kwargs):
+        await original(self, **kwargs)
+        self.killswitch.latch_local_entry_hold()
+        return self.stats
+
+    monkeypatch.setattr(Engine, 'run', held_run)
+    result = await run_engine_study(fast_cfg, tape(), {}, start=START, end=END,
+                                    final_holdout_start=END, fee_rate=.001, slippage_rate=0)
+    assert result.get('complete'), result
+    assert not any(result['retention_criteria_passed'].values())
+    for row in result['diagnostics'].values():
+        assert 'local_entry_hold' in row['entry_blockers']
+        assert not row['comparison_eligible']
+        assert not next(g for g in row['acceptance_gates'] if g['name'] == 'study_comparison_integrity')['passed']
