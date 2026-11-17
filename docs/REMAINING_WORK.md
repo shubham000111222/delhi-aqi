@@ -115,3 +115,5 @@ Full criteria and honest limits: [TIMEMACHINE_PLAN.md](TIMEMACHINE_PLAN.md).
 The operator's quote currency, symbols, capital cap, hosting and optional integration choices remain deployment configuration, not facts the agent may silently decide to enable real-money trading.
 
 - [x] Continuation: exact-window backfill resume keys and bounds/symbol/timeframe checks; archive-content validation remains open.
+
+- [x] Continuation: structural backfill candle validation and conflicting-duplicate refusal; real provenance and stored archive reinspection remain open.
