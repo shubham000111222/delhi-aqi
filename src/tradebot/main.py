@@ -2117,9 +2117,14 @@ def cmd_backfill_history(args: argparse.Namespace) -> int:
         try:
             for chunk_start, chunk_end in plan:
                 for symbol in symbols:
-                    key = f"{symbol}|{args.timeframe}|{chunk_start.date()}|{chunk_end.date()}"
+                    # Dates alone alias different intraday requests and can silently
+                    # skip a longer window using a shorter window's completion.
+                    bounds = [chunk_start.isoformat(), chunk_end.isoformat()]
+                    key = f"{symbol}|{args.timeframe}|{bounds[0]}|{bounds[1]}"
                     done = chunks.get(key)
-                    if done and done.get("complete") and not args.retry_incomplete:
+                    if (isinstance(done, dict) and done.get("complete") is True
+                            and done.get("chunk") == bounds and done.get("symbol") == symbol
+                            and done.get("timeframe") == args.timeframe and not args.retry_incomplete):
                         rows.append({**done, "skipped": True})
                         continue
                     candles, report = await backfill.run(symbol, args.timeframe, chunk_start, chunk_end)

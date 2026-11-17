@@ -1,6 +1,6 @@
 # Remaining work — implementation and acceptance register
 
-Updated 2026-11-02. Applies to working branch `arena/200089ad-delhi-aqi`, draft PR #8, not a claim that these changes have merged. This consolidates the open items in CHECKLIST.md, BUILD_PLAN_20_21.md, SIGNED_RECOVERY.md and WINDOWS_LOCAL_LIVE_READINESS.md. Those documents retain detailed procedures and caveats. No item below is complete merely because it is listed or has a diagnostic command.
+Updated 2026-11-02. PR #8 merged; continuation work is on `arena/48c34508-delhi-aqi`. Unfinished acceptance items remain open after that code merge. This consolidates the open items in CHECKLIST.md, BUILD_PLAN_20_21.md, SIGNED_RECOVERY.md and WINDOWS_LOCAL_LIVE_READINESS.md. Those documents retain detailed procedures and caveats. No item below is complete merely because it is listed or has a diagnostic command.
 
 **Status:** [x] implemented with local automated tests; [ ] incomplete. **External** means sandbox tests cannot establish acceptance. Live trading and live/testnet resets remain blocked. Do not manually delete holds to make checks pass.
 
@@ -113,3 +113,5 @@ Full criteria and honest limits: [TIMEMACHINE_PLAN.md](TIMEMACHINE_PLAN.md).
 - [ ] Record durable numbers and failures in RESULTS.md; never report synthetic evidence as venue validation.
 
 The operator's quote currency, symbols, capital cap, hosting and optional integration choices remain deployment configuration, not facts the agent may silently decide to enable real-money trading.
+
+- [x] Continuation: exact-window backfill resume keys and bounds/symbol/timeframe checks; archive-content validation remains open.
