@@ -168,10 +168,12 @@ class Backfill:
         ordered = [bars[ts] for ts in sorted(bars)]
         report.kept = len(ordered)
         report.gaps = _find_gaps(ordered, step)
-        if not report.stuck:
-            report.complete = report.complete or (
-                report.expected > 0 and report.kept >= report.expected and not report.gaps
-            )
+        # Exhaustion/unclosed-only pages are stopping conditions, not evidence
+        # that the requested closed history is present (including edge gaps).
+        report.complete = (
+            not report.stuck and report.error is None
+            and report.kept == report.expected_bars and not report.gaps
+        )
         return ordered, report
 
 

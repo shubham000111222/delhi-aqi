@@ -309,3 +309,24 @@ def test_demo_backfill_unaligned_past_end_keeps_last_eligible_bar():
                              START + timedelta(minutes=3, seconds=30), now=NOW))
     assert len(rows) == report.expected_bars == 4
     assert report.complete
+
+
+@pytest.mark.parametrize('missing', ['all', 'head', 'tail', 'middle'])
+def test_source_exhaustion_never_certifies_missing_closed_history(missing):
+    bars = series(START, 5)
+    selected = {'all': [], 'head': bars[1:], 'tail': bars[:-1],
+                'middle': bars[:2] + bars[3:]}[missing]
+
+    async def fetch(symbol, timeframe, since, until, limit):
+        return [row for row in selected if since <= row.ts < until][:limit]
+
+    rows, report = asyncio.run(Backfill(fetch).run('BTC/USDT', '1m', START,
+                               START + timedelta(minutes=5), now=NOW))
+    assert len(rows) < report.expected_bars == 5
+    assert report.complete is False
+
+
+def test_no_closed_bars_requested_is_complete_without_invented_candles():
+    rows, report = asyncio.run(Backfill(synthetic_fetcher()).run('BTC/USDT', '1m', START,
+                               START + timedelta(seconds=30), now=START))
+    assert rows == [] and report.expected_bars == 0 and report.complete
