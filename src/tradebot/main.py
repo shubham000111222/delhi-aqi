@@ -2063,6 +2063,7 @@ def cmd_backfill_history(args: argparse.Namespace) -> int:
     """
     from .data.archive import Archive
     from .data.backfill import Backfill, rest_fetcher, synthetic_fetcher
+    from .data.resume_state import write_resume_state
 
     cfg = _config(args)
     symbols = [s.strip() for s in (args.symbols or ",".join(cfg.symbol_names())).split(",") if s.strip()]
@@ -2136,8 +2137,7 @@ def cmd_backfill_history(args: argparse.Namespace) -> int:
                     chunks[key] = {k: v for k, v in entry.items() if k != "archived_files"}
                     rows.append(entry)
                     state["updated_at"] = utcnow().isoformat()
-                    state_path.parent.mkdir(parents=True, exist_ok=True)
-                    state_path.write_text(json.dumps(state, indent=2, default=str))
+                    write_resume_state(state_path, state)
         finally:
             closer = getattr(fetcher, "aclose", None)
             if closer is not None:

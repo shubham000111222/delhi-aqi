@@ -117,3 +117,5 @@ The operator's quote currency, symbols, capital cap, hosting and optional integr
 - [x] Continuation: exact-window backfill resume keys and bounds/symbol/timeframe checks; archive-content validation remains open.
 
 - [x] Continuation: structural backfill candle validation and conflicting-duplicate refusal; real provenance and stored archive reinspection remain open.
+
+- [x] Continuation: atomic bounded resume-state replacement; independent archive verification and concurrent-writer protection remain open.

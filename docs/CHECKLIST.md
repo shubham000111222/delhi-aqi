@@ -19,7 +19,7 @@ For the full Windows installation, implementation and validation procedure, see
 For the consolidated item-by-item implementation and external-evidence backlog, see
 [`REMAINING_WORK.md`](REMAINING_WORK.md). It does not mark unfinished work complete.
 
-**Last updated:** 2026-11-02 · **Suite:** 1519 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-02 · **Suite:** 1524 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -328,3 +328,5 @@ Fill this in as phases complete — it is what `docs/RESULTS.md` is built from.
 - [x] Exact-timestamp resume keys and matching chunk metadata prevent intraday completion aliasing; old date keys refetch.
 
 - [x] Validate backfill identity/grid/OHLCV and refuse conflicting duplicate completion; malformed pages fail incomplete.
+
+- [x] Bounded strict-JSON atomic resume replacement with file fsync and failure-preservation tests; concurrency/power-loss/Windows acceptance remains open.
