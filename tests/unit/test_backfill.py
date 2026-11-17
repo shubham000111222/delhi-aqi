@@ -287,3 +287,25 @@ class TestTheTail:
         assert report.kept == 7
         assert report.complete is False
         assert round(report.coverage, 4) == 0.7
+
+
+@pytest.mark.parametrize('offset', [timedelta(seconds=30), timedelta(microseconds=1)])
+def test_demo_source_obeys_half_open_unaligned_window(offset):
+    fetch = synthetic_fetcher(page_size=100)
+    rows = asyncio.run(fetch('BTC/USDT', '1m', START + offset,
+                             START + timedelta(minutes=3) + offset, 100))
+    assert [row.ts for row in rows] == [START + timedelta(minutes=i) for i in (1, 2, 3)]
+
+
+def test_demo_source_aligned_end_is_exclusive():
+    fetch = synthetic_fetcher(page_size=100)
+    rows = asyncio.run(fetch('BTC/USDT', '1m', START, START + timedelta(minutes=3), 100))
+    assert [row.ts for row in rows] == [START + timedelta(minutes=i) for i in (0, 1, 2)]
+
+
+def test_demo_backfill_unaligned_past_end_keeps_last_eligible_bar():
+    backfill = Backfill(synthetic_fetcher(page_size=100))
+    rows, report = asyncio.run(backfill.run('BTC/USDT', '1m', START,
+                             START + timedelta(minutes=3, seconds=30), now=NOW))
+    assert len(rows) == report.expected_bars == 4
+    assert report.complete
