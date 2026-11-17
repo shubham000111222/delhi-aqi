@@ -12,7 +12,9 @@ from pathlib import Path
 
 import pytest
 
+from tradebot.config import Mode
 from tradebot.core.clock import SimClock
+from tradebot.core.models import KillLevel
 from tradebot.core.store import Store
 from tradebot.engine import Engine
 
@@ -99,3 +101,435 @@ async def test_the_daily_report_carries_the_health_line(engine):
     assert "Component health:" in markdown
     line = markdown.split("Component health:", 1)[1].splitlines()[0].strip("- ").strip()
     assert line and "not sampled" not in line, line
+
+
+async def test_critical_flapping_pauses_and_prevents_existing_l1_auto_resume(engine):
+    from tradebot.core.models import KillLevel
+    from tradebot.health import Check
+
+    engine.killswitch.trigger(KillLevel.L1, trigger="stale_feeds", reason="test")
+    for step in range(1, 7):
+        engine.health.report(
+            "feed", now=START + timedelta(seconds=step), ticks=Check(readiness=step % 2 == 0)
+        )
+    now = START + timedelta(seconds=7)
+    assert engine._hold_on_flapping(now=now) == ["feed"]
+    engine._resume(reason="feed recovered", now=now, expected_state=engine.killswitch.state)
+    assert engine.killswitch.level is KillLevel.L1
+
+
+async def test_flapping_raises_l1_and_optional_component_does_not(engine):
+    from tradebot.core.models import KillLevel
+    from tradebot.health import Check
+
+    engine.health.register("optional-test", critical=False)
+    for step in range(1, 7):
+        engine.health.report(
+            "optional-test", now=START + timedelta(seconds=step), ticks=Check(readiness=step % 2 == 0)
+        )
+    assert engine._hold_on_flapping(now=START + timedelta(seconds=7)) == []
+    assert engine.killswitch.level is KillLevel.L0
+    for step in range(1, 7):
+        engine.health.report(
+            "feed", now=START + timedelta(seconds=step), ticks=Check(readiness=step % 2 == 0)
+        )
+    assert engine._hold_on_flapping(now=START + timedelta(seconds=7)) == ["feed"]
+    assert engine.killswitch.level is KillLevel.L1
+    assert engine.autonomy.recent()[-1]["action"] == "hold_for_flapping"
+
+
+async def test_flapping_hold_survives_restart_and_blocks_manual_and_auto_resume(engine):
+    from tradebot.core.models import KillLevel
+    from tradebot.health import Check
+    from tradebot.risk.killswitch import KillSwitch
+
+    for step in range(1, 7):
+        engine.health.report(
+            "feed", now=START + timedelta(seconds=step), ticks=Check(readiness=step % 2 == 0)
+        )
+    engine.clock.set(START + timedelta(seconds=7))
+    engine._hold_on_flapping(now=engine.clock.now())
+    restarted_switch = KillSwitch(engine.store, clock=engine.clock, kill_file=None, mode=Mode.PAPER)
+    assert restarted_switch.level is KillLevel.L1
+    assert not restarted_switch.auto_resume(reason="restart")
+    with pytest.raises(PermissionError, match="flapping"):
+        restarted_switch.reset(reason="operator")
+    # Six transitions are no longer in the window after the first ages out.
+    engine.clock.set(START + timedelta(minutes=10, seconds=2))
+    restarted_switch.reset(reason="settled")
+    assert restarted_switch.level is KillLevel.L0
+
+
+async def test_corrupt_flapping_hold_fails_closed(engine):
+    from tradebot.core.models import KillLevel
+    from tradebot.risk.killswitch import KillSwitch
+
+    engine.killswitch.trigger(KillLevel.L1, trigger="stale_feeds", reason="test")
+    engine.store.kv_set("health_flapping_hold", {"until": "not a timestamp"})
+    restarted_switch = KillSwitch(engine.store, clock=engine.clock, kill_file=None, mode=Mode.PAPER)
+    assert not restarted_switch.auto_resume(reason="test")
+    with pytest.raises(PermissionError):
+        restarted_switch.reset(reason="test")
+
+
+async def test_engine_restores_five_changes_so_restart_cannot_hide_the_sixth(fast_cfg):
+    from tradebot.core.models import KillLevel
+    from tradebot.health import Check
+
+    fast_cfg.ensure_dirs()
+    clock = SimClock(START + timedelta(seconds=6))
+    store = Store(":memory:")
+    for step in range(1, 6):
+        store.log_event(
+            "health_change",
+            {"component": "feed", "from": "HEALTHY", "to": "DEGRADED" if step % 2 else "HEALTHY"},
+            ts=START + timedelta(seconds=step),
+        )
+    engine = await Engine.build(fast_cfg, clock=clock, store=store)
+    try:
+        assert len(engine.health.components["feed"].transitions) == 5
+        engine.health.report("feed", now=clock.now(), ticks=Check(readiness=True))
+        assert engine._hold_on_flapping(now=clock.now()) == ["feed"]
+        assert engine.killswitch.level is KillLevel.L1
+    finally:
+        engine.close()
+
+
+async def test_engine_restores_six_changes_and_holds_immediately(fast_cfg):
+    from tradebot.core.models import KillLevel
+
+    fast_cfg.ensure_dirs()
+    clock = SimClock(START + timedelta(seconds=7))
+    store = Store(":memory:")
+    for step in range(1, 7):
+        store.log_event(
+            "health_change", {"component": "feed", "from": "HEALTHY", "to": "DEGRADED"},
+            ts=START + timedelta(seconds=step),
+        )
+    engine = await Engine.build(fast_cfg, clock=clock, store=store)
+    try:
+        assert engine.killswitch.level is KillLevel.L1
+        assert engine.killswitch.flapping_hold_active()
+    finally:
+        engine.close()
+
+
+async def test_remote_engine_resume_only_clears_reviewed_l1(engine, monkeypatch):
+    engine.killswitch.trigger(KillLevel.L2, trigger="test", reason="pause")
+    with pytest.raises(PermissionError, match="only clear L1"):
+        await engine.resume("reviewed", actor="dashboard", l1_only=True)
+    assert engine.killswitch.level is KillLevel.L2
+    engine.killswitch.reset(reason="local review")
+    engine.killswitch.trigger(KillLevel.L1, trigger="test", reason="pause")
+    original = engine.killswitch.reset
+
+    def race(*args, **kwargs):
+        engine.killswitch.trigger(KillLevel.L3, trigger="test", reason="concurrent escalation")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(engine.killswitch, "reset", race)
+    with pytest.raises(PermissionError, match="changed"):
+        await engine.resume("reviewed", actor="dashboard", l1_only=True)
+    assert engine.killswitch.level is KillLevel.L3
+
+
+async def test_engine_trailing_stop_ratchets_before_memory_update(engine, monkeypatch):
+    import sqlite3
+    from decimal import Decimal
+
+    import tradebot.engine as engine_module
+    from tradebot.core.models import Position
+
+    pos = Position(
+        symbol="BTC/USDT", strategy="S1_ema_trend", qty=Decimal("1"), avg_entry=Decimal("100"),
+        stop=Decimal("90"), target=Decimal("120"), initial_stop=Decimal("90"), opened_at=START,
+        highest_price=Decimal("100"),
+    )
+    engine.store.save_position(pos)
+    engine.ledger.positions[(pos.symbol, pos.strategy)] = pos
+    monkeypatch.setattr(engine.market, "price", lambda symbol: Decimal("110"))
+    monkeypatch.setattr(engine, "_strategy_series", lambda p: object())
+    monkeypatch.setattr(engine_module, "atr_value", lambda series, period: 2.0)
+    await engine._manage_positions(pos.symbol)
+    assert pos.effective_stop == Decimal("104")
+    assert engine.store.open_positions()[0].effective_stop == Decimal("104")
+    assert engine.store.count_events("trailing_stop_tightened") == 1
+    engine.store._exec(
+        "CREATE TRIGGER fail_stop BEFORE INSERT ON events WHEN NEW.kind='trailing_stop_tightened' "
+        "BEGIN SELECT RAISE(ABORT, 'audit failed'); END"
+    )
+    monkeypatch.setattr(engine.market, "price", lambda symbol: Decimal("112"))
+    with pytest.raises(sqlite3.IntegrityError, match="audit failed"):
+        await engine._manage_positions(pos.symbol)
+    assert pos.effective_stop == Decimal("104")
+    assert engine.store.open_positions()[0].effective_stop == Decimal("104")
+
+
+async def test_engine_status_reports_effective_ramp_not_legacy_stage(engine):
+    from tradebot.config import Mode
+
+    engine.cfg.settings.mode = Mode.LIVE
+    engine.store.kv_set("ramp", {"stage": 3, "critical_incidents": 0})
+    ramp = engine.status()["ramp"]
+    assert ramp["stage"] == 3
+    assert ramp["recorded_stage_multiplier"] == "1.0000"
+    assert ramp["multiplier"] == "0.1000"
+    assert ramp["advancement_authorized"] is False
+
+
+async def test_kill_continues_flatten_when_incident_write_fails(engine, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    flatten = AsyncMock()
+    monkeypatch.setattr(engine, "flatten_all", flatten)
+    engine.store._exec("CREATE TRIGGER fail_incident BEFORE INSERT ON incidents "
+                       "BEGIN SELECT RAISE(ABORT, 'incident write failed'); END")
+    await engine.kill("emergency")
+    assert engine.killswitch.level is KillLevel.L2
+    assert engine.store.has_pending_kill_incident()
+    flatten.assert_awaited_once_with("emergency")
+
+
+async def test_flapping_hold_blocks_entries_if_l1_transition_fails(engine, monkeypatch):
+    from tradebot.health import Check
+
+    for step in range(1, 7):
+        engine.health.report("feed", now=START + timedelta(seconds=step),
+                             ticks=Check(readiness=step % 2 == 0))
+    engine.clock.set(START + timedelta(seconds=7))
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("interrupted before L1")
+
+    monkeypatch.setattr(engine.killswitch, "trigger", fail)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        engine._hold_on_flapping(now=engine.clock.now())
+    assert engine.killswitch.level is KillLevel.L0
+    assert not engine.killswitch.can_open_entries()
+
+
+@pytest.mark.parametrize("invalid", [{"until": "bad"}, None, [], {}])
+async def test_corrupt_flapping_hold_blocks_entries_at_l0(engine, invalid):
+    engine.store.kv_set("health_flapping_hold", invalid)
+    assert engine.killswitch.level is KillLevel.L0
+    assert not engine.killswitch.can_open_entries()
+
+
+async def test_disabled_strategy_survives_restart_and_does_not_expire(fast_cfg, tmp_path):
+    name = "S1_ema_trend"
+    path = tmp_path / "strategy-state.db"
+    fast_cfg.ensure_dirs()
+    engine = await Engine.build(fast_cfg, clock=SimClock(START), store=Store(path))
+    for _ in range(4):
+        engine._handle_strategy_fault(name, reason="repeated failure")
+    assert engine.store.strategy_disabled(name)
+    assert engine.store.autonomy_actions()[-1]["action"] == "disable_strategy"
+    engine.close()
+    restarted = await Engine.build(fast_cfg, clock=SimClock(START + timedelta(days=400)), store=Store(path))
+    try:
+        assert restarted._strategy_blocked(name)
+        assert name in restarted._disabled_strategies
+        assert restarted.store.count_events("strategy_disabled") == 1
+    finally:
+        restarted.close()
+
+
+async def test_disable_audit_failure_rolls_back_and_pauses_entries(engine):
+    import sqlite3
+
+    engine.store._exec("CREATE TRIGGER fail_disable BEFORE INSERT ON events WHEN NEW.kind='strategy_disabled' "
+                       "BEGIN SELECT RAISE(ABORT, 'disable audit failure'); END")
+    for _ in range(3):
+        engine._handle_strategy_fault("S1_ema_trend", reason="fault")
+    with pytest.raises(sqlite3.IntegrityError, match="disable audit failure"):
+        engine._handle_strategy_fault("S1_ema_trend", reason="fault")
+    assert not engine.store.strategy_disabled("S1_ema_trend")
+    assert not [row for row in engine.store.autonomy_actions() if row["action"] == "disable_strategy"]
+    assert engine.killswitch.level is KillLevel.L1
+    assert engine._strategy_blocked("S1_ema_trend")
+
+
+async def test_fault_budget_survives_restart_before_disable(fast_cfg, tmp_path):
+    name = "S1_ema_trend"
+    path = tmp_path / "fault-budget.db"
+    fast_cfg.ensure_dirs()
+    engine = await Engine.build(fast_cfg, clock=SimClock(START), store=Store(path))
+    for _ in range(3):
+        engine._handle_strategy_fault(name, reason="fault")
+    engine.close()
+    restarted = await Engine.build(fast_cfg, clock=SimClock(START + timedelta(minutes=5)), store=Store(path))
+    try:
+        assert restarted.strategy_faults.used(name, now=restarted.clock.now()) == 3
+        assert restarted._strategy_blocked(name)
+        restarted._handle_strategy_fault(name, reason="fourth fault")
+        assert restarted.store.strategy_disabled(name)
+        assert restarted.store.count_events("strategy_disabled") == 1
+    finally:
+        restarted.close()
+
+
+async def test_fault_pause_audit_failure_rolls_back_and_attempts_l1(engine):
+    import sqlite3
+
+    engine.store._exec("CREATE TRIGGER fail_pause BEFORE INSERT ON events WHEN NEW.kind='strategy_paused' "
+                       "BEGIN SELECT RAISE(ABORT, 'pause audit failed'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="pause audit failed"):
+        engine._handle_strategy_fault("S1_ema_trend", reason="fault")
+    assert not engine.store.strategy_fault_attempts("S1_ema_trend", now=START)
+    assert not [row for row in engine.store.autonomy_actions() if row["action"] == "pause_strategy"]
+    assert engine.killswitch.level is KillLevel.L1
+
+
+@pytest.mark.parametrize("mode", [Mode.LIVE, Mode.TESTNET])
+async def test_venue_reconciliation_cannot_report_ok_from_local_cache(engine, mode):
+    engine.cfg.settings.mode = mode
+    # The paper adapter's balances and local orders may look consistent but are not
+    # independent venue-wide evidence, even if fills are still queued.
+    assert "unverified" in await engine.reconcile()
+    engine.unapplied_fills = 1
+    assert "unverified" in await engine.reconcile()
+
+
+@pytest.mark.parametrize("mode", [Mode.LIVE, Mode.TESTNET])
+async def test_venue_engine_does_not_initialize_reconciliation_to_ok(fast_cfg, mode):
+    from dataclasses import replace
+
+    cfg = replace(fast_cfg, settings=fast_cfg.settings.model_copy(update={"mode": mode}))
+    # Inject paper feed/adapter to inspect venue-mode startup without network access.
+    paper_engine = await Engine.build(fast_cfg, clock=SimClock(START), store=Store(":memory:"))
+    store = Store(":memory:")
+    try:
+        venue_engine = await Engine.build(cfg, clock=SimClock(START), store=store,
+                                          feed=paper_engine.feed, adapter=paper_engine.adapter)
+        assert venue_engine._reconcile_state == "venue reconciliation unverified"
+    finally:
+        store.close()
+        paper_engine.close()
+
+
+async def test_strategy_pause_audit_failure_rolls_back_and_attempts_l1(engine):
+    import sqlite3
+
+    engine.store._exec("CREATE TRIGGER fail_pause_write BEFORE INSERT ON events WHEN NEW.kind='strategy_paused' "
+                       "BEGIN SELECT RAISE(ABORT, 'audit failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="audit failure"):
+        engine._pause_strategy("S1_ema_trend", hours=2, reason="consecutive losses")
+    assert engine.store.kv_get("paused_strategies") is None
+    assert engine.killswitch.level is KillLevel.L1
+    assert engine._strategy_blocked("S1_ema_trend")
+
+
+async def test_engine_risk_context_applies_durable_size_reduction(engine):
+    from decimal import Decimal
+
+    engine.store.reduce_strategy_size("S1_ema_trend", Decimal("0.5"), now=engine.clock.now(), reason="losses")
+    context = engine._risk_context("BTC/USDT", "S1_ema_trend")
+    assert context.size_multiplier == Decimal("0.5")
+
+
+async def test_fill_ledger_error_keeps_durable_hold(engine):
+    from decimal import Decimal
+
+    from tradebot.core.models import Fill, Side
+
+    fill = Fill(order_id="no-position", symbol="BTC/USDT", side=Side.SELL, price=Decimal("100"),
+                qty=Decimal("1"), fee=Decimal("0"), ts=START, strategy="S1")
+    engine.enqueue_fill(fill)
+    assert engine.store.has_pending_fill()
+    assert not engine.killswitch.can_open_entries()
+    kind, payload = engine.queue.get_nowait()
+    await engine.dispatch(kind, payload)
+    assert engine.store.has_pending_fill()
+    assert engine.unapplied_fills == 1
+    assert not engine.store.fills()
+
+
+async def test_fill_journal_and_kill_write_failure_still_latches_local_hold(engine, monkeypatch):
+    from decimal import Decimal
+
+    from tradebot.core.models import Fill, Side
+
+    fill = Fill(order_id="o", symbol="BTC/USDT", side=Side.BUY, price=Decimal("100"), qty=Decimal("1"),
+                fee=Decimal("0"), ts=START, strategy="S1")
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("storage unavailable")
+
+    monkeypatch.setattr(engine.store, "journal_pending_fill", fail)
+    monkeypatch.setattr(engine.store, "set_kill_state", fail)
+    with pytest.raises(RuntimeError, match="storage unavailable"):
+        engine.enqueue_fill(fill)
+    assert not engine.killswitch.can_open_entries()
+    with pytest.raises(PermissionError, match="local safety hold"):
+        engine.killswitch.reset(reason="test")
+
+
+async def test_health_reports_entry_hold_even_with_healthy_components(engine):
+    engine.killswitch.latch_local_entry_hold()
+    health = await engine.health_check()
+    assert health['components']['overall'] == 'HEALTHY'
+    assert health['entry_blockers']['available'] is True
+    assert 'local_entry_hold' in health['entry_blockers']['reasons']
+    assert 'not entry authorization' in health['entry_blockers']['note']
+    assert not engine.killswitch.can_open_entries()
+
+
+async def test_health_reports_durable_observation_fault_without_release(engine):
+    engine.store.latch_execution_observation_fault('unverified-observation')
+    health = await engine.health_check()
+    assert 'execution_observation_fault' in health['entry_blockers']['reasons']
+    assert engine.store.has_execution_observation_fault()
+    assert not engine.killswitch.can_open_entries()
+
+
+async def test_entry_blocker_alerts_are_change_only_and_never_authorize(engine):
+    class Notifier:
+        def __init__(self):
+            self.messages = []
+
+        async def send(self, message, *, level):
+            self.messages.append((message, level))
+
+    notifier = Notifier()
+    engine.notifier = notifier
+    await engine.health_check()
+    assert notifier.messages == []
+    engine.killswitch.latch_local_entry_hold()
+    await engine.health_check()
+    await engine.health_check()
+    assert len(notifier.messages) == 1
+    assert 'local_entry_hold' in notifier.messages[0][0]
+    engine.store.latch_execution_observation_fault('fault')
+    await engine.health_check()
+    assert len(notifier.messages) == 2
+    assert not engine.killswitch.can_open_entries()
+    rows = engine.store.events(kinds=['entry_blockers_changed'])
+    assert len(rows) == 2
+    assert all(row['payload']['entry_authorized'] is False for row in rows)
+
+
+async def test_failed_entry_blocker_alert_is_audited_without_releasing_hold(engine):
+    class BrokenNotifier:
+        async def send(self, message, *, level):
+            raise OSError('secret transport details must not appear in audit')
+
+    engine.notifier = BrokenNotifier()
+    engine.killswitch.latch_local_entry_hold()
+    await engine.health_check()
+    await engine.health_check()
+    assert not engine.killswitch.can_open_entries()
+    rows = engine.store.events(kinds=['entry_blocker_alert_failed'])
+    assert len(rows) == 1
+    assert rows[0]['payload']['error_type'] == 'OSError'
+    assert 'secret' not in str(rows)
+
+
+async def test_empty_blocker_change_is_informational_not_resume_authority(engine):
+    # Test the observer directly; do not add a production hold-release path.
+    await engine._report_entry_blockers(('local_entry_hold',), now=engine.clock.now())
+    await engine._report_entry_blockers((), now=engine.clock.now())
+    rows = engine.store.events(kinds=['entry_blockers_changed'])
+    assert len(rows) == 2
+    empty = next(row for row in rows if not row['payload']['reasons'])
+    assert empty['level'] == 'INFO'
+    assert empty['payload']['entry_authorized'] is False

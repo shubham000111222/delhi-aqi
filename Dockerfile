@@ -20,7 +20,4 @@ RUN mkdir -p data reports logs
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
-    CMD curl -fsS http://localhost:8000/healthz || exit 1
-
 CMD ["python", "-m", "tradebot.main", "run"]

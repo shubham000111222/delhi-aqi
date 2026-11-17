@@ -7,9 +7,9 @@ It has its own clock and its own database handle. It watches for:
 * a temporary permission slip: it never trades by itself in paper mode, it only
   escalates the persisted kill level, which the bot (or the next start) obeys.
 
-In live mode the same loop runs with its own exchange client so it can cancel orders and
-flatten positions even if the bot process is wedged. That path is implemented against the
-adapter interface in :class:`LiveWatchdogActions` and is exercised by `tradebot drill`.
+The CLI has no venue client. Live/testnet restarts are blocked until an independent venue
+snapshot and the safety preflight can be verified. Existing adapters only expose free balances
+and locally tracked orders, which are insufficient to prove the book is safe.
 
 Three things were missing until §20.5's supervision PR, and all three were the kind that
 only look fine because nobody has died yet:
@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from ..alerts.router import AlertRouter
-from ..config import Config
+from ..config import Config, Mode
 from ..core.clock import Clock, parse_iso
 from ..core.logging import get_logger, setup_logging
 from ..core.models import KillLevel
@@ -59,23 +59,26 @@ class LiveWatchdogActions:
         answers is "if the bot never comes back, what is naked right now". A stop that
         exists only in the dead process's memory does not protect anything.
         """
-        from ..core.models import OrderType
+        from ..core.models import OrderType, Side
 
+        if not getattr(self.adapter, "watchdog_snapshot_is_authoritative", False):
+            raise RuntimeError("cannot verify total balances and venue orders independently")
         balances = await self.adapter.get_balances()
         open_orders = await self.adapter.get_open_orders()
-        protective = {
-            order.symbol
-            for order in open_orders
-            if getattr(order, "reduce_only", False)
-            and order.type in (OrderType.STOP_MARKET, OrderType.STOP_LIMIT)
-            and getattr(order.status, "is_open", True)
-        }
         naked: list[str] = []
         for asset, qty in balances.items():
             if asset == self.adapter.quote or qty is None or qty <= 0:
                 continue
             symbol = f"{asset}/{self.adapter.quote}"
-            if symbol not in protective:
+            coverage = sum(
+                (order.remaining for order in open_orders
+                 if order.symbol == symbol and order.side is Side.SELL
+                 and getattr(order, "reduce_only", False)
+                 and order.type in (OrderType.STOP_MARKET, OrderType.STOP_LIMIT)
+                 and order.status.is_open),
+                start=qty * 0,
+            )
+            if coverage < qty:
                 naked.append(symbol)
         return naked
 
@@ -92,10 +95,12 @@ class LiveWatchdogActions:
             qty = (await self.adapter.get_balances()).get(asset, 0)
             if qty is None or qty <= 0:
                 continue
-            try:
-                self.adapter.get_market_rules(symbol)
-            except KeyError:  # pragma: no cover - unknown asset, alert instead
-                continue
+            # Selling while a partial stop is still open can over-close on venues
+            # that do not enforce reduce-only. Refuse and escalate instead.
+            orders = await self.adapter.get_open_orders(symbol)
+            if any(order.side is Side.SELL and order.status.is_open for order in orders):
+                raise RuntimeError(f"{symbol}: existing sell orders prevent safe flatten")
+            self.adapter.get_market_rules(symbol)  # unknown market must block, not be skipped
             await self.adapter.place_order(
                 OrderRequest(
                     symbol=symbol,
@@ -108,6 +113,9 @@ class LiveWatchdogActions:
                     reason=f"flatten unprotected {symbol} before restart",
                 )
             )
+            remaining = (await self.adapter.get_balances()).get(asset, 0)
+            if remaining is None or remaining > 0:
+                raise RuntimeError(f"{symbol}: flatten not verified; remaining balance {remaining}")
             sold += 1
         del quote
         return f"flattened {sold} unprotected position(s): {', '.join(naked)}"
@@ -116,17 +124,18 @@ class LiveWatchdogActions:
         """Cancel every order and sell every non-quote balance at market."""
         from ..core.models import OrderRequest, OrderType, Side
 
+        if not getattr(self.adapter, "watchdog_snapshot_is_authoritative", False):
+            raise RuntimeError("cannot verify total balances and venue orders independently")
         cancelled = await self.adapter.cancel_all()
+        if await self.adapter.get_open_orders():
+            raise RuntimeError("cannot verify cancellation of all venue orders")
         balances = await self.adapter.get_balances()
         sold = 0
         for asset, qty in balances.items():
             if asset == self.adapter.quote or qty is None or qty <= 0:
                 continue
             symbol = f"{asset}/{self.adapter.quote}"
-            try:
-                rules = self.adapter.get_market_rules(symbol)
-            except KeyError:
-                continue  # not a symbol we know how to price: leave it, alert instead
+            self.adapter.get_market_rules(symbol)  # failure means the book is not flat
             await self.adapter.place_order(
                 OrderRequest(
                     symbol=symbol,
@@ -139,7 +148,9 @@ class LiveWatchdogActions:
                     reason=f"watchdog flatten of {symbol}",
                 )
             )
-            del rules
+            remaining = (await self.adapter.get_balances()).get(asset, 0)
+            if remaining is None or remaining > 0:
+                raise RuntimeError(f"{symbol}: flatten not verified; remaining balance {remaining}")
             sold += 1
         return {"cancelled": cancelled, "positions_sold": sold}
 
@@ -212,10 +223,28 @@ class Watchdog:
         current = KillLevel(self.store.kill_level())
         if current.rank >= level.rank:
             return
-        self.store.set_kill_state(
-            level.value, trigger=trigger, reason=reason, actor="watchdog", ts=self.clock.now()
-        )
-        self.store.add_incident(level.value, trigger, reason, {"actor": "watchdog"})
+        transition_ids: list[int] = []
+        tracking_failed = False
+        try:
+            changed = self.store.set_kill_state(
+                level.value, trigger=trigger, reason=reason, actor="watchdog", ts=self.clock.now(),
+                only_escalate=True, track_incident=True, transition_id_out=transition_ids,
+            )
+        except Exception:  # noqa: BLE001 - retry escalation with a latched tracking fault
+            log.exception('{"event":"watchdog_incident_outbox_failed"}')
+            tracking_failed = True
+            changed = self.store.set_kill_state(
+                level.value, trigger=trigger, reason=reason, actor="watchdog", ts=self.clock.now(),
+                only_escalate=True, incident_tracking_failed=True,
+            )
+        if not changed:
+            return
+        if not tracking_failed:
+            try:
+                self.store.add_incident(level.value, trigger, reason, {"actor": "watchdog"},
+                                        ts=self.clock.now(), kill_generation=transition_ids[0])
+            except Exception:  # noqa: BLE001 - pending outbox blocks resume while protection continues
+                log.exception('{"event":"watchdog_incident_record_failed","generation":%d}', transition_ids[0])
         self.fired += 1
         log.critical('{"event":"watchdog_escalation","level":"%s","trigger":"%s"}', level.value, trigger)
 
@@ -278,11 +307,47 @@ class Watchdog:
                 key="heartbeat_lost",
             )
             if self.supervisor is not None:
+                # Capture the old pulse *after* stopping the old child and completing
+                # preflight. A fresh-looking heartbeat from before the restart proves
+                # nothing about the new process.
+                baseline: tuple[Any, Any] = (None, None)
+
+                async def preflight() -> str:
+                    nonlocal baseline
+                    detail = await self._preflight()
+                    baseline = (self.store.kv_get("heartbeat"), self.deadman.last_beat())
+                    return detail
+
+                async def heartbeat_ok() -> bool:
+                    raw = self.store.kv_get("heartbeat")
+                    if raw is not None and raw != baseline[0]:
+                        try:
+                            age = (self.clock.now() - parse_iso(str(raw))).total_seconds()
+                            if 0 <= age <= self.lost_after:
+                                return True
+                        except (TypeError, ValueError):
+                            pass
+                    beat = self.deadman.last_beat()
+                    if beat is not None and beat != baseline[1]:
+                        age = (self.clock.now() - beat).total_seconds()
+                        return 0 <= age <= self.deadman.stale_after.total_seconds()
+                    return False
+
                 result["restart"] = await self.supervisor.handle_lost_heartbeat(
-                    heartbeat_ok=self._heartbeat_ok,
-                    preflight=self._preflight,
+                    heartbeat_ok=heartbeat_ok,
+                    preflight=preflight,
                 )
-                if result["restart"].get("action") == "refused":
+                if result["restart"].get("action") == "stop_failed":
+                    await self.alert(
+                        "Watchdog restart blocked: old process is still alive; operator action required.",
+                        key="restart_stop_failed",
+                    )
+                elif result["restart"].get("action") == "preflight_failed":
+                    await self.alert(
+                        "Watchdog restart blocked: safety preflight failed; operator action required. "
+                        f"{result['restart'].get('detail')}", key="restart_preflight_failed",
+                    )
+                elif result["restart"].get("action") == "refused":
                     await self.alert(
                         "Watchdog will not restart the bot again this hour: "
                         f"{result['restart'].get('reason')}. A human is needed.",
@@ -303,16 +368,15 @@ class Watchdog:
         self.last = result
         return result
 
-    async def _heartbeat_ok(self) -> bool:
-        """A restart has succeeded when the pulse is back, not when a process exists."""
-        if self.heartbeat_age() <= self.lost_after:
-            return True
-        return not self.deadman.stale()
-
     async def _preflight(self) -> str:
         """Make the book safe before a new process starts trading it."""
+        if self.cfg.mode is not Mode.PAPER:
+            # Current adapters expose free balances and locally tracked orders, not total
+            # venue balances or independent open orders. Neither a stop nor a flat book
+            # can be proven from that data. Refuse instead of starting into unknown risk.
+            raise RuntimeError("live/testnet preflight unavailable: independent venue snapshot required")
         if self.actions is None:
-            return "no venue client in this process: nothing to flatten (paper mode)"
+            return "paper mode: no venue preflight required"
         return await self.actions.flatten_unprotected()
 
     # --- loop -------------------------------------------------------------

@@ -168,19 +168,24 @@ class Backfill:
         ordered = [bars[ts] for ts in sorted(bars)]
         report.kept = len(ordered)
         report.gaps = _find_gaps(ordered, step)
-        if not report.stuck:
-            report.complete = report.complete or (
-                report.expected > 0 and report.kept >= report.expected and not report.gaps
-            )
+        # Exhaustion/unclosed-only pages are stopping conditions, not evidence
+        # that the requested closed history is present (including edge gaps).
+        report.complete = (
+            not report.stuck and report.error is None
+            and report.kept == report.expected_bars and not report.gaps
+        )
         return ordered, report
 
 
 def _align(ts: datetime, step: timedelta, *, up: bool) -> datetime:
     """Round a timestamp onto the exchange's bar grid (epoch-aligned multiples of `step`)."""
     seconds = int(step.total_seconds())
-    base = int(ts.timestamp())
-    aligned = -(-base // seconds) * seconds if up else (base // seconds) * seconds
-    return datetime.fromtimestamp(aligned, tz=UTC)
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    elapsed = _utc(ts) - epoch
+    micros = (elapsed.days * 86400 + elapsed.seconds) * 1_000_000 + elapsed.microseconds
+    step_micros = seconds * 1_000_000
+    aligned = (-(-micros // step_micros) if up else micros // step_micros) * step_micros
+    return epoch + timedelta(microseconds=aligned)
 
 
 def _expected_bars(start: datetime, end: datetime, step: timedelta, moment: datetime) -> int:
@@ -310,8 +315,11 @@ def synthetic_fetcher(
         from decimal import Decimal
 
         step = timeframe_seconds(timeframe)
-        start_index = int(since.timestamp()) // step
-        end_index = int(until.timestamp()) // step
+        # Candle opens belong to [since, until), including when either boundary
+        # lies between grid points. Backfill separately enforces closed-bar time.
+        grid = timedelta(seconds=step)
+        start_index = int(_align(_utc(since), grid, up=True).timestamp()) // step
+        end_index = int(_align(_utc(until), grid, up=True).timestamp()) // step
         out: list[Candle] = []
         for index in range(start_index, min(end_index, start_index + min(limit, page_size))):
             if drift_bars and index % (drift_bars + 7) >= 7:

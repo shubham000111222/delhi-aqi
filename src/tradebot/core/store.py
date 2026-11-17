@@ -7,17 +7,19 @@ day-start equity, peak equity, loss streaks, ramp stage and the audit chain.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
+import uuid
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
-from datetime import datetime
+from contextlib import contextmanager, suppress
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from .clock import iso, utc, utcnow
+from .clock import iso, parse_iso, utc, utcnow
 from .models import (
     EquitySnapshot,
     Fill,
@@ -182,6 +184,51 @@ CREATE TABLE IF NOT EXISTS experiments (
     notes TEXT
 );
 
+CREATE TABLE IF NOT EXISTS autonomy (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    level INTEGER NOT NULL,
+    detail TEXT,
+    approved_by TEXT,
+    outcome TEXT NOT NULL DEFAULT 'ok'
+);
+
+CREATE TABLE IF NOT EXISTS strategy_fault_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy TEXT NOT NULL,
+    ts TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_fault_attempts ON strategy_fault_attempts(strategy,ts);
+
+CREATE TABLE IF NOT EXISTS disabled_strategies (
+    strategy TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    reason TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS approvals (
+    id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    detail TEXT,
+    numbers TEXT NOT NULL,
+    state TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    decided_at TEXT,
+    decided_by TEXT
+);
+
+CREATE TABLE IF NOT EXISTS signed_action_consumptions (
+    request_id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    action TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS holdout_uses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
@@ -272,6 +319,7 @@ class Store:
         kinds: Iterable[str] | None = None,
         since: datetime | None = None,
         level: str | None = None,
+        until: datetime | None = None,
     ) -> list[dict[str, Any]]:
         sql = "SELECT * FROM events WHERE 1=1"
         params: list[Any] = []
@@ -282,6 +330,9 @@ class Store:
         if since:
             sql += " AND ts >= ?"
             params.append(iso(since))
+        if until:
+            sql += " AND ts < ?"
+            params.append(iso(until))
         if level:
             sql += " AND level = ?"
             params.append(level)
@@ -299,6 +350,401 @@ class Store:
             }
             for r in rows
         ]
+
+    @staticmethod
+    def _disable_strategy_tx(conn: sqlite3.Connection, name: str, reason: str,
+                             faults: int, timestamp: str) -> bool:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO disabled_strategies(strategy,ts,reason) VALUES(?,?,?)",
+            (name, timestamp, reason),
+        )
+        if not cursor.rowcount:
+            return False
+        conn.execute(
+            "INSERT INTO autonomy(ts,actor,action,level,detail,outcome) VALUES(?,?,?,?,?,?)",
+            (timestamp, "supervisor", "disable_strategy", 3, reason, "ok"),
+        )
+        conn.execute(
+            "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+            (timestamp, "CRIT", "strategy_disabled", "supervisor", json.dumps({
+                "strategy": name, "reason": reason, "faults_last_hour": faults,
+            })),
+        )
+        return True
+
+    def disable_strategy(self, name: str, reason: str, *, faults: int, ts: datetime) -> bool:
+        """Latch a strategy disabled, with its autonomy record and event in one transaction."""
+        if not isinstance(name, str) or not name:
+            raise ValueError("strategy name is required")
+        with self.transaction() as conn:
+            return self._disable_strategy_tx(conn, name, reason, faults, iso(ts))
+
+    @staticmethod
+    def _fault_timestamp(ts: datetime) -> str:
+        return utc(ts).isoformat(timespec="microseconds")
+
+    def strategy_fault_attempts(self, name: str, *, now: datetime) -> list[datetime]:
+        cutoff = self._fault_timestamp(now - timedelta(hours=1))
+        rows = self._query("SELECT ts FROM strategy_fault_attempts WHERE strategy=? AND ts>=? ORDER BY ts",
+                           (name, cutoff))
+        return [parse_iso(row["ts"]) for row in rows]
+
+    def strategy_fault_paused(self, name: str, *, now: datetime) -> bool:
+        cutoff = self._fault_timestamp(now - timedelta(hours=1))
+        return bool(self._query("SELECT 1 FROM strategy_fault_attempts WHERE strategy=? AND ts>=? LIMIT 1",
+                                (name, cutoff)))
+
+    def record_strategy_fault(self, name: str, reason: str, *, now: datetime) -> bool:
+        """Atomically pause the first three faults and latch disabled on the fourth.
+
+        Future-dated attempts also count, so a backward clock cannot erase the budget.
+        Returns whether the strategy is disabled. No automatic deletion/re-enable occurs.
+        """
+        if not isinstance(name, str) or not name:
+            raise ValueError("strategy name is required")
+        timestamp = self._fault_timestamp(now)
+        cutoff = self._fault_timestamp(now - timedelta(hours=1))
+        with self.transaction() as conn:
+            if conn.execute("SELECT 1 FROM disabled_strategies WHERE strategy=?", (name,)).fetchone():
+                return True
+            count = conn.execute("SELECT COUNT(*) FROM strategy_fault_attempts WHERE strategy=? AND ts>=?",
+                                 (name, cutoff)).fetchone()[0]
+            if count >= 3:
+                self._disable_strategy_tx(conn, name, reason, count, timestamp)
+                return True
+            conn.execute("INSERT INTO strategy_fault_attempts(strategy,ts) VALUES(?,?)", (name, timestamp))
+            conn.execute("INSERT INTO autonomy(ts,actor,action,level,detail,outcome) VALUES(?,?,?,?,?,?)",
+                         (timestamp, "supervisor", "pause_strategy", 3, reason, "ok"))
+            conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                         (timestamp, "WARN", "strategy_paused", "supervisor", json.dumps({
+                             "strategy": name, "hours": 1, "reason": reason, "faults_last_hour": count + 1,
+                         })))
+        return False
+
+    def disabled_strategies(self) -> dict[str, str]:
+        return {row["strategy"]: row["reason"] for row in
+                self._query("SELECT strategy,reason FROM disabled_strategies")}
+
+    def strategy_disabled(self, name: str) -> bool:
+        return bool(self._query("SELECT 1 FROM disabled_strategies WHERE strategy=?", (name,)))
+
+    @staticmethod
+    def _strategy_size_value(raw: Any) -> Decimal:
+        if not isinstance(raw, str) or len(raw) > 64:
+            raise ValueError("invalid strategy size multiplier")
+        try:
+            value = Decimal(raw)
+            if not value.is_finite() or value <= 0 or value > 1:
+                raise ValueError("invalid strategy size multiplier")
+            return value
+        except ArithmeticError as exc:
+            raise ValueError("invalid strategy size multiplier") from exc
+
+    def strategy_size_multiplier(self, name: str) -> Decimal:
+        rows = self._query("SELECT value FROM kv WHERE key=?", (f"size_mult_{name}",))
+        return self._strategy_size_value(json.loads(rows[0]["value"])) if rows else Decimal("1")
+
+    def reduce_strategy_size(self, name: str, multiplier: Decimal, *, now: datetime, reason: str) -> bool:
+        """Persist only a stricter size multiplier, atomically with its audit."""
+        if not isinstance(name, str) or not name or not isinstance(multiplier, Decimal):
+            raise ValueError("invalid strategy size reduction")
+        value = self._strategy_size_value(str(multiplier))
+        key = f"size_mult_{name}"
+        timestamp = iso(now)
+        with self.transaction() as conn:
+            row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+            previous = self._strategy_size_value(json.loads(row["value"])) if row else Decimal("1")
+            if value >= previous:
+                return False
+            conn.execute("INSERT INTO kv(key,value,updated_at) VALUES(?,?,?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                         (key, json.dumps(str(value)), timestamp))
+            conn.execute("INSERT INTO autonomy(ts,actor,action,level,detail,outcome) VALUES(?,?,?,?,?,?)",
+                         (timestamp, "risk", "reduce_strategy_size", 3, reason, "ok"))
+            conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                         (timestamp, "WARN", "size_reduction", "risk", json.dumps({
+                             "strategy": name, "from": str(previous), "multiplier": str(value), "reason": reason,
+                         })))
+        return True
+
+    def record_strategy_trade_risk(
+        self, name: str, *, loss: bool, closed_at: datetime, now: datetime,
+        halve_at: int, pause_at: int, pause_hours: int,
+    ) -> int:
+        """Standalone streak transition; does not independently prove a trade occurred."""
+        with self.transaction() as conn:
+            return self._record_strategy_trade_risk(
+                conn, name, loss=loss, closed_at=closed_at, now=now,
+                halve_at=halve_at, pause_at=pause_at, pause_hours=pause_hours,
+            )
+
+    def _record_strategy_trade_risk(
+        self, conn: sqlite3.Connection, name: str, *, loss: bool, closed_at: datetime, now: datetime,
+        halve_at: int, pause_at: int, pause_hours: int,
+    ) -> int:
+        """Update risk in an existing transaction; stale wins cannot reset newer losses."""
+        if (not isinstance(name, str) or not name or type(loss) is not bool
+                or type(halve_at) is not int or type(pause_at) is not int or type(pause_hours) is not int
+                or halve_at < 1 or pause_at < halve_at or pause_hours < 1):
+            raise ValueError("invalid strategy loss policy")
+        timestamp = iso(now)
+        closed_at = utc(closed_at)
+        def read(key: str, default: Any) -> Any:
+            row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+            return json.loads(row["value"]) if row else default
+
+        def write(key: str, value: Any) -> None:
+            conn.execute("INSERT INTO kv(key,value,updated_at) VALUES(?,?,?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                         (key, json.dumps(value), timestamp))
+
+        streaks = read("consecutive_losses", {})
+        latest = read("consecutive_losses_latest", {})
+        if (not isinstance(streaks, dict) or not isinstance(latest, dict)
+                or any(not isinstance(k, str) or type(v) is not int or v < 0 for k, v in streaks.items())
+                or any(not isinstance(k, str) or not isinstance(v, str) for k, v in latest.items())):
+            raise ValueError("invalid persisted loss streak")
+        last = parse_iso(latest[name]) if name in latest else None
+        streak = streaks.get(name, 0)
+        if loss:
+            streak += 1
+        elif last is None or closed_at > last:
+            streak = 0
+        if last is None or closed_at > last:
+            latest[name] = iso(closed_at)
+        streaks[name] = streak
+        write("consecutive_losses", streaks)
+        write("consecutive_losses_latest", latest)
+        if loss and streak >= halve_at:
+            key = f"size_mult_{name}"
+            old = self._strategy_size_value(read(key, "1"))
+            if old > Decimal("0.5"):
+                write(key, "0.5")
+                reason = f"{streak} consecutive losses"
+                conn.execute("INSERT INTO autonomy(ts,actor,action,level,detail,outcome) VALUES(?,?,?,?,?,?)",
+                             (timestamp, "risk", "reduce_strategy_size", 3, reason, "ok"))
+                conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                             (timestamp, "WARN", "size_reduction", "risk", json.dumps({
+                                 "strategy": name, "from": str(old), "multiplier": "0.5", "reason": reason,
+                             })))
+        if loss and streak >= pause_at:
+            paused = read("paused_strategies", {})
+            if not isinstance(paused, dict):
+                raise ValueError("invalid persisted strategy pauses")
+            until = utc(now) + timedelta(hours=pause_hours)
+            existing = paused.get(name)
+            should_extend = name not in paused
+            if name in paused and isinstance(existing, dict) and isinstance(existing.get("until"), str):
+                # Malformed/indefinite holds remain in force.
+                with suppress(ValueError, OverflowError, TypeError):
+                    should_extend = parse_iso(existing["until"]) < until
+            if should_extend:
+                reason = f"{streak} consecutive losses"
+                paused[name] = {"until": iso(until), "reason": reason}
+                write("paused_strategies", paused)
+                conn.execute("INSERT INTO autonomy(ts,actor,action,level,detail,outcome) VALUES(?,?,?,?,?,?)",
+                             (timestamp, "risk", "pause_strategy", 3, reason, "ok"))
+                conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                             (timestamp, "WARN", "strategy_paused", "risk", json.dumps({
+                                 "strategy": name, "until": iso(until), "reason": reason,
+                             })))
+        return streak
+
+    def strategy_paused(self, name: str, *, now: datetime) -> bool:
+        """All durable strategy holds, including malformed legacy pause records."""
+        if self.strategy_disabled(name) or self.strategy_fault_paused(name, now=now):
+            return True
+        try:
+            streaks = self.kv_get("consecutive_losses", {})
+            latest = self.kv_get("consecutive_losses_latest", {})
+            if (not isinstance(streaks, dict) or not isinstance(latest, dict)
+                    or any(not isinstance(k, str) or type(v) is not int or v < 0 for k, v in streaks.items())
+                    or any(not isinstance(k, str) or not isinstance(v, str) for k, v in latest.items())):
+                return True
+            for value in latest.values():
+                parse_iso(value)
+        except (ValueError, TypeError, OverflowError, AttributeError):
+            return True
+        rows = self._query("SELECT value FROM kv WHERE key='paused_strategies'")
+        if not rows:
+            return False
+        try:
+            paused = json.loads(rows[0]["value"])
+            if not isinstance(paused, dict):
+                return True
+            if name not in paused:
+                return False
+            info = paused[name]
+            if not isinstance(info, dict) or not isinstance(info.get("until"), str):
+                return True
+            return utc(now) < parse_iso(info["until"])
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            return True
+
+    def extend_strategy_pause(self, name: str, *, until: datetime, reason: str, now: datetime) -> bool:
+        """Atomically extend a timed pause and record the action; never shorten a hold."""
+        if not isinstance(name, str) or not name or not isinstance(reason, str):
+            raise ValueError("invalid strategy pause")
+        if utc(until) <= utc(now):
+            raise ValueError("pause deadline must be in the future")
+        timestamp = iso(now)
+        with self.transaction() as conn:
+            row = conn.execute("SELECT value FROM kv WHERE key='paused_strategies'").fetchone()
+            paused = json.loads(row["value"]) if row else {}
+            if not isinstance(paused, dict):
+                raise ValueError("invalid persisted strategy pauses")
+            if name in paused:
+                try:
+                    info = paused[name]
+                    if not isinstance(info, dict) or not isinstance(info.get("until"), str):
+                        return False  # an indefinite or corrupt hold cannot be weakened
+                    if parse_iso(info["until"]) >= utc(until):
+                        return False
+                except (ValueError, TypeError, OverflowError, AttributeError):
+                    return False
+            paused[name] = {"until": iso(until), "reason": reason}
+            conn.execute("INSERT INTO kv(key,value,updated_at) VALUES('paused_strategies',?,?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                         (json.dumps(paused), timestamp))
+            conn.execute("INSERT INTO autonomy(ts,actor,action,level,detail,outcome) VALUES(?,?,?,?,?,?)",
+                         (timestamp, "risk", "pause_strategy", 3, reason, "ok"))
+            conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                         (timestamp, "WARN", "strategy_paused", "risk", json.dumps({
+                             "strategy": name, "until": iso(until), "reason": reason,
+                         })))
+        return True
+
+    # --- autonomy ledger and approvals (§21.7) ----------------------------
+    def add_autonomy(
+        self,
+        *,
+        ts: str,
+        actor: str,
+        action: str,
+        level: int,
+        detail: str = "",
+        approved_by: str | None = None,
+        outcome: str = "ok",
+        payload: dict[str, Any],
+    ) -> None:
+        """Commit the ledger row and its event together, or commit neither."""
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO autonomy (ts, actor, action, level, detail, approved_by, outcome)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (ts, actor, action, int(level), detail, approved_by, outcome),
+            )
+            conn.execute(
+                "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                (ts, "WARN" if outcome != "ok" else "INFO", "autonomy", actor,
+                 json.dumps(payload, default=str)),
+            )
+
+    def autonomy_actions(self, limit: int = 100, actor: str | None = None) -> list[dict[str, Any]]:
+        """Newest last, so a printed transcript reads in the order things happened."""
+        sql = "SELECT * FROM autonomy"
+        params: list[Any] = []
+        if actor:
+            sql += " WHERE actor=?"
+            params.append(actor)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(int(limit))
+        rows = self._query(sql, params)
+        labels = {0: "observe", 1: "alert", 2: "correct", 3: "protect", 4: "allocate", 5: "self-modify"}
+        return [
+            {
+                **dict(row),
+                "level_label": labels.get(int(row["level"]), str(row["level"])),
+            }
+            for row in reversed(rows)
+        ]
+
+    @staticmethod
+    def _approval_timestamp(value: datetime) -> str:
+        # Fixed width is essential: lexical SQLite comparisons of ISO strings with
+        # and without fractional seconds do not sort chronologically.
+        return utc(value).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+    def save_approval(self, record: dict[str, Any]) -> None:
+        """Create a request and its audit event atomically; neither authorizes execution."""
+        created = self._approval_timestamp(parse_iso(record["created_at"]))
+        expires = self._approval_timestamp(parse_iso(record["expires_at"]))
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO approvals (id, ts, actor, action, detail, numbers, state, expires_at,"
+                " decided_at, decided_by) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (record["id"], created, record["actor"], record["action"], record.get("detail", ""),
+                 json.dumps(record.get("numbers") or {}, sort_keys=True, allow_nan=False),
+                 record["state"], expires, record.get("decided_at"), record.get("decided_by")),
+            )
+            conn.execute(
+                "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                (created, "INFO", "approval_requested", record["actor"], json.dumps({
+                    "id": record["id"], "action": record["action"], "numbers": record["numbers"],
+                    "expires_at": expires, "authentication": "not_verified",
+                }, sort_keys=True, allow_nan=False)),
+            )
+
+    def transition_approval(
+        self, request_id: str, *, state: str, now: datetime, by: str | None = None,
+        detail: str | None = None,
+    ) -> bool:
+        """Atomically decide once and record it. Identity is not authenticated."""
+        if state not in {"approved", "rejected", "expired"}:
+            raise ValueError("invalid approval transition")
+        by = by.strip() if by else None
+        if state != "expired" and not by:
+            raise ValueError("decision actor is required")
+        comparison = "<=" if state == "expired" else ">"
+        now_str = self._approval_timestamp(now)
+        with self.transaction() as conn:
+            row = conn.execute("SELECT actor,action FROM approvals WHERE id=?", (request_id,)).fetchone()
+            if row is None or (state == "approved" and row["actor"] == by):
+                return False
+            cursor = conn.execute(
+                "UPDATE approvals SET state=?, decided_at=?, decided_by=?, detail=COALESCE(?, detail) "
+                f"WHERE id=? AND state='pending' AND ts<=? AND expires_at {comparison} ?",
+                (state, now_str, by, detail, request_id, now_str, now_str),
+            )
+            if cursor.rowcount != 1:
+                return False
+            conn.execute(
+                "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                (now_str, "WARN", f"approval_{state}", by or "autonomy", json.dumps({
+                    "id": request_id, "action": row["action"], "requester": row["actor"],
+                    "decided_by": by, "authentication": "not_verified",
+                })),
+            )
+            return True
+
+    def approval(self, request_id: str) -> dict[str, Any] | None:
+        rows = self._query("SELECT * FROM approvals WHERE id=?", (request_id,))
+        return self._approval_row(rows[0]) if rows else None
+
+    def approvals(self, state: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM approvals"
+        params: list[Any] = []
+        if state:
+            sql += " WHERE state=?"
+            params.append(state)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        params.append(int(limit))
+        return [self._approval_row(row) for row in self._query(sql, params)]
+
+    @staticmethod
+    def _approval_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "actor": row["actor"],
+            "action": row["action"],
+            "detail": row["detail"] or "",
+            "numbers": json.loads(row["numbers"] or "{}"),
+            "state": row["state"],
+            "created_at": parse_iso(row["ts"]),
+            "expires_at": parse_iso(row["expires_at"]),
+            "decided_at": parse_iso(row["decided_at"]) if row["decided_at"] else None,
+            "decided_by": row["decided_by"],
+        }
 
     def count_events(self, kind: str, since: datetime | None = None) -> int:
         if since:
@@ -403,8 +849,125 @@ class Store:
             ),
         )
 
-    def add_fill(self, fill: Fill) -> None:
+    @staticmethod
+    def _pending_fill_payload(fill: Fill) -> dict[str, Any]:
+        return {
+            "order_id": fill.order_id, "symbol": fill.symbol, "side": fill.side.value,
+            "price": str(fill.price), "qty": str(fill.qty), "fee": str(fill.fee),
+            "ts": iso(fill.ts), "strategy": fill.strategy, "liquidity": fill.liquidity,
+            "slippage_bps": str(fill.slippage_bps),
+            "expected_price": str(fill.expected_price) if fill.expected_price is not None else None,
+            "reason": fill.reason,
+        }
+
+    def journal_pending_fill(self, fill: Fill) -> str:
+        """Write a recovery hold before placing the adapter callback on the queue.
+
+        This local callback ID is not a venue trade ID and cannot deduplicate fills.
+        """
+        identifier = uuid.uuid4().hex
+        value = self._pending_fill_payload(fill)
         with self.transaction() as conn:
+            conn.execute("INSERT INTO kv(key,value,updated_at) VALUES(?,?,?)",
+                         (f"fill_pending:{identifier}", json.dumps(value), iso(utcnow())))
+            conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                         (iso(utcnow()), "WARN", "fill_pending", "execution", json.dumps({
+                             "id": identifier, "order_id": fill.order_id, "symbol": fill.symbol,
+                         })))
+        return identifier
+
+    def claim_order_submission(self, venue: str, client_id: str, *,
+                               request_snapshot: dict[str, Any] | None = None) -> str:
+        """Reserve a client identity before network I/O; never reused or auto-expired."""
+        if not client_id or len(client_id) > 256:
+            raise ValueError("invalid submission client ID")
+        identifier = hashlib.sha256(json.dumps([venue, client_id]).encode()).hexdigest()
+        payload = json.dumps({"venue": venue, "client_id": client_id, "request": request_snapshot},
+                             allow_nan=False, sort_keys=True)
+        now = iso(utcnow())
+        with self.transaction() as conn:
+            if conn.execute("SELECT 1 FROM kv WHERE key=?", (f"order_identity:{identifier}",)).fetchone():
+                raise ValueError("client ID already reserved; outcome requires recovery")
+            conn.execute("INSERT INTO kv(key,value,updated_at) VALUES(?,?,?)",
+                         (f"order_identity:{identifier}", payload, now))
+            conn.execute("INSERT INTO kv(key,value,updated_at) VALUES(?,?,?)",
+                         (f"submission_pending:{identifier}", payload, now))
+            conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                         (now, "WARN", "order_submission_intent", "execution", payload))
+        return identifier
+
+    def acknowledge_order_submission(self, identifier: str) -> None:
+        """Only complete the network-response stage, not fill recovery/reconciliation."""
+        with self.transaction() as conn:
+            row = conn.execute("SELECT value FROM kv WHERE key=?",
+                               (f"submission_pending:{identifier}",)).fetchone()
+            identity = conn.execute("SELECT value FROM kv WHERE key=?",
+                                    (f"order_identity:{identifier}",)).fetchone()
+            if row is None or identity is None or row["value"] != identity["value"]:
+                raise ValueError("submission intent missing or changed")
+            try:
+                payload = json.loads(row["value"])
+                expected = hashlib.sha256(json.dumps([payload["venue"], payload["client_id"]]).encode()).hexdigest()
+                if expected != identifier or set(payload) != {"venue", "client_id", "request"}:
+                    raise ValueError("submission identity mismatch")
+            except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("invalid submission identity") from exc
+            conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                         (iso(utcnow()), "INFO", "order_submission_observed", "execution", row["value"]))
+            conn.execute("DELETE FROM kv WHERE key=?", (f"submission_pending:{identifier}",))
+
+    def has_pending_submission(self) -> bool:
+        return bool(self._query("SELECT 1 FROM kv WHERE key GLOB 'submission_pending:*' LIMIT 1"))
+
+    def latch_execution_observation_fault(self, order_id: str) -> None:
+        """Retain the first invalid-observation hold and audit atomically; no clear API."""
+        payload = json.dumps({"order_id": order_id[:256], "verified": False})
+        now = iso(utcnow())
+        with self.transaction() as conn:
+            inserted = conn.execute(
+                "INSERT OR IGNORE INTO kv(key,value,updated_at) VALUES(?,?,?)",
+                ("execution_observation_fault", payload, now),
+            ).rowcount
+            if inserted:
+                conn.execute("INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                             (now, "CRIT", "execution_observation_fault", "execution", payload))
+
+    def execution_recovery_status(self) -> dict[str, Any]:
+        """Diagnostic counts from one statement, never authority to trade or reset.
+
+        Do not decode potentially corrupt payloads or expose order identifiers.
+        Presence of even an unreadable marker is still a hold.
+        """
+        row = self._query("""SELECT
+            COALESCE(SUM(CASE WHEN key GLOB 'fill_pending:*' THEN 1 ELSE 0 END), 0) AS fills,
+            COALESCE(SUM(CASE WHEN key GLOB 'kill_incident_pending:*' THEN 1 ELSE 0 END), 0) AS incidents,
+            COALESCE(SUM(CASE WHEN key='execution_observation_fault' THEN 1 ELSE 0 END), 0) AS observation,
+            COALESCE(SUM(CASE WHEN key GLOB 'submission_pending:*' THEN 1 ELSE 0 END), 0) AS submissions
+            FROM kv"""
+        )[0]
+        counts = {"unresolved_submissions": int(row["submissions"]), "pending_fill_callbacks": int(row["fills"]),
+                  "pending_kill_incidents": int(row["incidents"]),
+                  "invalid_execution_observation": bool(row["observation"])}
+        return {**counts, "recovery_required": any(counts.values()),
+                "usable_for_reset": False, "reconciliation_verified": False,
+                "limitation": "Diagnostic subset of durable holds, not entry permission. "
+                              "No recovery or release action is provided; do not delete markers."}
+
+    def has_execution_observation_fault(self) -> bool:
+        # Existence blocks even if the value is malformed; decoding cannot release it.
+        return bool(self._query("SELECT 1 FROM kv WHERE key='execution_observation_fault' LIMIT 1"))
+
+    def has_pending_fill(self) -> bool:
+        return bool(self._query("SELECT 1 FROM kv WHERE key GLOB 'fill_pending:*' LIMIT 1"))
+
+    def add_fill(self, fill: Fill, *, pending_id: str | None = None) -> None:
+        with self.transaction() as conn:
+            if pending_id is not None:
+                if len(pending_id) != 32 or any(c not in "0123456789abcdef" for c in pending_id):
+                    raise ValueError("invalid pending fill id")
+                row = conn.execute("SELECT value FROM kv WHERE key=?", (f"fill_pending:{pending_id}",)).fetchone()
+                if row is None or json.loads(row["value"]) != self._pending_fill_payload(fill):
+                    raise ValueError("pending fill missing or changed")
             conn.execute(
                 """INSERT INTO fills(ts,order_id,symbol,side,price,qty,fee,liquidity,payload)
                    VALUES(?,?,?,?,?,?,?,?,?)""",
@@ -424,6 +987,8 @@ class Store:
                 "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
                 (iso(fill.ts), "INFO", "fill", "execution", json.dumps(fill.to_dict(), default=str)),
             )
+            if pending_id is not None:
+                conn.execute("DELETE FROM kv WHERE key=?", (f"fill_pending:{pending_id}",))
 
     def fills(
         self,
@@ -468,10 +1033,39 @@ class Store:
         payload = json.dumps(_position_payload(pos), default=str)
         with self.transaction() as conn:
             row = conn.execute(
-                "SELECT id FROM positions WHERE symbol=? AND strategy=? AND closed_at IS NULL",
+                "SELECT id,payload FROM positions WHERE symbol=? AND strategy=? AND closed_at IS NULL",
                 (pos.symbol, pos.strategy),
             ).fetchone()
             if row:
+                # A later fill or stale writer must not overwrite a tightened stop. Keep
+                # accounting updates, but restore any persisted stronger protection.
+                try:
+                    prior = json.loads(row["payload"])
+                    old_base = D(prior["stop"])
+                    old_trailing = D(prior["trailing_stop"]) if prior.get("trailing_stop") is not None else None
+                    if (not old_base.is_finite() or old_base <= 0 or not pos.stop.is_finite()
+                            or pos.stop <= 0 or (old_trailing is not None
+                            and (not old_trailing.is_finite() or old_trailing <= 0))
+                            or (pos.trailing_stop is not None
+                            and (not pos.trailing_stop.is_finite() or pos.trailing_stop <= 0))):
+                        raise ValueError("invalid stop")
+                except (ArithmeticError, TypeError, ValueError, KeyError, AttributeError) as exc:
+                    raise ValueError("cannot update position with invalid stop") from exc
+                widened = pos.stop < old_base or (old_trailing is not None and (
+                    pos.trailing_stop is None or pos.trailing_stop < old_trailing
+                ))
+                if widened:
+                    pos.stop = max(pos.stop, old_base)
+                    if old_trailing is not None:
+                        pos.trailing_stop = max(pos.trailing_stop or old_trailing, old_trailing)
+                    payload = json.dumps(_position_payload(pos), default=str)
+                    conn.execute(
+                        "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                        (iso(utcnow()), "WARN", "autonomy_refused", "portfolio", json.dumps({
+                            "action": "widen_stop", "symbol": pos.symbol, "strategy": pos.strategy,
+                            "reason": "persisted stop ratchet cannot be widened",
+                        })),
+                    )
                 conn.execute(
                     "UPDATE positions SET qty=?, avg_entry=?, realized_pnl=?, fees=?, payload=? WHERE id=?",
                     (to_str(pos.qty), to_str(pos.avg_entry), to_str(pos.realized_pnl), to_str(pos.fees), payload, row["id"]),
@@ -493,6 +1087,45 @@ class Store:
             )
             return int(cur.lastrowid or 0)
 
+    def tighten_trailing_stop(
+        self, symbol: str, strategy: str, candidate: Decimal, *, ts: datetime | None = None,
+    ) -> Decimal:
+        """Atomically ratchet an open long's software stop and record the change.
+
+        Concurrent callers always receive the greatest committed effective stop. This
+        protects this mutation path, not arbitrary SQL or venue-side protective orders.
+        """
+        if not isinstance(candidate, Decimal) or not candidate.is_finite() or candidate <= 0:
+            raise ValueError("trailing stop must be a finite positive Decimal")
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT id,payload FROM positions WHERE symbol=? AND strategy=? AND closed_at IS NULL",
+                (symbol, strategy),
+            ).fetchone()
+            if row is None:
+                raise ValueError("cannot tighten stop without a persisted open position")
+            try:
+                payload = json.loads(row["payload"])
+                base = D(payload["stop"])
+                trailing = D(payload["trailing_stop"]) if payload.get("trailing_stop") is not None else base
+                if not base.is_finite() or not trailing.is_finite() or base <= 0 or trailing <= 0:
+                    raise ValueError("invalid persisted stop")
+            except (ArithmeticError, TypeError, ValueError, KeyError, AttributeError) as exc:
+                raise ValueError("cannot tighten invalid persisted stop") from exc
+            current = max(base, trailing)
+            if candidate <= current:
+                return current
+            payload["trailing_stop"] = to_str(candidate)
+            conn.execute("UPDATE positions SET payload=? WHERE id=?", (json.dumps(payload), row["id"]))
+            conn.execute(
+                "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                (iso(ts or utcnow()), "INFO", "trailing_stop_tightened", "portfolio", json.dumps({
+                    "symbol": symbol, "strategy": strategy, "previous": to_str(current),
+                    "stop": to_str(candidate),
+                })),
+            )
+            return candidate
+
     def close_position(
         self, pos: Position, exit_price: Decimal, exit_reason: str, closed_at: datetime | None = None
     ) -> None:
@@ -501,6 +1134,13 @@ class Store:
         The payload is denormalised on purpose: a closed trade must be readable
         without joining back to the position and without recomputing R multiples.
         """
+        with self.transaction() as conn:
+            self._close_position(conn, pos, exit_price, exit_reason, closed_at or utcnow())
+
+    @staticmethod
+    def _close_position(
+        conn: sqlite3.Connection, pos: Position, exit_price: Decimal, exit_reason: str, closed_at: datetime,
+    ) -> int:
         risk = pos.avg_entry - pos.initial_stop
         r_multiple = ((exit_price - pos.avg_entry) / risk) if risk > 0 else ZERO
         payload = json.dumps(
@@ -510,18 +1150,18 @@ class Store:
                 "exit": to_str(exit_price, 8),
                 "entry": to_str(pos.avg_entry, 8),
                 "exit_reason": exit_reason,
-                "closed_at": iso(closed_at or utcnow()),
+                "closed_at": iso(closed_at),
                 "pnl": to_str(pos.realized_pnl, 8),
                 "r_multiple": to_str(r_multiple, 4),
             },
             default=str,
         )
-        self._exec(
+        cur = conn.execute(
             """UPDATE positions SET closed_at=?, exit_price=?, exit_reason=?, qty=?, realized_pnl=?,
                    fees=?, payload=?
-               WHERE symbol=? AND strategy=? AND closed_at IS NULL""",
+               WHERE symbol=? AND strategy=? AND opened_at=? AND closed_at IS NULL""",
             (
-                iso(closed_at or utcnow()),
+                iso(closed_at),
                 to_str(exit_price),
                 exit_reason,
                 to_str(pos.qty),
@@ -530,8 +1170,28 @@ class Store:
                 payload,
                 pos.symbol,
                 pos.strategy,
+                iso(pos.opened_at),
             ),
         )
+        return cur.rowcount
+
+    def close_position_with_risk(
+        self, pos: Position, exit_price: Decimal, exit_reason: str, *, closed_at: datetime,
+        now: datetime, halve_at: int, pause_at: int, pause_hours: int,
+    ) -> None:
+        """Commit the position closure and its risk actions together exactly once per open row.
+
+        Does not make the external fill or in-memory ledger atomic with SQLite.
+        """
+        if not pos.realized_pnl.is_finite() or not exit_price.is_finite() or exit_price <= 0 or pos.qty != ZERO:
+            raise ValueError("invalid closed position")
+        with self.transaction() as conn:
+            if self._close_position(conn, pos, exit_price, exit_reason, closed_at) != 1:
+                raise ValueError("persisted open position missing or changed")
+            self._record_strategy_trade_risk(
+                conn, pos.strategy, loss=pos.realized_pnl < 0, closed_at=closed_at, now=now,
+                halve_at=halve_at, pause_at=pause_at, pause_hours=pause_hours,
+            )
 
     def open_positions(self) -> list[Position]:
         rows = self._query("SELECT * FROM positions WHERE closed_at IS NULL ORDER BY opened_at")
@@ -617,6 +1277,24 @@ class Store:
     def kv_delete(self, key: str) -> None:
         self._exec("DELETE FROM kv WHERE key=?", (key,))
 
+    def extend_flapping_hold(self, until: datetime, components: list[str], *, ts: datetime) -> None:
+        """Atomically extend the hold; never overwrite malformed safety state."""
+        with self.transaction() as conn:
+            row = conn.execute("SELECT value FROM kv WHERE key='health_flapping_hold'").fetchone()
+            if row is not None:
+                try:
+                    existing = json.loads(row["value"])
+                    previous = parse_iso(existing["until"])
+                    if previous >= until:
+                        return
+                except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+                    return
+            conn.execute(
+                "INSERT INTO kv(key,value,updated_at) VALUES('health_flapping_hold',?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                (json.dumps({"until": iso(until), "components": components}), iso(ts)),
+            )
+
     # --- kill switch ------------------------------------------------------
     def set_kill_state(
         self,
@@ -627,11 +1305,49 @@ class Store:
         actor: str = "system",
         cooldown_until: datetime | None = None,
         ts: datetime | None = None,
-    ) -> None:
+        only_escalate: bool = False,
+        only_if_missing: bool = False,
+        expected_state: dict[str, Any] | None = None,
+        require_no_flapping_hold: bool = False,
+        require_no_pending_incident: bool = False,
+        track_incident: bool = False,
+        transition_id_out: list[int] | None = None,
+        incident_tracking_failed: bool = False,
+    ) -> bool:
         now = ts or utcnow()
-        previous = self.kill_level()
         with self.transaction() as conn:
-            conn.execute(
+            row = conn.execute("SELECT value FROM kv WHERE key='kill_state'").fetchone()
+            current = json.loads(row["value"]) if row else {"level": "L0"}
+            previous = str(current.get("level", "L0"))
+            if only_if_missing and row is not None:
+                return False
+            if expected_state is not None and current != expected_state:
+                return False
+            if only_escalate:
+                ranks = {"L0": 0, "L1": 1, "L2": 2, "L3": 3}
+                # Unknown/corrupt levels must never be downgraded.
+                if level not in ranks or previous not in ranks or ranks[level] <= ranks[previous]:
+                    return False
+            if require_no_pending_incident and (
+                current.get("incident_tracking_failed") or conn.execute(
+                    "SELECT 1 FROM kv WHERE key GLOB 'kill_incident_pending:*' LIMIT 1"
+                ).fetchone() is not None or conn.execute(
+                    "SELECT 1 FROM kv WHERE key GLOB 'submission_pending:*' OR key GLOB 'fill_pending:*' LIMIT 1"
+                ).fetchone() is not None or conn.execute(
+                    "SELECT 1 FROM kv WHERE key IN ('ramp_incident_tracking_invalid', 'execution_observation_fault')"
+                ).fetchone() is not None
+            ):
+                return False
+            if require_no_flapping_hold:
+                hold_row = conn.execute("SELECT value FROM kv WHERE key='health_flapping_hold'").fetchone()
+                if hold_row is not None:
+                    try:
+                        hold = json.loads(hold_row["value"])
+                        if now <= parse_iso(hold["until"]):
+                            return False
+                    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+                        return False
+            event = conn.execute(
                 """INSERT INTO kill_events(ts,level,previous,trigger,reason,actor,cooldown_until)
                    VALUES(?,?,?,?,?,?,?)""",
                 (
@@ -644,17 +1360,32 @@ class Store:
                     iso(cooldown_until) if cooldown_until else None,
                 ),
             )
+            transition_id = int(event.lastrowid or 0)
+            if track_incident:
+                conn.execute(
+                    "INSERT INTO kv(key,value,updated_at) VALUES(?,?,?)",
+                    (f"kill_incident_pending:{transition_id}", json.dumps({
+                        "transition_id": transition_id, "level": level, "trigger": trigger,
+                        "reason": reason, "actor": actor, "previous_level": previous, "ts": iso(now),
+                    }), iso(now)),
+                )
             conn.execute(
                 "INSERT INTO kv(key,value,updated_at) VALUES('kill_state',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
                 (
                     json.dumps(
                         {
                             "level": level,
+                            # A unique transition identity prevents ABA: L1 -> L0 -> L1
+                            # can otherwise look identical at the same clock instant.
+                            "generation": event.lastrowid,
                             "trigger": trigger,
                             "reason": reason,
                             "actor": actor,
                             "ts": iso(now),
                             "cooldown_until": iso(cooldown_until) if cooldown_until else None,
+                            "incident_tracking_failed": bool(
+                                incident_tracking_failed or current.get("incident_tracking_failed")
+                            ),
                         }
                     ),
                     iso(now),
@@ -670,6 +1401,29 @@ class Store:
                     json.dumps({"level": level, "previous": previous, "trigger": trigger, "reason": reason}),
                 ),
             )
+        if transition_id_out is not None:
+            transition_id_out.append(transition_id)
+        return True
+
+    def has_pending_kill_incident(self) -> bool:
+        return bool(self._query("SELECT 1 FROM kv WHERE key GLOB 'kill_incident_pending:*' LIMIT 1"))
+
+    def has_invalid_ramp_tracking(self) -> bool:
+        return bool(self._query("SELECT 1 FROM kv WHERE key IN ('ramp_incident_tracking_invalid', 'execution_observation_fault')"))
+
+    def recover_pending_kill_incidents(self) -> int:
+        """Replay committed escalation outbox records; never changes the kill level."""
+        rows = self._query("SELECT value FROM kv WHERE key GLOB 'kill_incident_pending:*' ORDER BY key")
+        recovered = 0
+        for row in rows:
+            pending = json.loads(row["value"])
+            self.add_incident(
+                pending["level"], pending["trigger"], pending["reason"],
+                {"previous_level": pending["previous_level"], "actor": pending["actor"]},
+                ts=parse_iso(pending["ts"]), kill_generation=pending["transition_id"],
+            )
+            recovered += 1
+        return recovered
 
     def kill_state(self) -> dict[str, Any]:
         state = self.kv_get("kill_state", {"level": "L0"}) or {"level": "L0"}
@@ -691,24 +1445,73 @@ class Store:
         summary: str,
         payload: dict[str, Any] | None = None,
         ts: datetime | None = None,
+        *, kill_generation: int | None = None,
     ) -> int:
+        """Persist an incident and its audit atomically; track critical ramp incidents.
+
+        A corrupt ramp cannot be repaired here: record a durable invalid marker instead,
+        so live ramp sizing remains blocked without suppressing the incident.
+        """
+        from ..risk.live_guards import RampController
+
         payload = payload or {}
-        cur = self._exec(
-            "INSERT INTO incidents(ts,level,trigger,summary,payload) VALUES(?,?,?,?,?)",
-            (iso(ts or utcnow()), level, trigger, summary, json.dumps(payload, default=str)),
-        )
+        now = ts or utcnow()
+        timestamp = iso(now)
+        critical = level in ("L2", "L3", "CRIT")
         with self.transaction() as conn:
+            if kill_generation is not None:
+                key = f"kill_incident_pending:{kill_generation}"
+                pending_row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+                if pending_row is None:
+                    raise ValueError("kill incident is no longer pending")
+                pending = json.loads(pending_row["value"])
+                if (pending.get("transition_id") != kill_generation or pending.get("level") != level
+                        or pending.get("trigger") != trigger or pending.get("reason") != summary):
+                    raise ValueError("kill incident does not match the pending transition")
+                payload = {"previous_level": pending["previous_level"], "actor": pending["actor"],
+                           "kill_generation": kill_generation}
+                timestamp = pending["ts"]
+            cur = conn.execute(
+                "INSERT INTO incidents(ts,level,trigger,summary,payload) VALUES(?,?,?,?,?)",
+                (timestamp, level, trigger, summary, json.dumps(payload, default=str)),
+            )
+            incident_id = int(cur.lastrowid or 0)
             conn.execute(
                 "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
-                (
-                    iso(ts or utcnow()),
-                    "CRIT" if level in ("L2", "L3") else "WARN",
-                    "incident",
-                    "system",
-                    json.dumps({"level": level, "trigger": trigger, "summary": summary} | payload, default=str),
-                ),
+                (timestamp, "CRIT" if critical else "WARN", "incident", "system",
+                 json.dumps({"level": level, "trigger": trigger, "summary": summary} | payload, default=str)),
             )
-        return int(cur.lastrowid or 0)
+            if critical:
+                try:
+                    state = RampController._state_in_transaction(conn)
+                except (ValueError, TypeError, OverflowError):
+                    conn.execute(
+                        "INSERT INTO kv(key,value,updated_at) VALUES('ramp_incident_tracking_invalid',?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                        (json.dumps({"incident_id": incident_id, "reason": "invalid ramp state"}), timestamp),
+                    )
+                    conn.execute(
+                        "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                        (timestamp, "CRIT", "ramp_incident_tracking_invalid", "ramp",
+                         json.dumps({"incident_id": incident_id, "trigger": trigger})),
+                    )
+                else:
+                    state.critical_incidents += 1
+                    conn.execute(
+                        "INSERT INTO kv(key,value,updated_at) VALUES('ramp',?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                        (json.dumps(state.to_dict()), timestamp),
+                    )
+                    conn.execute(
+                        "INSERT INTO events(ts,level,kind,actor,payload) VALUES(?,?,?,?,?)",
+                        (timestamp, "WARN", "ramp_incident", "ramp", json.dumps({
+                            "incident_id": incident_id, "stage": state.stage,
+                            "critical_incidents": state.critical_incidents,
+                        })),
+                    )
+            if kill_generation is not None:
+                conn.execute("DELETE FROM kv WHERE key=?", (f"kill_incident_pending:{kill_generation}",))
+        return incident_id
 
     def incidents(self, limit: int = 50, since: datetime | None = None) -> list[dict[str, Any]]:
         if since:

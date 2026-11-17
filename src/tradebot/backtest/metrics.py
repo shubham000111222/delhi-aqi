@@ -359,19 +359,19 @@ def acceptance_gates(
     g.update(gates or {})
     results = [
         GateResult(
-            "out_of_sample_profit_factor",
-            float(metrics.profit_factor) >= g["profit_factor"],
-            f"PF {float(metrics.profit_factor):.2f} >= {g['profit_factor']}",
+            "profit_factor",
+            float(metrics.profit_factor) > g["profit_factor"],
+            f"PF {float(metrics.profit_factor):.2f} > {g['profit_factor']}",
         ),
         GateResult(
             "sharpe",
-            float(metrics.sharpe) >= g["sharpe"],
-            f"sharpe {float(metrics.sharpe):.2f} >= {g['sharpe']}",
+            float(metrics.sharpe) > g["sharpe"],
+            f"sharpe {float(metrics.sharpe):.2f} > {g['sharpe']}",
         ),
         GateResult(
             "max_drawdown",
-            abs(float(metrics.max_drawdown)) <= g["max_drawdown"],
-            f"max DD {float(metrics.max_drawdown) * 100:.2f}% <= {g['max_drawdown'] * 100:.0f}%",
+            abs(float(metrics.max_drawdown)) < g["max_drawdown"],
+            f"max DD {float(metrics.max_drawdown) * 100:.2f}% < {g['max_drawdown'] * 100:.0f}%",
         ),
         GateResult(
             "trade_count",
@@ -379,27 +379,41 @@ def acceptance_gates(
             f"{metrics.trade_count} trades >= {g['min_trades']:.0f}",
         ),
     ]
-    if mc is not None:
+    # These commands do not prove the input is untouched out-of-sample data or
+    # that a separate 2x-cost run was performed. Missing evidence must fail closed.
+    results.append(GateResult(
+        "out_of_sample_provenance", False,
+        "not verified by this evaluation; independent out-of-sample evidence required",
+    ))
+    if mc is None or "p95_drawdown" not in mc:
+        results.append(GateResult("monte_carlo_drawdown", False, "Monte Carlo evidence missing"))
+    else:
         results.append(
             GateResult(
                 "monte_carlo_drawdown",
-                abs(mc["p95_drawdown"]) <= g["monte_carlo_p95_drawdown"],
-                f"MC p95 DD {mc['p95_drawdown'] * 100:.2f}% <= {g['monte_carlo_p95_drawdown'] * 100:.0f}%",
+                abs(mc["p95_drawdown"]) < g["monte_carlo_p95_drawdown"],
+                f"MC p95 DD {mc['p95_drawdown'] * 100:.2f}% < {g['monte_carlo_p95_drawdown'] * 100:.0f}%",
             )
         )
-    if cost_stress_metrics is not None:
+    if cost_stress_metrics is None:
+        results.append(GateResult("cost_stress_2x", False, "independent 2x-cost rerun evidence missing"))
+    else:
         results.append(
             GateResult(
                 "cost_stress_2x",
                 cost_stress_metrics.total_return > 0,
-                f"return at 2x costs {float(cost_stress_metrics.total_return) * 100:+.2f}% > 0",
+                f"supplied stress return {float(cost_stress_metrics.total_return) * 100:+.2f}% > 0; 2x provenance not verified here",
             )
         )
     return results
 
 
 def all_gates_passed(results: list[GateResult]) -> bool:
-    return all(r.passed for r in results)
+    required = {
+        "profit_factor", "sharpe", "max_drawdown", "trade_count", "out_of_sample_provenance",
+        "monte_carlo_drawdown", "cost_stress_2x",
+    }
+    return required <= {r.name for r in results} and all(r.passed for r in results)
 
 
 def format_gates(results: list[GateResult]) -> str:

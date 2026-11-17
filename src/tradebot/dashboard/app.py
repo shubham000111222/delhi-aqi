@@ -11,7 +11,7 @@ process, on the synthetic feed, so `tradebot dashboard` is a complete working de
 from __future__ import annotations
 
 import asyncio
-import os
+import secrets
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -23,10 +23,12 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
+from ..autonomy import Approvals, AutonomyLedger
 from ..config import Config
 from ..core.clock import iso
 from ..core.money import D, to_str
 from ..core.store import Store
+from ..reporting.timemachine import check_history
 
 TEMPLATE = Path(__file__).parent / "index.html"
 
@@ -50,12 +52,17 @@ class DashboardState:
         self.config = config
         self.engine = engine
         self.store = engine.store if engine is not None else Store(config.settings.db_path)
-        self.controls_enabled = os.environ.get("DASHBOARD_READONLY", "").lower() not in ("1", "true")
         self.password = config.secrets.dashboard_password
+        # Opt in explicitly, and never expose unauthenticated mutation endpoints.
+        self.controls_enabled = (
+            not config.secrets.dashboard_readonly and bool(self.password)
+        )
         self._task: asyncio.Task | None = None
 
     def check_auth(self, request: Request) -> None:
-        if self.password and request.headers.get("x-dashboard-token") != self.password:
+        if not self.password or not secrets.compare_digest(
+            request.headers.get("x-dashboard-token", "").encode("utf-8"), self.password.encode("utf-8")
+        ):
             raise HTTPException(status_code=401, detail="dashboard token required")
 
     async def stop(self) -> None:
@@ -72,18 +79,37 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if run_bot and state.engine is None:
-            from ..core.clock import SimClock, utcnow
+            from ..alerts.notifier import Notifier
+            from ..alerts.router import router_from_config
+            from ..core.clock import SimClock, timeframe_seconds, utcnow
             from ..data.feed import SyntheticFeed
             from ..engine import Engine
+
+            # The hosted demo must never construct a real venue adapter or silently
+            # substitute synthetic data for a caller who requested another feed.
+            if config.mode.value != "paper" or config.settings.feed.value != "synthetic":
+                raise RuntimeError("hosted demo requires paper mode and the synthetic feed")
+            base_seconds = timeframe_seconds(config.settings.base_timeframe)
+            # Synthetic ticks are generated in one-minute batches. Applying a 15-second
+            # streaming threshold to the previous batch marks healthy symbols stale.
+            # This adjustment is restricted to the hosted synthetic paper demo.
+            quality = config.settings.data_quality
+            quality.stale_symbol_seconds = max(quality.stale_symbol_seconds, 2 * base_seconds)
+            quality.stale_all_seconds = max(quality.stale_all_seconds, 3 * base_seconds)
 
             # A paced simulated clock: the demo advances `synthetic.speed` market
             # seconds per real second, and every timeout, cooldown, staleness window
             # and day boundary is measured on that one timeline.
             speed = max(float(config.settings.synthetic.speed), 1.0)
-            clock = SimClock(utcnow(), pace=speed)
+            # The generator emits a complete bar immediately. Begin with the most
+            # recently completed bar so a 1x demo never publishes future timestamps.
+            clock = SimClock(utcnow() - timedelta(seconds=base_seconds), pace=speed)
             config.ensure_dirs()
             feed = SyntheticFeed(config, clock)
-            state.engine = await Engine.build(config, clock=clock, feed=feed)
+            notifier = Notifier(config, state.store, router=router_from_config(config, state.store))
+            state.engine = await Engine.build(
+                config, clock=clock, store=state.store, feed=feed, notifier=notifier
+            )
             state.store = state.engine.store
             state._task = asyncio.create_task(state.engine.run(), name="demo-engine")
         yield
@@ -187,6 +213,8 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
         curve = store.equity_series(limit=1440)
         start_equity = D(str(store.kv_get("day_start_equity", payload.get("equity", "0"))))
         day_pnl = equity - start_equity
+        peak_equity = max(D(str(store.kv_get("peak_equity", str(equity)))), equity)
+        drawdown = (equity - peak_equity) / peak_equity if peak_equity > 0 else D("0")
         trades = store.closed_positions(since=datetime.now(UTC) - timedelta(days=30), limit=500)
         by_strategy: dict[str, dict[str, Any]] = defaultdict(lambda: {"trades": 0, "pnl": 0.0, "wins": 0})
         for t in trades:
@@ -220,11 +248,16 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
                     "day_start_equity": to_str(start_equity),
                     "day_pnl": to_str(day_pnl),
                     "day_pnl_pct": to_str(day_pnl / start_equity if start_equity else D("0")),
+                    "peak_equity": to_str(peak_equity),
+                    "drawdown_pct": to_str(drawdown),
                     "equity_curve": [
                         {"ts": p["ts"] if isinstance(p["ts"], str) else iso(p["ts"]), "equity": float(p["equity"])} for p in curve
                     ],
                     "positions": positions,
                     "trades": trades[:25],
+                    "timemachine": check_history(store, limit=25),
+                    "entry_blockers": {"available": engine is not None,
+                                       "reasons": list(engine.killswitch.entry_blockers()) if engine is not None else []},
                     "by_strategy": dict(by_strategy),
                     "signals": [
                         {
@@ -245,7 +278,8 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
                     "kill": kill_state,
                     "kill_history": store.kill_history(5),
                     "health": health,
-                    "controls_enabled": state.controls_enabled,
+                    "autonomy": _autonomy_view(store),
+                    "controls_enabled": state.controls_enabled and engine is not None,
                     "limits": {
                         "risk_per_trade": str(config.risk.risk_per_trade),
                         "daily_loss_stop": str(config.risk.daily_loss_stop_new_entries),
@@ -261,6 +295,18 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
                 }
             )
         )
+
+    def _autonomy_view(store: Store) -> dict[str, Any]:
+        return {
+            "execution_recovery": store.execution_recovery_status(),
+            "ledger": AutonomyLedger(store=store).summary(),
+            "pending_approvals": [request.as_dict() for request in Approvals(store=store).pending()],
+            "limitation": "Partial audit coverage; approvals are not authenticated or usable for execution.",
+        }
+
+    @app.get("/api/autonomy")
+    async def autonomy() -> JSONResponse:
+        return JSONResponse(_json_safe(_autonomy_view(state.store)), headers={"cache-control": "no-store"})
 
     def _slippage_view(engine: Any) -> dict[str, Any]:
         """What execution actually cost, against the price the decision was made at.
@@ -298,7 +344,10 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
             now=engine.clock.now(), restart_budget=getattr(engine, "strategy_faults", None)
         )
         return JSONResponse(
-            _json_safe({"available": True, **snapshot}),
+            _json_safe({"available": True, **snapshot,
+                        "entry_blockers": {"available": True,
+                                           "reasons": list(engine.killswitch.entry_blockers()),
+                                           "note": "Point-in-time diagnostic only; not entry authorization."}}),
             headers={"cache-control": "no-store, max-age=0"},
         )
 
@@ -334,7 +383,7 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
     # --- controls ---------------------------------------------------------
     async def _control(action: str, request: Request, reason: str, confirm: str) -> JSONResponse:
         if not state.controls_enabled:
-            raise HTTPException(403, "controls disabled (DASHBOARD_READONLY)")
+            raise HTTPException(403, "controls disabled; explicit opt-in and password required")
         state.check_auth(request)
         if state.engine is None:
             raise HTTPException(409, "no live engine in this process")
@@ -343,10 +392,14 @@ def create_app(config: Config, engine: Any = None, *, run_bot: bool = True) -> F
         if action == "pause":
             await state.engine.pause(reason or "dashboard pause")
         elif action == "resume":
-            await state.engine.resume(reason or "dashboard resume")
+            try:
+                await state.engine.resume(reason or "dashboard resume", actor="dashboard", l1_only=True)
+            except PermissionError as exc:
+                raise HTTPException(409, str(exc)) from exc
         elif action == "flatten":
-            await state.engine.flatten_all(reason or "dashboard flatten")
+            # Block new entries before awaiting potentially slow order cancellation/closing.
             await state.engine.pause(reason or "dashboard flatten")
+            await state.engine.flatten_all(reason or "dashboard flatten")
         elif action == "kill":
             await state.engine.kill(reason or "dashboard kill")
         else:  # pragma: no cover

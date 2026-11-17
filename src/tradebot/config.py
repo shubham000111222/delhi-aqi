@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -62,6 +62,8 @@ class PaperConfig(_Strict):
     reject_rate_min_notional: bool = True
     book_levels: int = 20
     book_depth_usdt: Decimal = D("250000")
+    # Simulated adverse market execution cost relative to the decision reference.
+    slippage_multiplier: Decimal = Field(default=D("1"), ge=D("1"), le=D("10"), allow_inf_nan=False)
 
     @field_validator("latency_ms")
     @classmethod
@@ -208,6 +210,10 @@ class Settings(_Strict):
 
 
 class RiskLimits(_Strict):
+    # Risk limits are fixed after configuration loading. Changes require a new config
+    # and a process restart, not a mutation by the running strategy or healer.
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     risk_per_trade: Decimal = D("0.005")
     per_symbol_exposure: Decimal = D("0.20")
     total_exposure: Decimal = D("0.60")
@@ -258,19 +264,19 @@ class RiskLimits(_Strict):
 
     # Hard safety envelope: no config file may exceed these. Loosening requires
     # a code change plus review, not an edit of a YAML file (section 16, item 20).
-    ABSOLUTE_MAX_RISK_PER_TRADE: Decimal = D("0.02")
-    ABSOLUTE_MAX_TOTAL_EXPOSURE: Decimal = D("1.0")
-    ABSOLUTE_MAX_OPEN_POSITIONS: int = 10
+    ABSOLUTE_MAX_RISK_PER_TRADE: ClassVar[Decimal] = D("0.02")
+    ABSOLUTE_MAX_TOTAL_EXPOSURE: ClassVar[Decimal] = D("1.0")
+    ABSOLUTE_MAX_OPEN_POSITIONS: ClassVar[int] = 10
 
     def validate_envelope(self) -> None:
-        if self.risk_per_trade > self.ABSOLUTE_MAX_RISK_PER_TRADE:
+        if self.risk_per_trade > RiskLimits.ABSOLUTE_MAX_RISK_PER_TRADE:
             raise ValueError(
                 f"risk_per_trade {self.risk_per_trade} exceeds hard envelope "
-                f"{self.ABSOLUTE_MAX_RISK_PER_TRADE}"
+                f"{RiskLimits.ABSOLUTE_MAX_RISK_PER_TRADE}"
             )
-        if self.total_exposure > self.ABSOLUTE_MAX_TOTAL_EXPOSURE:
+        if self.total_exposure > RiskLimits.ABSOLUTE_MAX_TOTAL_EXPOSURE:
             raise ValueError("total_exposure exceeds hard envelope")
-        if self.max_open_positions > self.ABSOLUTE_MAX_OPEN_POSITIONS:
+        if self.max_open_positions > RiskLimits.ABSOLUTE_MAX_OPEN_POSITIONS:
             raise ValueError("max_open_positions exceeds hard envelope")
 
 
@@ -352,6 +358,7 @@ class Secrets:
     llm_monthly_budget_usd: Decimal = D("2")
     dashboard_user: str = "admin"
     dashboard_password: str = ""
+    dashboard_readonly: bool = True
 
     def redacted(self) -> dict[str, Any]:
         return {
@@ -409,6 +416,7 @@ def load_secrets(env: dict[str, str]) -> Secrets:
         llm_monthly_budget_usd=D(env.get("LLM_MONTHLY_BUDGET_USD", "2") or "2"),
         dashboard_user=env.get("DASHBOARD_USER", "admin"),
         dashboard_password=env.get("DASHBOARD_PASSWORD", ""),
+        dashboard_readonly=env.get("DASHBOARD_READONLY", "").strip().lower() not in ("0", "false"),
     )
 
 
@@ -421,7 +429,7 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-@dataclass
+@dataclass(frozen=True)
 class Config:
     settings: Settings
     risk: RiskLimits

@@ -16,7 +16,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from ..config import Config
+from ..config import Config, Mode
 from ..core.clock import Clock
 from ..core.logging import get_logger
 from ..core.models import (
@@ -33,11 +33,13 @@ from ..core.models import (
 from ..core.money import ZERO, round_price, round_qty, to_str
 from ..core.store import Store
 from ..risk.killswitch import KillSwitch
+from ..risk.live_guards import RampController
 from .adapters.base import (
     ExchangeAdapter,
     PermanentExchangeError,
     TransientExchangeError,
 )
+from .adapters.paper import PaperAdapter
 from .rate_limit import SlidingWindowCounter, TokenBucket
 
 log = get_logger(__name__)
@@ -91,8 +93,14 @@ class OrderManager:
     ) -> None:
         self.cfg = config
         self.adapter = adapter
+        self._initial_adapter = adapter
+        self._initial_adapter_mode = adapter.mode
+        self._initial_mode = config.mode
+        config.risk.validate_envelope()
+        self._risk_snapshot = config.risk.model_dump(mode="json")
         self.store = store
         self.killswitch = killswitch
+        self._initial_killswitch = killswitch
         self.clock = clock
         self.exec_cfg = config.settings.execution
         self.on_fill_callback = on_fill
@@ -126,6 +134,9 @@ class OrderManager:
         qty: Decimal,
         price: Decimal | None = None,
         plan: Any = None,
+        *,
+        sized_ramp_multiplier: Decimal | None = None,
+        sized_strategy_multiplier: Decimal | None = None,
     ) -> Order | None:
         rules = self.adapter.get_market_rules(signal.symbol)
         order_type = signal.entry_type
@@ -142,6 +153,8 @@ class OrderManager:
             strategy=signal.strategy,
             signal_id=signal.id,
             reason=signal.reason[:200],
+            sized_ramp_multiplier=sized_ramp_multiplier,
+            sized_strategy_multiplier=sized_strategy_multiplier,
         )
         if plan is not None:
             # register before placement: a limit order can fill inside place_order
@@ -188,17 +201,127 @@ class OrderManager:
 
     # --- core placement with retries -------------------------------------
     async def _place(self, request: OrderRequest) -> Order | None:
+        if type(request.reduce_only) is not bool:
+            self.store.log_event(
+                "autonomy_refused", {"action": "invalid_reduce_only", "reason": "reduce_only must be boolean",
+                                     "client_order_id": request.client_order_id},
+                level="CRIT", actor="execution", ts=self.clock.now(),
+            )
+            return None
+
         if not self.bucket.try_acquire():
             wait = self.bucket.time_until()
             log.warning('{"event":"rate_limit_wait","seconds":%.3f}', wait)
             await self.clock.sleep(wait)
             self.bucket.try_acquire()
 
+        if request.reduce_only and request.side is not Side.SELL:
+            self.store.log_event(
+                "autonomy_refused", {"actor": "execution", "action": "increase_position_size",
+                                     "reason": "reduce-only buy is not a long-spot exit",
+                                     "client_order_id": request.client_order_id},
+                level="CRIT", actor="execution", ts=self.clock.now(),
+            )
+            return None
+
         attempt = 0
         while attempt < max(1, self.exec_cfg.retry_attempts):
+            # Risk approval may have happened before a rate-limit wait or retry. Re-read
+            # the persisted switch immediately before every exposure-increasing submit.
+            # Reducing exits must remain possible at L1-L3. This is not a global adapter
+            # boundary and cannot cancel a request already in flight at the venue.
+            if not request.reduce_only and (
+                self.cfg.mode != self._initial_mode
+                or self.adapter is not self._initial_adapter
+                or self.adapter.mode != self._initial_adapter_mode
+                or self._initial_adapter_mode != self._initial_mode
+                or self.killswitch is not self._initial_killswitch
+                or self.killswitch.mode != self._initial_mode
+                or self.cfg.risk.model_dump(mode="json") != self._risk_snapshot
+            ):
+                self.store.log_event(
+                    "autonomy_refused", {"actor": "execution", "action": "edit_runtime_config",
+                                         "reason": "runtime risk, mode or adapter changed",
+                                         "client_order_id": request.client_order_id},
+                    level="CRIT", actor="execution", ts=self.clock.now(),
+                )
+                return None
+            if not request.reduce_only and self._initial_mode is Mode.LIVE:
+                try:
+                    size_current = RampController(self.cfg, self.store).permits_sized_multiplier(
+                        request.sized_ramp_multiplier
+                    )
+                except (ValueError, ArithmeticError):
+                    size_current = False
+                if not size_current:
+                    self.store.log_event(
+                        "autonomy_refused", {"action": "increase_allocation",
+                                             "reason": "missing, invalid or stale live sizing multiplier",
+                                             "client_order_id": request.client_order_id},
+                        level="CRIT", actor="execution", ts=self.clock.now(),
+                    )
+                    return None
+            if not request.reduce_only:
+                try:
+                    sized = request.sized_strategy_multiplier
+                    # Legacy callers without a multiplier assert full size, which only
+                    # passes when no stricter persisted reduction exists.
+                    sized = Decimal("1") if sized is None else sized
+                    valid_size = (isinstance(sized, Decimal) and sized.is_finite() and 0 < sized <= 1
+                                  and sized <= self.store.strategy_size_multiplier(request.strategy))
+                except (ValueError, ArithmeticError):
+                    valid_size = False
+                if not valid_size:
+                    self.store.log_event(
+                        "autonomy_refused", {"action": "increase_position_size", "strategy": request.strategy,
+                                             "reason": "invalid or stale strategy size multiplier",
+                                             "client_order_id": request.client_order_id},
+                        level="CRIT", actor="execution", ts=self.clock.now(),
+                    )
+                    return None
+            if not request.reduce_only and (
+                self.store.strategy_paused(request.strategy, now=self.clock.now())
+            ):
+                self.store.log_event(
+                    "autonomy_refused", {"action": "re_enable_strategy", "strategy": request.strategy,
+                                         "reason": "strategy is durably disabled or paused",
+                                         "client_order_id": request.client_order_id},
+                    level="CRIT", actor="execution", ts=self.clock.now(),
+                )
+                return None
+            if not request.reduce_only and not self.killswitch.can_open_entries():
+                self.store.log_event(
+                    "autonomy_refused",
+                    {
+                        "actor": "execution",
+                        "action": "place_order_without_kill_check",
+                        "reason": "kill switch blocks entry",
+                        "kill_level": self.killswitch.level.value,
+                        "client_order_id": request.client_order_id,
+                        "symbol": request.symbol,
+                    },
+                    level="WARN",
+                    actor="execution",
+                    ts=self.clock.now(),
+                )
+                return None
             attempt += 1
             try:
                 order = await self.adapter.place_order(request)
+                if not self._recovered_order_matches(request, order):
+                    # A successful transport is not proof that the adapter returned
+                    # this intent. It may already have executed: never blindly retry.
+                    self.killswitch.latch_execution_observation_fault(request.client_order_id)
+                    self.store.log_event(
+                        "order_response_conflict", {"client_order_id": request.client_order_id},
+                        level="CRIT", actor="execution", ts=self.clock.now(),
+                    )
+                    self.killswitch.trigger(
+                        KillLevel.L1, trigger="order_outcome_unknown",
+                        reason=f"submission response conflicts with {request.client_order_id}",
+                        actor="execution",
+                    )
+                    return None
                 self.stats.submitted += 1
                 self.orders_window.add()
                 self.store.upsert_order(order)
@@ -223,10 +346,50 @@ class OrderManager:
                     actor="execution",
                     ts=self.clock.now(),
                 )
-                # Never resend blind: ask the venue what happened first.
-                existing = await self._safe_get_order(request.client_order_id)
+                # A failed lookup is not proof of absence. The CCXT lookup is backed by
+                # process-local orders, so None there cannot establish venue absence.
+                try:
+                    existing = await self.adapter.get_order(request.client_order_id)
+                except Exception:  # noqa: BLE001 - an unknown result must fail closed
+                    existing = None
+                    lookup_ok = False
+                else:
+                    lookup_ok = True
+                if existing is not None and not self._recovered_order_matches(request, existing):
+                    self.killswitch.latch_execution_observation_fault(request.client_order_id)
+                    self.store.log_event(
+                        "order_recovery_conflict", {"client_order_id": request.client_order_id},
+                        level="CRIT", actor="execution", ts=self.clock.now(),
+                    )
+                    existing = None
+                    lookup_ok = False  # a conflicting result is not authoritative absence
                 if existing is not None:
+                    self.store.upsert_order(existing)
+                    self.store.log_event(
+                        "order_recovered",
+                        {"client_order_id": request.client_order_id, "attempt": attempt},
+                        actor="execution",
+                        ts=self.clock.now(),
+                    )
                     return existing
+                # Only the in-process simulator can currently prove an order was not
+                # accepted. No production adapter has demonstrated authoritative absence.
+                authoritative_absence = (
+                    lookup_ok and isinstance(self.adapter, PaperAdapter) and self.adapter.mode is Mode.PAPER
+                )
+                if not authoritative_absence:
+                    self.store.log_event(
+                        "order_outcome_unknown",
+                        {"client_order_id": request.client_order_id, "symbol": request.symbol,
+                         "attempt": attempt, "lookup_failed": not lookup_ok},
+                        level="CRIT", actor="execution", ts=self.clock.now(),
+                    )
+                    self.killswitch.trigger(
+                        KillLevel.L1, trigger="order_outcome_unknown",
+                        reason=f"cannot establish venue outcome for {request.client_order_id}",
+                        actor="execution",
+                    )
+                    return None
                 if attempt >= self.exec_cfg.retry_attempts:
                     self.stats.timeouts += 1
                     log.error(
@@ -259,6 +422,36 @@ class OrderManager:
                 reason=f"{self.rejects_window.count()} rejects in {self.cfg.risk.rejects_window_seconds}s",
             )
 
+    def _recovered_order_matches(self, request: OrderRequest, order: Order) -> bool:
+        """Local intent consistency only; does not certify venue identity/coverage."""
+        try:
+            rules = self.adapter.get_market_rules(request.symbol)
+            if not isinstance(order.status, OrderStatus):
+                return False
+            numbers = (order.qty, order.filled_qty, order.avg_fill_price, order.fee)
+            if not all(isinstance(value, Decimal) and value.is_finite() for value in numbers):
+                return False
+            if (order.qty <= 0 or order.filled_qty < 0 or order.filled_qty > order.qty
+                    or order.avg_fill_price < 0 or order.fee < 0
+                    or (order.filled_qty > 0 and order.avg_fill_price <= 0)):
+                return False
+            if order.price is not None and (
+                not isinstance(order.price, Decimal) or not order.price.is_finite() or order.price <= 0
+            ):
+                return False
+            return (
+                type(order.reduce_only) is bool
+                and (order.client_order_id, order.symbol, order.side, order.type,
+                     order.strategy, order.signal_id, order.reduce_only, order.stop_price)
+                == (request.client_order_id, request.symbol, request.side, request.type,
+                    request.strategy, request.signal_id, request.reduce_only, request.stop_price)
+                and order.qty == round_qty(request.qty, rules.lot_step)
+                and order.price == (round_price(request.price, rules.tick_size, request.side.value)
+                                    if request.price else None)
+            )
+        except (ArithmeticError, TypeError, ValueError, KeyError, AttributeError):
+            return False
+
     async def _safe_get_order(self, client_order_id: str) -> Order | None:
         try:
             return await self.adapter.get_order(client_order_id)
@@ -271,8 +464,8 @@ class OrderManager:
         if self.on_fill_callback is not None:
             self.on_fill_callback(fill)
 
-    def record_fill(self, fill: Fill) -> None:
-        self.store.add_fill(fill)
+    def record_fill(self, fill: Fill, *, pending_id: str | None = None) -> None:
+        self.store.add_fill(fill, pending_id=pending_id)
         self.stats.fills += 1
         self.stats.total_slippage_bps += fill.slippage_bps
         order = self.adapter_orders().get(fill.order_id)

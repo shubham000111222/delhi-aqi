@@ -60,7 +60,7 @@ def _ctx(**kw) -> RiskContext:
 @pytest.fixture
 def engine(cfg) -> RiskEngine:
     store = Store()
-    return RiskEngine(cfg, KillSwitch(store, clock=SimClock(NOW)))
+    return RiskEngine(cfg, KillSwitch(store, clock=SimClock(NOW), mode=Mode.PAPER))
 
 
 class TestCostBudget:
@@ -83,8 +83,11 @@ class TestCostBudget:
         )
         assert decision.approved, decision.verdict.reason
 
-    def test_the_check_is_off_at_ratio_zero(self, engine):
-        engine.limits.min_target_cost_ratio = D("0")
+    def test_the_check_is_off_at_ratio_zero(self, cfg):
+        from dataclasses import replace
+
+        limits = cfg.risk.model_copy(update={"min_target_cost_ratio": D("0")})
+        engine = RiskEngine(replace(cfg, risk=limits), KillSwitch(Store(), clock=SimClock(NOW), mode=Mode.PAPER))
         decision = engine.approve_entry(
             _signal(target=D("60100")), _ctx(round_trip_cost_bps=D("100")), _rules()
         )
@@ -192,9 +195,112 @@ class TestRiskChecks:
         assert any(level is KillLevel.L3 for _, level in drawdown)
 
 
+def test_cross_process_kill_escalation_is_visible_immediately(tmp_path):
+    path = tmp_path / "state.db"
+    one, two = Store(path), Store(path)
+    reader = KillSwitch(one, clock=SimClock(NOW), mode=Mode.PAPER)
+    watchdog = KillSwitch(two, clock=SimClock(NOW), mode=Mode.PAPER)
+    assert reader.can_open_entries()
+    watchdog.trigger(KillLevel.L3, trigger="test", reason="lockdown")
+    assert not reader.can_open_entries()
+    assert reader.level is KillLevel.L3
+    # A stale watchdog escalation or a racing initializer must not overwrite L3.
+    assert not one.set_kill_state("L2", only_escalate=True)
+    assert not one.set_kill_state("L0", only_if_missing=True)
+    assert two.kill_level() == "L3"
+    one.close()
+    two.close()
+
+
+def test_auto_resume_cannot_clear_a_concurrent_escalation(tmp_path, monkeypatch):
+    path = tmp_path / "state.db"
+    one, two = Store(path), Store(path)
+    switch = KillSwitch(one, clock=SimClock(NOW), mode=Mode.PAPER)
+    other = KillSwitch(two, clock=SimClock(NOW), mode=Mode.PAPER)
+    switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+    expected = switch.state
+    original = one.set_kill_state
+
+    def race(*args, **kwargs):
+        other.trigger(KillLevel.L3, trigger="test", reason="concurrent lockdown")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(one, "set_kill_state", race)
+    assert not switch.auto_resume(reason="recovered", expected_state=expected)
+    assert two.kill_level() == "L3"
+    one.close()
+    two.close()
+
+
+def test_auto_resume_cannot_clear_a_new_flapping_hold(tmp_path, monkeypatch):
+    path = tmp_path / "state.db"
+    one, two = Store(path), Store(path)
+    switch = KillSwitch(one, clock=SimClock(NOW), mode=Mode.PAPER)
+    switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+    expected = switch.state
+    original = one.set_kill_state
+
+    def race(*args, **kwargs):
+        two.kv_set("health_flapping_hold", {"until": (NOW + timedelta(minutes=10)).isoformat()})
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(one, "set_kill_state", race)
+    assert not switch.auto_resume(reason="recovered", expected_state=expected)
+    assert two.kill_level() == "L1"
+    one.close()
+    two.close()
+
+
+@pytest.mark.parametrize("trigger", ["manual", "weekly_loss", "order_outcome_unknown", "flapping"])
+def test_auto_resume_boundary_refuses_non_whitelisted_l1_cause(trigger):
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
+    switch.trigger(KillLevel.L1, trigger=trigger, reason="pause")
+    assert not switch.auto_resume(reason="untrusted caller", expected_state=switch.state)
+    assert switch.level is KillLevel.L1
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+def test_auto_resume_needs_evaluated_snapshot():
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
+    switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+    assert not switch.auto_resume(reason="caller supplied no state")
+    assert switch.level is KillLevel.L1
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+def test_auto_resume_refuses_new_identical_pause_even_at_same_clock_time():
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
+    switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+    old_pause = switch.state
+    switch.reset(reason="manual review")
+    switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+    assert old_pause["generation"] != switch.state["generation"]
+    assert not switch.auto_resume(reason="stale evidence", expected_state=old_pause)
+    assert switch.level is KillLevel.L1
+    store.close()
+
+
+def test_auto_resume_honours_kill_file(tmp_path):
+    store = Store(":memory:")
+    kill_file = tmp_path / "KILL"
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=kill_file, mode=Mode.PAPER)
+    switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+    pause = switch.state
+    kill_file.write_text("emergency stop")
+    assert not switch.auto_resume(reason="recovered", expected_state=pause)
+    assert switch.level is KillLevel.L2
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
 class TestKillSwitch:
     def test_escalates_but_never_auto_de_escalates(self):
-        ks = KillSwitch(Store(), clock=SimClock(NOW))
+        ks = KillSwitch(Store(), clock=SimClock(NOW), mode=Mode.PAPER)
         assert ks.level is KillLevel.L0
         assert ks.trigger(KillLevel.L1, trigger="t", reason="r")
         assert not ks.trigger(KillLevel.L0, trigger="t", reason="r")
@@ -205,14 +311,14 @@ class TestKillSwitch:
         assert ks.must_flatten()
 
     def test_reset_returns_to_l0(self):
-        ks = KillSwitch(Store(), clock=SimClock(NOW))
+        ks = KillSwitch(Store(), clock=SimClock(NOW), mode=Mode.PAPER)
         ks.trigger(KillLevel.L1, trigger="t", reason="r")
         ks.reset(reason="reviewed", actor="operator")
         assert ks.level is KillLevel.L0
 
     def test_l3_needs_reason_and_cooldown(self):
         clock = SimClock(NOW)
-        ks = KillSwitch(Store(), clock=clock)
+        ks = KillSwitch(Store(), clock=clock, mode=Mode.PAPER)
         ks.trigger(KillLevel.L3, trigger="drawdown", reason="dd")
         with pytest.raises(PermissionError):
             ks.reset(reason="too early", actor="op")
@@ -225,7 +331,7 @@ class TestKillSwitch:
     def test_kill_file_triggers_flatten(self, tmp_path):
         kill_file = tmp_path / "KILL"
         kill_file.write_text("manual stop: testing")
-        ks = KillSwitch(Store(), clock=SimClock(NOW), kill_file=kill_file)
+        ks = KillSwitch(Store(), clock=SimClock(NOW), kill_file=kill_file, mode=Mode.PAPER)
         assert ks.can_open_entries() is False
         assert ks.level is KillLevel.L2
         assert ks.state["trigger"] == "kill_file"
@@ -233,11 +339,11 @@ class TestKillSwitch:
     def test_state_is_persisted(self, tmp_path):
         path = tmp_path / "k.db"
         store = Store(path)
-        ks = KillSwitch(store, clock=SimClock(NOW))
+        ks = KillSwitch(store, clock=SimClock(NOW), mode=Mode.PAPER)
         ks.trigger(KillLevel.L2, trigger="reconciliation", reason="mismatch")
         store.close()
         reopened = Store(path)
-        assert KillSwitch(reopened, clock=SimClock(NOW)).level is KillLevel.L2
+        assert KillSwitch(reopened, clock=SimClock(NOW), mode=Mode.PAPER).level is KillLevel.L2
 
 
 class TestLiveGuards:
@@ -284,7 +390,24 @@ class TestLiveGuards:
         store.kv_set("go_nogo", {"ts": "2024-01-01T00:00:00Z", "passed": True})
         fresh = checker._check_go_nogo(datetime(2024, 1, 5, tzinfo=UTC))
         stale = checker._check_go_nogo(datetime(2024, 3, 1, tzinfo=UTC))
-        assert fresh.passed and not stale.passed
+        assert not fresh.passed and not stale.passed
+        assert "provenance unverified" in fresh.detail
+
+    async def test_clock_guard_rejects_large_drift_in_either_direction(self, cfg):
+        for drift in (-100.0, 100.0, float("nan")):
+            checker = LiveGuardChecker(cfg, Store())
+            checks = await checker.check(clock_drift_seconds=drift)
+            assert not next(row for row in checks if row.name == "preflight_clock").passed
+
+    def test_go_nogo_future_and_corrupt_timestamps_fail_closed(self, cfg):
+        store = Store()
+        checker = LiveGuardChecker(cfg, store)
+        now = datetime(2024, 1, 5, tzinfo=UTC)
+        for raw in ("2099-01-01T00:00:00Z", "invalid", None):
+            store.kv_set("go_nogo", {"ts": raw, "passed": True})
+            assert not checker._check_go_nogo(now).passed
+        store.kv_set("go_nogo", {"passed": True})
+        assert not checker._check_go_nogo(now).passed
 
     def test_ramp_stages(self, cfg):
         store = Store()
@@ -294,13 +417,14 @@ class TestLiveGuards:
         # paper mode always gets full size
         assert ramp.multiplier() == D("1")
 
-    def test_ramp_advances_after_min_days(self, cfg):
+    def test_ramp_never_advances_without_authenticated_approval(self, cfg):
         store = Store()
         ramp = RampController(cfg, store)
         start = datetime(2024, 1, 1, tzinfo=UTC)
         store.kv_set("ramp", {"stage": 0, "stage_started": start.isoformat().replace("+00:00", "Z"), "clean_days": 0, "critical_incidents": 0})
         state = ramp.advance_if_eligible(start + timedelta(days=8))
-        assert state.stage == 1 and state.multiplier == D("0.25")
+        assert state.stage == 0 and state.multiplier == D("0.10")
+        assert store.count_events("autonomy_refused") == 1
         store.kv_set("ramp", {"stage": 1, "stage_started": start.isoformat().replace("+00:00", "Z"), "clean_days": 0, "critical_incidents": 1})
         state = ramp.advance_if_eligible(start + timedelta(days=30))
         assert state.stage == 1  # a critical incident blocks promotion
@@ -444,14 +568,346 @@ class TestAutoResume:
             engine._resume_daily_limit_at_day_boundary(clock.now())
         assert engine.killswitch.level is KillLevel.L2
 
+    async def test_sustained_health_is_not_reused_for_a_new_pause(self, cfg):
+        clock = SimClock(NOW)
+        engine = await self._engine(cfg, clock)
+        ks = engine.killswitch
+        ks.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+        old = ks.state
+        await engine._maybe_auto_resume(all_stale=False, error_rate=0, disk_used=0)
+        clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds + 1)
+        ks.reset(reason="operator review")
+        ks.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+        assert old["generation"] != ks.state["generation"]
+        await engine._maybe_auto_resume(all_stale=False, error_rate=0, disk_used=0)
+        assert ks.level is KillLevel.L1
+        clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds + 1)
+        await engine._maybe_auto_resume(all_stale=False, error_rate=0, disk_used=0)
+        assert ks.level is KillLevel.L0
+        engine.close()
+
+    async def test_old_recovery_cannot_clear_different_new_pause(self, cfg):
+        clock = SimClock(NOW)
+        engine = await self._engine(cfg, clock)
+        ks = engine.killswitch
+        ks.trigger(KillLevel.L1, trigger="stale_feeds", reason="feed")
+        old = ks.state
+        ks.reset(reason="operator review")
+        ks.trigger(KillLevel.L1, trigger="exchange_error_rate", reason="api")
+        engine._resume(reason="feed recovered", now=clock.now(), expected_state=old)
+        assert ks.level is KillLevel.L1
+        assert ks.state["trigger"] == "exchange_error_rate"
+        engine.close()
+
+    @pytest.mark.parametrize("fault", ["feed", "reconciliation", "errors", "disk"])
+    async def test_other_unhealthy_conditions_block_auto_resume(self, cfg, fault):
+        clock = SimClock(NOW)
+        engine = await self._engine(cfg, clock)
+        engine.killswitch.trigger(KillLevel.L1, trigger="stale_feeds", reason="feed")
+        engine._reconcile_state = "mismatch" if fault == "reconciliation" else "ok"
+        args = {
+            "all_stale": fault == "feed",
+            "error_rate": 1.0 if fault == "errors" else 0.0,
+            "disk_used": 1.0 if fault == "disk" else 0.0,
+        }
+        await engine._maybe_auto_resume(**args)
+        clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds + 1)
+        await engine._maybe_auto_resume(**args)
+        assert engine.killswitch.level is KillLevel.L1
+        engine.close()
+
+    async def test_auto_resume_does_not_clear_a_concurrent_weekly_loss(self, cfg):
+        clock = SimClock(NOW)
+        engine = await self._engine(cfg, clock)
+        engine.killswitch.trigger(KillLevel.L1, trigger="stale_feeds", reason="feed")
+        await engine._maybe_auto_resume(all_stale=False, error_rate=0, disk_used=0)
+        engine.store.kv_set("week_start_equity", str(engine.ledger.cash * D("1.10")))
+        clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds + 1)
+        await engine._maybe_auto_resume(all_stale=False, error_rate=0, disk_used=0)
+        assert engine.killswitch.level is KillLevel.L1
+        engine.close()
+
+    async def test_daily_resume_does_not_clear_a_concurrent_weekly_loss(self, cfg):
+        clock = SimClock(NOW)
+        engine = await self._engine(cfg, clock)
+        engine.killswitch.trigger(KillLevel.L1, trigger="daily_loss", reason="daily")
+        engine.store.kv_set("day_start_equity", str(engine.ledger.cash))
+        engine.store.kv_set("week_start_equity", str(engine.ledger.cash * D("1.10")))
+        engine._resume_daily_limit_at_day_boundary(clock.now())
+        assert engine.killswitch.level is KillLevel.L1
+        engine.close()
+
     async def test_infrastructure_pause_lifts_after_sustained_health(self, cfg):
         clock = SimClock(NOW)
         engine = await self._engine(cfg, clock)
         engine.killswitch.trigger(KillLevel.L1, trigger="exchange_error_rate", reason="storm")
         engine._reconcile_state = "ok"
-        # one instant of health is not enough
-        await engine.health_check()
+        # one instant of confirmed health is not enough
+        await engine._maybe_auto_resume(all_stale=False, error_rate=0, disk_used=0)
         assert engine.killswitch.level is KillLevel.L1
         clock.advance(cfg.settings.execution.auto_resume_min_healthy_seconds + 1)
-        await engine.health_check()
+        await engine._maybe_auto_resume(all_stale=False, error_rate=0, disk_used=0)
         assert engine.killswitch.level is KillLevel.L0
+
+
+def test_manual_reset_rejects_kill_file_and_audits(tmp_path):
+    store = Store(":memory:")
+    kill_file = tmp_path / "KILL"
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=kill_file, mode=Mode.PAPER)
+    switch.trigger(KillLevel.L1, trigger="manual", reason="pause")
+    kill_file.write_text("emergency")
+    with pytest.raises(PermissionError, match="KILL file"):
+        switch.reset(reason="reviewed")
+    assert switch.level is KillLevel.L2
+    assert store.count_events("manual_reset_refused") == 1
+    kill_file.unlink()
+    switch.reset(reason="reviewed")
+    assert switch.level is KillLevel.L0
+    store.close()
+
+
+@pytest.mark.parametrize("cooldown", [None, "invalid", 123])
+def test_manual_reset_fails_closed_on_bad_l3_cooldown(cooldown):
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
+    switch.trigger(KillLevel.L3, trigger="test", reason="lockdown")
+    state = switch.state
+    state["cooldown_until"] = cooldown
+    store.kv_set("kill_state", state)
+    with pytest.raises(PermissionError, match="cooldown"):
+        switch.reset(reason="reviewed")
+    assert switch.level is KillLevel.L3
+    assert store.count_events("manual_reset_refused") == 1
+    store.close()
+
+
+def test_manual_reset_cannot_clear_concurrent_escalation(tmp_path, monkeypatch):
+    one, two = Store(tmp_path / "state.db"), Store(tmp_path / "state.db")
+    switch = KillSwitch(one, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
+    other = KillSwitch(two, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
+    switch.trigger(KillLevel.L1, trigger="manual", reason="pause")
+    original = one.set_kill_state
+
+    def race(*args, **kwargs):
+        other.trigger(KillLevel.L3, trigger="test", reason="concurrent lockdown")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(one, "set_kill_state", race)
+    with pytest.raises(PermissionError, match="changed"):
+        switch.reset(reason="reviewed")
+    assert other.level is KillLevel.L3
+    assert one.count_events("manual_reset_refused") == 1
+    one.close()
+    two.close()
+
+
+@pytest.mark.parametrize("hold", [{"until": 123}, [], {"until": "invalid"}])
+def test_corrupt_flapping_hold_blocks_reset(hold):
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER)
+    switch.trigger(KillLevel.L1, trigger="manual", reason="pause")
+    store.kv_set("health_flapping_hold", hold)
+    with pytest.raises(PermissionError, match="flapping"):
+        switch.reset(reason="reviewed")
+    assert switch.level is KillLevel.L1
+    assert not store.set_kill_state("L0", expected_state=switch.state, require_no_flapping_hold=True, ts=NOW)
+    store.close()
+
+
+@pytest.mark.parametrize("name,value", [
+    ("ABSOLUTE_MAX_RISK_PER_TRADE", D("1")),
+    ("ABSOLUTE_MAX_TOTAL_EXPOSURE", D("10")),
+    ("ABSOLUTE_MAX_OPEN_POSITIONS", 1000),
+])
+def test_hard_envelope_constants_cannot_be_supplied_as_config(name, value):
+    from pydantic import ValidationError
+
+    from tradebot.config import RiskLimits
+
+    with pytest.raises(ValidationError):
+        RiskLimits(**{name: value})
+
+
+def test_runtime_risk_and_config_bindings_are_immutable(cfg):
+    from dataclasses import FrozenInstanceError
+
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        cfg.risk.risk_per_trade = D("0.02")
+    with pytest.raises(FrozenInstanceError):
+        cfg.risk = cfg.risk.model_copy(update={"risk_per_trade": D("0.02")})
+    engine = RiskEngine(cfg, KillSwitch(Store(), clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER))
+    with pytest.raises(AttributeError):
+        engine.limits = cfg.risk.model_copy(update={"risk_per_trade": D("0.02")})
+
+
+def test_risk_boundary_refuses_replaced_private_limits(cfg):
+    store = Store(":memory:")
+    engine = RiskEngine(cfg, KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=Mode.PAPER))
+    engine._limits = cfg.risk.model_copy(update={"risk_per_trade": D("0.02")})
+    result = engine.approve_entry(_signal(), _ctx(), _rules())
+    assert not result.approved
+    assert result.verdict.failed[0].name == "risk_limits_immutable"
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+def test_risk_engine_revalidates_preconstructed_limits(cfg):
+    from dataclasses import replace
+
+    too_large = cfg.risk.model_copy(update={"risk_per_trade": D("0.05")})
+    with pytest.raises(ValueError, match="hard envelope"):
+        RiskEngine(replace(cfg, risk=too_large), KillSwitch(Store(), kill_file=None, mode=Mode.PAPER))
+
+
+def test_model_copy_cannot_override_absolute_envelope(cfg):
+    from dataclasses import replace
+
+    spoofed = cfg.risk.model_copy(update={
+        "risk_per_trade": D("0.5"), "ABSOLUTE_MAX_RISK_PER_TRADE": D("1"),
+    })
+    with pytest.raises(ValueError, match="hard envelope"):
+        RiskEngine(replace(cfg, risk=spoofed), KillSwitch(Store(), kill_file=None, mode=Mode.PAPER))
+
+
+@pytest.mark.parametrize("mode", [Mode.LIVE, Mode.TESTNET])
+@pytest.mark.parametrize("level", [KillLevel.L1, KillLevel.L2, KillLevel.L3])
+def test_manual_reset_fails_closed_in_live_and_testnet_without_authorization(mode, level):
+    clock = SimClock(NOW)
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=clock, kill_file=None, mode=mode)
+    switch.trigger(level, trigger="test", reason="pause")
+    clock.advance(timedelta(hours=2))
+    with pytest.raises(PermissionError, match="authenticated authorization"):
+        switch.reset(reason="reviewed", actor="operator")
+    assert switch.level is level
+    assert store.count_events("manual_reset_refused") == 1
+    store.close()
+
+
+def test_kill_switch_mode_binding_is_read_only():
+    store = Store(":memory:")
+    switch = KillSwitch(store, mode=Mode.LIVE, kill_file=None)
+    with pytest.raises(AttributeError):
+        switch.mode = Mode.PAPER
+    with pytest.raises(ValueError, match="mode"):
+        KillSwitch(store, mode="paper", kill_file=None)
+    store.close()
+
+
+@pytest.mark.parametrize("mode", [Mode.LIVE, Mode.TESTNET])
+def test_live_testnet_auto_resume_fails_closed_without_independent_evidence(mode):
+    store = Store(":memory:")
+    switch = KillSwitch(store, clock=SimClock(NOW), kill_file=None, mode=mode)
+    switch.trigger(KillLevel.L1, trigger="stale_feeds", reason="pause")
+    assert not switch.auto_resume(reason="recovered", expected_state=switch.state)
+    assert switch.level is KillLevel.L1
+    assert store.count_events("autonomy_refused") == 1
+    store.close()
+
+
+def test_kill_switch_requires_explicit_mode():
+    store = Store(":memory:")
+    with pytest.raises(TypeError, match="mode"):
+        KillSwitch(store)
+    store.close()
+
+
+@pytest.mark.parametrize("response", [None, [], {}, {"passed": "false"}, {"passed": "true"},
+                                      {"passed": 1}, {"passed": []}])
+async def test_api_permission_guard_rejects_malformed_results(cfg, response):
+    class Adapter:
+        async def verify_permissions(self, **kwargs):
+            return response
+
+    store = Store(":memory:")
+    result = await LiveGuardChecker(cfg, store)._check_api_key(Adapter())
+    assert result.passed is False
+    store.close()
+
+
+@pytest.mark.parametrize("value", ["NOTLIVE 250", "LIVE -250", "LIVE +250", "LIVE 250 EXTRA", "x LIVE 250",
+                                  "LIVE 2 50", "LIVE 250 USD", "250 LIVE 1", "", None])
+def test_live_confirmation_rejects_ambiguous_or_misleading_input(cfg, value):
+    store = Store(":memory:")
+    assert not LiveGuardChecker(cfg, store)._check_confirmation(value, D("250"))[0]
+    store.close()
+
+
+@pytest.mark.parametrize("bad", ["true", "false", 1, [], {}, None])
+async def test_live_guard_rejects_non_boolean_feed_and_reconciliation(cfg, bad):
+    store = Store(":memory:")
+    checks = await LiveGuardChecker(cfg, store).check(feed_fresh=bad, reconciliation_clean=bad)
+    assert not next(row for row in checks if row.name == "preflight_feed").passed
+    assert not next(row for row in checks if row.name == "preflight_reconciliation").passed
+    store.close()
+
+
+async def test_live_guard_does_not_overwrite_or_extend_unverified_go_nogo(cfg):
+    store = Store(":memory:")
+    old = {"ts": "2024-01-01T00:00:00Z", "passed": True}
+    store.kv_set("go_nogo", old)
+    checker = LiveGuardChecker(cfg, store)
+    checks = await checker.check(now=NOW, feed_fresh=True, reconciliation_clean=True)
+    assert not next(row for row in checks if row.name == "go_nogo_record").passed
+    assert store.kv_get("go_nogo") == old
+    assert store.kv_get("live_guard_latest")["passed"] is False
+    store.close()
+
+
+@pytest.mark.parametrize("drift", [True, False, "0", [], {}, None, float("inf"), float("nan")])
+async def test_live_guard_rejects_unverified_clock_drift(cfg, drift):
+    store = Store(":memory:")
+    checks = await LiveGuardChecker(cfg, store).check(clock_drift_seconds=drift)
+    assert not next(row for row in checks if row.name == "preflight_clock").passed
+    store.close()
+
+
+@pytest.mark.parametrize("hold", ["health_flapping_hold", "ramp_incident_tracking_invalid", "kill_incident_pending:7"])
+async def test_preflight_kill_gate_blocks_durable_holds_at_l0(cfg, hold):
+    store = Store(":memory:")
+    store.kv_set(hold, {"until": "bad"} if hold == "health_flapping_hold" else None)
+    checks = await LiveGuardChecker(cfg, store).check()
+    assert not next(row for row in checks if row.name == "preflight_killswitch").passed
+    store.close()
+
+
+async def test_live_reconciliation_requirement_cannot_be_configured_away(cfg):
+    store = Store(":memory:")
+    cfg.settings.live_guards.require_reconciliation_clean = False
+    checks = await LiveGuardChecker(cfg, store).check(reconciliation_clean=None)
+    assert not next(row for row in checks if row.name == "preflight_reconciliation").passed
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_names_durable_observation_fault(cfg, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(':memory:')
+    try:
+        store.latch_execution_observation_fault('ambiguous-order')
+        checks = await LiveGuardChecker(cfg, store).check()
+        gate = next(row for row in checks if row.name == 'preflight_killswitch')
+        assert not gate.passed
+        assert 'execution_observation_fault' in gate.detail
+        assert 'not live authorization' in gate.detail
+        assert store.has_execution_observation_fault()
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_preflight_empty_blockers_does_not_claim_live_authorization(cfg, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    store = Store(':memory:')
+    try:
+        checks = await LiveGuardChecker(cfg, store).check()
+        gate = next(row for row in checks if row.name == 'preflight_killswitch')
+        assert gate.passed
+        assert 'none observed' in gate.detail and 'this gate passed' in gate.detail
+        assert 'other-process local holds' in gate.detail
+        assert 'entry permitted' not in gate.detail
+        assert 'not live authorization' in gate.detail
+    finally:
+        store.close()

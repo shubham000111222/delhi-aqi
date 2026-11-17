@@ -23,7 +23,7 @@ fmt:  ## auto-fix lint issues
 	ruff check --fix src tests
 
 dashboard:  ## bot + dashboard on http://localhost:8000
-	$(PY) -m tradebot dashboard --speed 600
+	$(PY) -m tradebot dashboard --speed 1
 
 backtest:  ## 10 day synthetic backtest with validation gates
 	$(PY) -m tradebot backtest --days 10

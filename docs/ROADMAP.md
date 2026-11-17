@@ -47,7 +47,7 @@ a capability that exists but has not cleared its gates is marked as such.
 | 20.2 Health model | three questions per component (liveness / readiness / correctness) → `HEALTHY`/`DEGRADED`/`FAILED`, visible in `tradebot health`, `/api/health` and section 6 of the daily report, with a `health_change` audit event on every transition and a flapping detector (§20.4). Status sheet: `docs/BUILD_PLAN_20_21.md` |
 | 20.3 Heal playbook | `Playbook` runs detect → act → verify → escalate per row with a per-row cooldown: `feed_stale` (reconnect, verified by a fresh tick), `api_pressure` (60 s circuit breaker with one half-open probe, halves the rate bucket, verified with `get_open_orders()`), `exit_stuck` (an exit the venue ignored is re-submitted at market and fails after three attempts), `position_unprotected` (protective stop placed and verified), `disk_pressure` (retention purge, verified), `reconcile_mismatch` (reconcile, verified). Healing is allowlisted to cancel / reduce / close / protect. `tradebot health` prints attempts, verified count, p50 MTTR and the target per row |
 | 20.6 MTTR | every heal records its own duration and compares it with the §20.6 target (feed <10 s, worker <5 s, restart+reconcile <60 s); `Playbook.metrics()` aggregates p50/p95 |
-| 20.5 Supervision | `watchdog/supervisor.py` restarts a wedged bot within a 3/hour budget and only after a preflight that flattens positions with no resting stop at the venue; it waits for the heartbeat before calling the restart a success, and escalates when it never returns. `watchdog/deadman.py` is a latching file-based switch, armed only in testnet/live |
+| 20.5 Supervision | Restart budget, heartbeat verification, alert routing and a latching file-based switch exist. Live/testnet restarts are blocked until an independent venue snapshot and verified preflight are available; the CLI has no venue client. |
 | 20.3 Alert delivery | `alerts/router.py`: the file floor is written before any network call, Telegram and an independent webhook are both attempted, and an alert no remote channel took is queued to JSONL and retried with attempt/age ceilings. `tradebot alerts --test` proves the path; `tradebot health` names the transports |
 | 20.4 Restart budget | at most three restarts per component per hour; a strategy that keeps raising is disabled for the session and escalated instead of being restarted forever |
 | 19.8 Guardrails | risk package imports nothing from `ai`; the AI layer imports no execution/engine code (both enforced by tests); unapproved or stale models produce no trade |
@@ -106,8 +106,9 @@ The full evidence sheet — every command, every number, dated — is in `docs/R
 * **The stream feed has never held a real socket.** Every frame it has decoded came
   from a recording, and the live transport is the one line of it that no test here
   exercises end to end.
-* **The watchdog can only escalate in paper mode.** Flattening requires its own
-  exchange client, which exists as `LiveWatchdogActions` but needs live keys.
+* **The watchdog has no independent venue client in its CLI.** Live/testnet restarts are
+  blocked until the preflight can verify total balances and venue-side open orders; the
+  existing adapters cannot establish those guarantees.
 * **NSE cost constants must be verified.** They are constructor arguments, not gospel:
   brokerage caps, STT rates and stamp duty change with circulars.
 * **Time stops, trailing stops and partials are managed locally** in paper; in live the

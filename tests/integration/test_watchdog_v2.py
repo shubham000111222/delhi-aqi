@@ -55,6 +55,7 @@ class FakeAdapter:
     """Just enough venue for `LiveWatchdogActions`: balances, orders, placing and cancelling."""
 
     quote = "USDT"
+    watchdog_snapshot_is_authoritative = True  # this in-memory venue exposes its full book
 
     def __init__(self, balances: dict[str, Decimal], stops: list[str] | None = None) -> None:
         self.balances = balances
@@ -81,7 +82,7 @@ class FakeAdapter:
     async def get_open_orders(self, symbol: str | None = None) -> list[Order]:
         return [o for o in self.open_orders if symbol is None or o.symbol == symbol]
 
-    async def get_market_rules(self, symbol: str) -> FakeRules:
+    def get_market_rules(self, symbol: str) -> FakeRules:
         return FakeRules()
 
     async def place_order(self, request: Any) -> Any:
@@ -368,9 +369,10 @@ class TestRestart:
         result = await watch.act_async()
 
         restart = result["restart"]
-        assert restart["action"] == "restarted"
-        assert "flattened 1 unprotected position(s)" in restart["preflight"]
-        assert adapter.placed and adapter.placed[0].reduce_only is True
+        assert restart["action"] == "preflight_failed"
+        assert "independent venue snapshot required" in restart["detail"]
+        assert not adapter.placed
+        assert spawner.starts == 0
 
     async def test_a_refused_restart_tells_a_human_instead_of_retrying(self, fast_cfg, tmp_path: Path):
         store = Store(":memory:")
@@ -420,3 +422,114 @@ def _old(path: Path, ts: datetime) -> None:
     path.write_text(ts.isoformat(), encoding="utf-8")
     stamp = ts.timestamp()
     os.utime(path, (stamp, stamp))
+
+
+async def test_short_or_wrong_side_stop_is_not_treated_as_protection():
+    adapter = FakeAdapter({"USDT": D("1000"), "BTC": D("0.02")}, stops=["BTC/USDT"])
+    actions = LiveWatchdogActions(adapter)
+    assert await actions.unprotected() == ["BTC/USDT"]
+    with pytest.raises(RuntimeError, match="existing sell orders"):
+        await actions.flatten_unprotected()
+    assert adapter.placed == []
+    adapter.open_orders[0].side = Side.BUY
+    assert await actions.unprotected() == ["BTC/USDT"]
+
+
+async def test_live_preflight_fails_when_no_venue_client(live_cfg, tmp_path):
+    store = Store(":memory:")
+    router = AlertRouter(channels=[FileChannel(path=alert_file(tmp_path))], queue_path=tmp_path / "q")
+    watch = build(live_cfg, clock=SimClock(T0), store=store, router=router)
+    with pytest.raises(RuntimeError, match="independent venue snapshot"):
+        await watch._preflight()
+    store.close()
+
+
+async def test_unverified_flatten_or_uncertified_snapshot_fails_closed():
+    adapter = FakeAdapter({"USDT": D("1000"), "BTC": D("0.01")})
+    adapter.watchdog_snapshot_is_authoritative = False
+    with pytest.raises(RuntimeError, match="cannot verify"):
+        await LiveWatchdogActions(adapter).flatten()
+    adapter.watchdog_snapshot_is_authoritative = True
+
+    async def no_fill(request):
+        return request
+
+    adapter.place_order = no_fill
+    with pytest.raises(RuntimeError, match="not verified"):
+        await LiveWatchdogActions(adapter).flatten()
+
+
+async def test_old_fresh_heartbeat_file_does_not_verify_new_process(fast_cfg, tmp_path):
+    store = Store(":memory:")
+    beat = tmp_path / "heartbeat"
+    _old(beat, T0)
+    spawner = FakeSpawner()
+    supervisor = Supervisor(spawner=spawner, clock=SimClock(T0), verify_seconds=1, poll_seconds=1)
+    router = AlertRouter(channels=[FileChannel(path=alert_file(tmp_path))], queue_path=tmp_path / "q")
+    watch = build(fast_cfg, clock=SimClock(T0), store=store, router=router, supervisor=supervisor, beat=beat)
+    result = await watch.act_async()
+    assert result["restart"]["action"] == "restarted"
+    assert result["restart"]["verified"] is False
+    store.close()
+
+
+async def test_supervisor_does_not_start_when_old_process_wont_stop():
+    class StuckSpawner(FakeSpawner):
+        def stop(self, handle):
+            self.stops += 1
+
+    spawner = StuckSpawner()
+    supervisor = Supervisor(spawner=spawner, clock=SimClock(T0), handle=FakeProcess())
+
+    async def heartbeat():
+        return True
+
+    result = await supervisor.handle_lost_heartbeat(heartbeat_ok=heartbeat)
+    assert result["action"] == "stop_failed"
+    assert spawner.starts == 0
+    assert supervisor.handle.alive
+
+
+async def test_changed_stale_db_pulse_cannot_validate_unchanged_fresh_file(fast_cfg, tmp_path):
+    store = Store(":memory:")
+    beat = tmp_path / "heartbeat"
+    _old(beat, T0)
+
+    class StaleWriter(FakeSpawner):
+        def start(self):
+            store.kv_set("heartbeat", iso(T0 - timedelta(hours=1)))
+            return super().start()
+
+    supervisor = Supervisor(spawner=StaleWriter(), clock=SimClock(T0), verify_seconds=1, poll_seconds=1)
+    router = AlertRouter(channels=[FileChannel(path=alert_file(tmp_path))], queue_path=tmp_path / "q")
+    watch = build(fast_cfg, clock=SimClock(T0), store=store, router=router, supervisor=supervisor, beat=beat)
+    result = await watch.act_async()
+    assert result["restart"]["verified"] is False
+    store.close()
+
+
+def test_watchdog_escalation_registers_critical_ramp_incident(fast_cfg):
+    from tradebot.core.models import KillLevel
+    from tradebot.risk.live_guards import RampController
+
+    store = Store(":memory:")
+    watchdog = Watchdog(fast_cfg, store, clock=SimClock(T0), kill_file=None)
+    watchdog._escalate(KillLevel.L2, "watchdog_test", "critical")
+    assert store.kill_level() == "L2"
+    assert RampController(fast_cfg, store).load().critical_incidents == 1
+    assert store.incidents()[0]["trigger"] == "watchdog_test"
+    store.close()
+
+
+def test_watchdog_still_escalates_when_incident_write_fails(fast_cfg):
+    from tradebot.core.models import KillLevel
+
+    store = Store(":memory:")
+    watchdog = Watchdog(fast_cfg, store, clock=SimClock(T0), kill_file=None)
+    store._exec("CREATE TRIGGER fail_incident BEFORE INSERT ON incidents "
+                "BEGIN SELECT RAISE(ABORT, 'incident failed'); END")
+    watchdog._escalate(KillLevel.L2, "test", "emergency")
+    assert store.kill_level() == "L2"
+    assert store.has_pending_kill_incident()
+    assert watchdog.fired == 1
+    store.close()

@@ -62,6 +62,12 @@ def size_entry(
 ) -> SizeResult:
     """Return the largest size that satisfies every cap. Never rounds up."""
     result = SizeResult()
+    for name, multiplier in (("ramp_multiplier", ramp_multiplier), ("size_multiplier", size_multiplier)):
+        if (not isinstance(multiplier, Decimal) or not multiplier.is_finite()
+                or multiplier < 0 or multiplier > 1):
+            result.binding = f"invalid_{name}"
+            result.notes.append(f"{name} must be finite and between 0 and 1")
+            return result
     if price <= 0:
         result.binding = "invalid_price"
         return result

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import shutil
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -24,8 +25,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from .autonomy import AutonomyLedger, AutonomyLevel
 from .config import Config, Mode
-from .core.clock import Clock, SimClock, iso, timeframe_seconds, utc, utcnow
+from .core.clock import Clock, SimClock, iso, parse_iso, timeframe_seconds, utc, utcnow
 from .core.logging import JsonMessage, get_logger
 from .core.models import (
     Candle,
@@ -46,10 +48,11 @@ from .core.store import Store
 from .data.feed import BaseFeed, make_feed
 from .data.hub import MarketData
 from .execution.adapters.base import ExchangeAdapter
+from .execution.adapters.paper import PaperAdapter
 from .execution.order_manager import OrderManager
 from .execution.slippage import SlippageRecorder, size_for_budget
 from .heal import Playbook, Row
-from .health import Check, HealthModel, RestartBudget
+from .health import Check, HealthModel, RestartBudget, State
 from .portfolio.ledger import ClosedTrade, EntryPlan, Ledger
 from .reporting.daily import build_daily_report, tax_ledger_rows, write_reports
 from .risk.engine import RiskContext, RiskEngine
@@ -65,6 +68,16 @@ def _finite_decimal(value: Any) -> bool:
         return D(value).is_finite()
     except (ArithmeticError, TypeError, ValueError):
         return False
+
+
+@dataclass(frozen=True, slots=True)
+class PendingFill:
+    fill: Fill
+    pending_id: str
+
+    @property
+    def ts(self) -> datetime:
+        return self.fill.ts
 
 
 @dataclass
@@ -127,6 +140,7 @@ class Engine:
         self.om = order_manager
         self.strategies = strategies
         self.notifier = notifier
+        self._research_candidate_gate: Any = None
         self.stats = EngineStats()
         # §20.2: every component answers liveness / readiness / correctness, and the
         # model remembers only what changed. It holds no policy - the playbook does.
@@ -136,6 +150,7 @@ class Engine:
         # optional: an unconfigured notifier or model must not hold the system
         self.health.register("alerting", critical=False)
         self.health.register("ai", critical=False)
+        self._restore_health_transitions()
         # §20.4: a deterministic bug restarts cleanly forever; three an hour, then stop.
         self.strategy_faults = RestartBudget(max_per_hour=3)
         self._disabled_strategies: dict[str, str] = {}
@@ -156,12 +171,12 @@ class Engine:
         self._exiting: dict[tuple[str, str], datetime] = {}
         self._cooldowns: dict[str, datetime] = {}
         self._last_regime: dict[tuple[str, str], Regime] = {}
-        self._consecutive_losses: dict[str, int] = {}
         self._last_day: str = ""
         self._last_health = 0.0
         self._last_health_check: datetime | None = None
         # when the L1 pause condition was first observed as cleared (sustained health)
         self._healthy_since: datetime | None = None
+        self._healthy_pause_state: dict[str, Any] | None = None
         # Venue seams (§18.8). Defaults describe a crypto venue: always open, no square-off.
         from .venues.calendar import AlwaysOpenCalendar
         from .venues.squareoff import SquareOffScheduler
@@ -182,14 +197,42 @@ class Engine:
         self.unapplied_fills = 0
         self._last_snapshot: datetime | None = None
         self._equity_points = 0
-        self._reconcile_state = "ok"
+        # Live/testnet cannot assume reconciliation before independent venue evidence.
+        self._reconcile_state = "ok" if config.mode is Mode.PAPER else "venue reconciliation unverified"
+        # Partial audit coverage: this ledger does not intercept every action or enforce
+        # permissions at trading and configuration boundaries.
+        self.autonomy = AutonomyLedger(store=store, clock=clock)
         beat = Path(config.settings.watchdog.heartbeat_file)
         self._heartbeat_path = beat if beat.is_absolute() else Path(config.settings.state_dir) / beat
         self._heartbeat_warns = 0
+        self._last_entry_blockers: tuple[str, ...] | None = None
         self._last_alert_flush: datetime | None = None
         self.starting_capital = config.settings.starting_capital_usdt
         self.ramp = RampController(config, store)
         self._load_state()
+        self._disabled_strategies.update(self.store.disabled_strategies())
+        for name in config.enabled_strategies:
+            self.strategy_faults.attempts[name].extend(self.store.strategy_fault_attempts(name, now=self.clock.now()))
+        # Close the crash window between persisting a sixth transition and setting L1.
+        self._hold_on_flapping(now=self.clock.now())
+
+    def _restore_health_transitions(self) -> None:
+        """Restore the recent health-change window so restarting does not erase flapping."""
+        now = self.clock.now()
+        rows = self.store.events(limit=-1, kinds=["health_change"], since=now - timedelta(minutes=10))
+        for row in reversed(rows):
+            payload = row["payload"]
+            component = self.health.components.get(payload.get("component"))
+            if component is None:
+                continue
+            try:
+                when = parse_iso(row["ts"])
+                state = State(payload["to"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if now - timedelta(minutes=10) <= when <= now:
+                component.transitions.append(when)
+                component.state = state
 
     # ------------------------------------------------------------------
     # construction
@@ -216,14 +259,14 @@ class Engine:
         )
         feed = feed or make_feed(config, clock)
         rules = feed.market_rules()
+        killswitch = KillSwitch(store, clock=clock, mode=config.mode)
         if adapter is None:
             from .execution.adapters import make_adapter
 
-            adapter = make_adapter(config, market, clock, rules)
+            adapter = make_adapter(config, market, clock, rules, killswitch=killswitch)
             connect = getattr(adapter, "connect", None)
             if connect is not None:  # live / testnet: load markets and market rules
                 await connect()
-        killswitch = KillSwitch(store, clock=clock)
         risk = RiskEngine(config, killswitch)
         ledger = Ledger(
             starting_cash=config.settings.starting_capital_usdt,
@@ -282,7 +325,6 @@ class Engine:
         peak = self.store.kv_get("peak_equity")
         if peak is None:
             self.store.kv_set("peak_equity", to_str(self.starting_capital, 8))
-        self._consecutive_losses = self.store.kv_get("consecutive_losses", {}) or {}
         self._last_day = str(self.store.kv_get("last_day", ""))
 
     # ------------------------------------------------------------------
@@ -301,11 +343,19 @@ class Engine:
         compare the two ledgers in that window: it would report our own queue as a
         mismatch and pause trading.
         """
-        self.unapplied_fills += 1
         try:
-            self.queue.put_nowait(("fill", fill))
+            pending_id = self.store.journal_pending_fill(fill)
+        except Exception:  # noqa: BLE001 - already-executed fills must never be silently dropped
+            self.killswitch.latch_local_entry_hold()
+            self.killswitch.trigger(KillLevel.L1, trigger="fill_journal_failed",
+                                    reason="could not persist incoming fill", actor="execution")
+            raise
+        self.unapplied_fills += 1
+        item = ("fill", PendingFill(fill, pending_id))
+        try:
+            self.queue.put_nowait(item)
         except asyncio.QueueFull:
-            self._deferred.append(("fill", fill))
+            self._deferred.append(item)
 
     @property
     def marks(self) -> dict[str, Decimal]:
@@ -339,7 +389,9 @@ class Engine:
         elif kind == "bar":
             await self._on_bar(payload)
         elif kind == "fill":
-            await self._on_fill(payload)
+            if not isinstance(payload, PendingFill):
+                raise ValueError("fill must be journaled before dispatch")
+            await self._on_fill(payload.fill, pending_id=payload.pending_id)
         elif kind == "regime":
             self._log("regime", payload, actor="market")
         else:  # pragma: no cover - defensive
@@ -480,6 +532,58 @@ class Engine:
     # ------------------------------------------------------------------
     # entry path
     # ------------------------------------------------------------------
+    def set_research_candidate_gate(self, gate: Any) -> None:
+        """Explicit experimental injection only; no configuration/live enable path."""
+        if (self.cfg.mode is not Mode.PAPER or not isinstance(self.clock, SimClock)
+                or not isinstance(self.adapter, PaperAdapter) or self.adapter.mode is not Mode.PAPER
+                or not callable(gate)):
+            raise PermissionError("candidate research gate requires simulated paper execution")
+        self._research_candidate_gate = gate
+
+    async def _research_candidate_multiplier(self, signal: Signal, mark: Decimal) -> Decimal:
+        payload: dict[str, Any]
+        try:
+            if (self.cfg.mode is not Mode.PAPER or not isinstance(self.clock, SimClock)
+                    or not isinstance(self.adapter, PaperAdapter) or self.adapter.mode is not Mode.PAPER):
+                raise PermissionError("research gate runtime is not simulated paper")
+            payload = self._research_candidate_gate(signal, self.clock.now(), mark)
+            if not isinstance(payload, dict) or payload.get("trade_id") != signal.id:
+                raise ValueError("candidate check identity mismatch")
+            value = payload.get("multiplier")
+            if isinstance(value, bool) or not isinstance(value, (float, int, Decimal)):
+                raise ValueError("invalid candidate multiplier")
+            multiplier = D(str(value))
+            if not multiplier.is_finite() or multiplier not in (ZERO, D("0.5"), D("1")):
+                raise ValueError("candidate multiplier outside research bounds")
+            expected = {"PASS": D("1"), "SIZE DOWN": D("0.5"), "SKIP": ZERO}
+            verdict = payload.get("verdict")
+            if not isinstance(verdict, str) or verdict not in expected or expected[verdict] != multiplier:
+                raise ValueError("candidate verdict and multiplier disagree")
+            for flag in ("check_failed", "timed_out"):
+                if flag in payload and type(payload[flag]) is not bool:
+                    raise ValueError("invalid candidate failure flag")
+                if payload.get(flag) and multiplier != ZERO:
+                    raise ValueError("failed candidate check cannot permit size")
+            if payload.get("filter_enabled", False) is not False:
+                raise ValueError("research result cannot claim filter enablement")
+            if len(json.dumps(payload, allow_nan=False, default=str).encode()) > 65536:
+                raise ValueError("candidate result exceeds audit limit")
+        except Exception as exc:  # noqa: BLE001 - research errors never permit entry
+            multiplier = ZERO
+            payload = {"trade_id": signal.id, "multiplier": 0, "verdict": "SKIP", "check_failed": True,
+                       "reason": type(exc).__name__ + ": " + str(exc)}
+        try:
+            self._log("timemachine_check", {**payload, "research_only": True}, actor="analysis")
+        except Exception:  # noqa: BLE001 - unlogged decisions may not execute
+            self.killswitch.latch_local_entry_hold()
+            multiplier = ZERO
+        if multiplier == 0 and self.notifier is not None:
+            try:
+                await self.notifier.send(f"Time Machine research: SKIP {signal.id}", level="WARN")
+            except Exception:  # noqa: BLE001 - notifier failure never allows a trade
+                self.killswitch.latch_local_entry_hold()
+        return multiplier
+
     async def _try_enter(self, signal: Signal, ctx: StrategyContext) -> None:
         # market-hours gate (§18.8): an entry outside the venue's session is not a trade,
         # it is a rejection waiting to happen. Crypto is always open, so this is free.
@@ -497,8 +601,21 @@ class Engine:
             self.stats.vetoes += 1
             self.store.save_verdict(signal.id, self._veto("kill_switch", f"kill level {self.killswitch.level.value}"))
             return
+        research_multiplier = D("1")
+        if self._research_candidate_gate is not None:
+            research_multiplier = await self._research_candidate_multiplier(signal, ctx.mark)
+            if research_multiplier == 0:
+                self.stats.vetoes += 1
+                self.store.save_verdict(signal.id, self._veto("timemachine", "research check skipped candidate"))
+                return
         rules = self.adapter.get_market_rules(signal.symbol)
-        risk_ctx = self._risk_context(signal.symbol)
+        try:
+            risk_ctx = self._risk_context(signal.symbol, signal.strategy)
+            risk_ctx = replace(risk_ctx, size_multiplier=risk_ctx.size_multiplier * research_multiplier)
+        except (ValueError, ArithmeticError):
+            self.stats.vetoes += 1
+            self.store.save_verdict(signal.id, self._veto("strategy_size", "invalid strategy size multiplier"))
+            return
         decision = self.risk.approve_entry(signal, risk_ctx, rules)
         self.store.save_verdict(signal.id, decision.verdict, ts=self.clock.now())
         if not decision.approved:
@@ -533,7 +650,9 @@ class Engine:
             signal_id=signal.id,
             atr=D(ctx.atr) if ctx.atr == ctx.atr else ZERO,
         )
-        await self.om.submit_entry(signal, qty, price=decision.entry_price, plan=plan)
+        await self.om.submit_entry(signal, qty, price=decision.entry_price, plan=plan,
+                                   sized_ramp_multiplier=risk_ctx.ramp_multiplier,
+                                   sized_strategy_multiplier=risk_ctx.size_multiplier)
         self.stats.orders += 1
 
     def _maybe_calibrate_slippage(self, minimum_fills: int = 30) -> None:
@@ -677,7 +796,7 @@ class Engine:
 
         return RiskVerdict(approved=False, reason=f"{name}: {detail}", checks=[RiskCheck(name, False, detail)])
 
-    def _risk_context(self, symbol: str) -> RiskContext:
+    def _risk_context(self, symbol: str, strategy: str) -> RiskContext:
         marks = self.marks
         equity = self.ledger.equity(marks)
         book = self.market.book(symbol)
@@ -707,7 +826,8 @@ class Engine:
             book=book,
             cooldown_until=self._cooldowns.get(symbol),
             symbol_enabled=symbol in self.cfg.symbol_names(),
-            strategy_paused=False,
+            strategy_paused=self._strategy_blocked(strategy),
+            size_multiplier=self.store.strategy_size_multiplier(strategy),
             mode_allows_entries=self.killswitch.level is KillLevel.L0,
             ramp_multiplier=self.ramp.multiplier(),
             available_cash=self.adapter_cash(),
@@ -742,14 +862,13 @@ class Engine:
     # ------------------------------------------------------------------
     # fills and position lifecycle
     # ------------------------------------------------------------------
-    async def _on_fill(self, fill: Fill) -> None:
+    async def _on_fill(self, fill: Fill, *, pending_id: str) -> None:
         self.stats.fills += 1
         try:
             self.slippage.observe(fill, book=self.market.book(fill.symbol))
             self._maybe_calibrate_slippage()
         except Exception as exc:  # noqa: BLE001 - measurement must never stop trading
             self._log("slippage_record_failed", {"error": str(exc)}, level="WARN", actor="execution")
-        self.unapplied_fills = max(self.unapplied_fills - 1, 0)
         key = (fill.symbol, fill.strategy)
         pos_before = self.ledger.get(fill.symbol, fill.strategy)
         qty_before = pos_before.qty if pos_before else ZERO
@@ -797,10 +916,23 @@ class Engine:
                     actor="portfolio",
                 )
             if pos_before is not None and closed is not None:
-                self.store.close_position(pos_before, fill.price, closed.reason or "exit", closed_at=fill.ts)
+                try:
+                    self.store.close_position_with_risk(
+                        pos_before, fill.price, closed.reason or "exit", closed_at=fill.ts, now=self.clock.now(),
+                        halve_at=self.cfg.risk.consecutive_losses_halve,
+                        pause_at=self.cfg.risk.consecutive_losses_pause,
+                        pause_hours=self.cfg.risk.consecutive_losses_pause_hours,
+                    )
+                except Exception:  # noqa: BLE001 - ledger and risk no longer agree
+                    self._disabled_strategies[closed.strategy] = "position close persistence failed"
+                    self.killswitch.latch_local_entry_hold()
+                    self.killswitch.trigger(KillLevel.L1, trigger="position_close_persistence_failed",
+                                            reason=f"could not persist close for {closed.strategy}", actor="risk")
+                    raise
                 await self._on_trade_closed(closed)
             self._exiting.pop(key, None)
-        self.om.record_fill(fill)
+        self.om.record_fill(fill, pending_id=pending_id)
+        self.unapplied_fills = max(self.unapplied_fills - 1, 0)
 
     async def _on_trade_closed(self, trade: ClosedTrade) -> None:
         self.stats.trades_closed += 1
@@ -818,27 +950,6 @@ class Engine:
                 },
                 actor="risk",
             )
-        streak = self._consecutive_losses.get(trade.strategy, 0)
-        streak = streak + 1 if trade.pnl < 0 else 0
-        self._consecutive_losses[trade.strategy] = streak
-        self.store.kv_set("consecutive_losses", self._consecutive_losses)
-        if trade.pnl < 0:
-            if streak >= self.cfg.risk.consecutive_losses_pause:
-                self._pause_strategy(
-                    trade.strategy,
-                    hours=self.cfg.risk.consecutive_losses_pause_hours,
-                    reason=f"{streak} consecutive losses",
-                )
-            elif streak >= self.cfg.risk.consecutive_losses_halve:
-                self.store.kv_set(f"size_mult_{trade.strategy}", to_str(D("0.5")))
-                self._log(
-                    "size_reduction",
-                    {"strategy": trade.strategy, "multiplier": "0.5", "streak": streak},
-                    level="WARN",
-                    actor="risk",
-                )
-        else:
-            self.store.kv_delete(f"size_mult_{trade.strategy}")
         self._reserve_tax()
 
     def _reserve_tax(self) -> None:
@@ -897,8 +1008,12 @@ class Engine:
             atr = atr_value(series, self.cfg.strategies.regime.adx_period) if series else 0.0
             if atr == atr and atr > 0:  # not NaN
                 trail = pos.highest_price - D(atr * self.cfg.strategies.exit_management.trail_atr_mult)
-                if pos.trailing_stop is None or trail > pos.trailing_stop:
-                    pos.trailing_stop = max(trail, pos.effective_stop)
+                if trail > pos.effective_stop:
+                    # Persist before changing the in-memory position; the DB ratchet and
+                    # audit event commit together and cannot lose a concurrent tightening.
+                    pos.trailing_stop = self.store.tighten_trailing_stop(
+                        pos.symbol, pos.strategy, trail, ts=self.clock.now()
+                    )
 
             stop = pos.effective_stop
             if price <= stop:
@@ -992,52 +1107,42 @@ class Engine:
     # strategy pausing / decay
     # ------------------------------------------------------------------
     def _strategy_blocked(self, name: str) -> bool:
-        if name in self._disabled_strategies:
-            return True
-        paused = self.store.kv_get("paused_strategies", {}) or {}
-        info = paused.get(name)
-        if not info:
-            return False
-        until = info.get("until") if isinstance(info, dict) else None
-        if until is None:
-            return True
-        return self.clock.now() < _parse(until)
+        return name in self._disabled_strategies or self.store.strategy_paused(name, now=self.clock.now())
 
     def _handle_strategy_fault(self, name: str, *, reason: str) -> None:
         """Pause a faulty strategy, and after three faults in an hour, disable it (§20.3).
 
         Restarting a strategy that raises deterministically looks like recovery from the
         outside: it comes back, trades nothing, and raises again. The budget is what makes
-        the third failure the last one for the session, and the disable is what a human
-        reads later. Open positions are untouched - their stops live in the ledger, not in
+        the third failure the last one for the session, and the durable disable is what a human
+        reads later; restart cannot re-enable it. Open positions are untouched - their stops live in the ledger, not in
         the strategy.
         """
         now = self.clock.now()
-        if self.strategy_faults.allow(name, now=now):
-            self.strategy_faults.record(name, now=now)
-            self._pause_strategy(name, hours=1, reason=reason)
-            return
-        self._disabled_strategies[name] = reason
-        self._pause_strategy(name, hours=24 * 365, reason=f"disabled after 3 faults: {reason}")
-        self._log(
-            "strategy_disabled",
-            {
-                "strategy": name,
-                "reason": reason,
-                "faults_last_hour": self.strategy_faults.used(name, now=now),
-            },
-            level="CRIT",
-            actor="supervisor",
-            ts=now,
-        )
+        try:
+            disabled = self.store.record_strategy_fault(name, reason, now=now)
+            # The in-memory budget is a dashboard view; SQLite is the authority.
+            self.strategy_faults.attempts[name].clear()
+            self.strategy_faults.attempts[name].extend(self.store.strategy_fault_attempts(name, now=now))
+            if disabled:
+                self._disabled_strategies[name] = reason
+        except Exception:  # noqa: BLE001 - protect entries when fault tracking cannot be persisted
+            self._disabled_strategies[name] = reason
+            self.killswitch.latch_local_entry_hold()
+            self.killswitch.trigger(KillLevel.L1, trigger="strategy_disable_failed",
+                                    reason=f"could not persist strategy fault for {name}", actor="supervisor")
+            raise
 
     def _pause_strategy(self, name: str, *, hours: int, reason: str) -> None:
-        paused = self.store.kv_get("paused_strategies", {}) or {}
-        paused[name] = {"until": iso(self.clock.now() + timedelta(hours=hours)), "reason": reason}
-        self.store.kv_set("paused_strategies", paused)
-        self._log(
-            "strategy_paused", {"strategy": name, "hours": hours, "reason": reason}, level="WARN", actor="risk"
-        )
+        now = self.clock.now()
+        try:
+            self.store.extend_strategy_pause(name, until=now + timedelta(hours=hours), reason=reason, now=now)
+        except Exception:  # noqa: BLE001 - pause or audit failure must not enable entries
+            self._disabled_strategies[name] = reason
+            self.killswitch.latch_local_entry_hold()
+            self.killswitch.trigger(KillLevel.L1, trigger="strategy_pause_failed",
+                                    reason=f"could not persist strategy pause for {name}", actor="risk")
+            raise
 
     # ------------------------------------------------------------------
     # equity, health, kill switch
@@ -1075,8 +1180,8 @@ class Engine:
         self._check_account_limits(snap.equity)
         await self._check_day_boundary(snap.equity)
 
-    def _check_account_limits(self, equity: Decimal) -> None:
-        ctx = RiskContext(
+    def _account_risk_context(self, equity: Decimal) -> RiskContext:
+        return RiskContext(
             now=self.clock.now(),
             equity=equity,
             starting_capital=self.starting_capital,
@@ -1084,7 +1189,8 @@ class Engine:
             week_start_equity=D(str(self.store.kv_get("week_start_equity", to_str(equity)))),
             peak_equity=D(str(self.store.kv_get("peak_equity", to_str(equity)))),
         )
-        for reason, level in self.risk.account_alerts(ctx):
+    def _check_account_limits(self, equity: Decimal) -> None:
+        for reason, level in self.risk.account_alerts(self._account_risk_context(equity)):
             if self.killswitch.level.rank < level.rank:
                 self.killswitch.trigger(level, trigger=_limit_trigger(reason), reason=reason)
                 if level.rank >= KillLevel.L2.rank:
@@ -1201,9 +1307,16 @@ class Engine:
         self._report_component_health(
             now=now, disk_used=disk_used, error_rate=error_rate, all_stale=all_stale
         )
+        flapping = self._hold_on_flapping(now=now)
         healed = await self.playbook.tick(self) if self.running else []
+        blockers = self.killswitch.entry_blockers()
+        await self._report_entry_blockers(blockers, now=now)
         health = {
+            "entry_blockers": {"available": True, "reasons": list(blockers),
+                               "note": "Point-in-time diagnostic only; not entry authorization."},
             "ts": iso(now),
+            "flapping_held": flapping,
+            "autonomy": self.autonomy.summary(),
             "components": self.health.snapshot(now=now, restart_budget=self.strategy_faults),
             "playbook": self.playbook.as_dict(now=now),
             "healed": [outcome.as_dict() for outcome in healed],
@@ -1219,6 +1332,35 @@ class Engine:
             "pending_orders": len(self.om.pending),
         }
         return health
+
+    def _hold_on_flapping(self, *, now: datetime) -> list[str]:
+        """§20.4: more than five state changes in ten minutes holds the system at L1.
+
+        A component that keeps collapsing is not healthy between collapses, and the
+        auto-resume ladder cannot tell the difference - it sees ten minutes of "fine" and
+        lifts the pause, then the component flaps again. So this trigger is deliberately
+        *not* in `AUTO_RESUME_TRIGGERS`: the hold is released by a human, not by the clock.
+        Optional components are ignored, for the same reason they cannot make the system
+        FAILED.
+        """
+        flapping = self.health.flapping(now=now)
+        critical = [name for name in flapping if self.health.components[name].critical]
+        if not critical:
+            return []
+        reason = f"flapping: {', '.join(critical)} changed state more than 5 times in 10 min"
+        # The sixth newest transition ages out last. Persist its deadline before
+        # returning so a restart or a separate CLI process cannot bypass the hold.
+        until = max(
+            sorted(self.health.components[name].transitions, reverse=True)[5] + timedelta(minutes=10)
+            for name in critical
+        )
+        self.store.extend_flapping_hold(until, critical, ts=now)
+        self._healthy_since = None
+        self._healthy_pause_state = None
+        if self.killswitch.trigger(KillLevel.L1, trigger="flapping", reason=reason, actor="health"):
+            self.autonomy.record("health", "hold_for_flapping", AutonomyLevel.PROTECT, reason, ts=now)
+        self._log("health_flapping", {"components": critical}, level="WARN", actor="health")
+        return critical
 
     def _build_playbook(self) -> Playbook:
         """§20.3's rows, as detect / act / verify triples.
@@ -1459,11 +1601,58 @@ class Engine:
         )
 
     def _escalate_heal(self, level: KillLevel, trigger: str, reason: str) -> None:
-        self.killswitch.trigger(level, trigger=trigger, reason=reason, actor="heal")
+        # Raising a kill level only ever removes risk, which is a level-3 (protect) action.
+        if self.killswitch.trigger(level, trigger=trigger, reason=reason, actor="heal"):
+            self.autonomy.record(
+                "heal", f"kill_{level.value.lower()}", AutonomyLevel.PROTECT, f"{trigger}: {reason}",
+                ts=self.clock.now(),
+            )
+
+    #: Heal rows that can close or protect a position are level 3; the rest are repairs.
+    PROTECTIVE_ROWS = frozenset({"exit_stuck", "position_unprotected"})
 
     def _heal_event(self, kind: str, payload: dict[str, Any]) -> None:
+        row = str(payload.get("row", ""))
+        self.autonomy.record(
+            "heal",
+            f"{kind}:{row}" if row else kind,
+            AutonomyLevel.PROTECT if row in self.PROTECTIVE_ROWS else AutonomyLevel.CORRECT,
+            str(payload.get("action") or payload.get("detail") or "")[:500],
+            outcome="ok" if kind in ("heal", "heal_escalation") else "failed",
+            ts=self.clock.now(),
+        )
         level = str(payload.pop("level", "INFO"))
         self._log(kind, payload, level=level, actor="heal", ts=self.clock.now())
+
+    async def _report_entry_blockers(self, blockers: tuple[str, ...], *, now: datetime) -> None:
+        """Audit observed changes, not authority transitions; never release a hold.
+
+        Deduplication is process-local. A restarted process reports an existing hold
+        again. Notifier acceptance is not proof of external delivery.
+        """
+        previous = self._last_entry_blockers
+        if previous == blockers:
+            return
+        if previous is None and not blockers:
+            self._last_entry_blockers = blockers
+            return
+        level = "WARN" if blockers else "INFO"
+        self._log("entry_blockers_changed", {
+            "previous": list(previous) if previous is not None else None,
+            "reasons": list(blockers), "point_in_time": True,
+            "entry_authorized": False,
+        }, level=level, actor="health", ts=now)
+        self._last_entry_blockers = blockers
+        if self.notifier is None:
+            return
+        message = ("Entry-blocker diagnostic: " + (", ".join(blockers) or "none currently observed")
+                   + ". Point-in-time only; not entry authorization.")
+        try:
+            await self.notifier.send(message, level=level)
+        except Exception as exc:  # noqa: BLE001 - delivery failure must not release holds
+            self._log("entry_blocker_alert_failed", {"error_type": type(exc).__name__,
+                      "reasons": list(blockers), "entry_authorized": False},
+                      level="ERROR", actor="health", ts=now)
 
     async def _flush_alerts(self, now: datetime) -> None:
         """Retry undelivered alerts, at most once a minute.
@@ -1650,12 +1839,15 @@ class Engine:
         pause this engine does not recognise is left to the operator. The evidence can
         be passed in (the health check already computed it) or measured here.
         """
-        if self.killswitch.level is not KillLevel.L1:
+        pause_state = self.killswitch.state
+        if pause_state.get("level") != KillLevel.L1.value:
             self._healthy_since = None
+            self._healthy_pause_state = None
             return
-        trigger = str(self.killswitch.state.get("trigger", ""))
+        trigger = str(pause_state.get("trigger", ""))
         if trigger not in self.AUTO_RESUME_TRIGGERS:
             self._healthy_since = None
+            self._healthy_pause_state = None
             return
 
         now = now or self.clock.now()
@@ -1667,24 +1859,34 @@ class Engine:
             disk = shutil.disk_usage(str(self.cfg.settings.data_dir))
             disk_used = disk.used / disk.total if disk.total else 0.0
 
-        healthy = {
-            "stale_feeds": not all_stale,
-            "exchange_error_rate": error_rate < float(self.cfg.risk.exchange_error_rate_limit),
-            "reconciliation": self._reconcile_state == "ok",
-            "disk_full": disk_used < self.cfg.risk.disk_warn_pct,
-        }[trigger]
+        # Recovery of the original cause is insufficient if another incident arose
+        # while already at L1 (same-level escalation does not replace its trigger).
+        # Unknown/unhealthy reconciliation, stale feeds, errors, or disk block recovery.
+        equity = self.equity()
+        healthy = (
+            not all_stale
+            and error_rate < float(self.cfg.risk.exchange_error_rate_limit)
+            and self._reconcile_state == "ok"
+            and disk_used < self.cfg.risk.disk_warn_pct
+            and equity > 0
+            and not self.risk.account_alerts(self._account_risk_context(equity))
+        )
         if not healthy:
             self._healthy_since = None
+            self._healthy_pause_state = None
             return
 
-        if self._healthy_since is None:
+        if (self._healthy_since is None or self._healthy_pause_state != pause_state
+                or now < self._healthy_since):
             self._healthy_since = now
+            self._healthy_pause_state = pause_state
             return
         required = float(self.cfg.settings.execution.auto_resume_min_healthy_seconds)
         held = (now - self._healthy_since).total_seconds()
         if held < required:
             return
-        self._resume(reason=f"{trigger} cleared; health held {held / 60:.0f} min", now=now)
+        self._resume(reason=f"{trigger} cleared; health held {held / 60:.0f} min", now=now,
+                     expected_state=pause_state)
 
     def _resume_daily_limit_at_day_boundary(self, now: datetime) -> None:
         """The daily loss limit is scoped to a day, so a new day lifts it.
@@ -1694,24 +1896,47 @@ class Engine:
         human, which is why only the `daily_loss` trigger is handled here. This runs off
         market time, so it behaves identically in a backtest and in a paced demo.
         """
-        if self.killswitch.level is not KillLevel.L1:
+        pause_state = self.killswitch.state
+        if pause_state.get("level") != KillLevel.L1.value:
             return
-        trigger = str(self.killswitch.state.get("trigger", ""))
+        trigger = str(pause_state.get("trigger", ""))
         if trigger != "daily_loss":
             return
         equity = self.equity()
         day_start = D(str(self.store.kv_get("day_start_equity", to_str(equity))))
         if day_start > 0 and (equity - day_start) / day_start <= self.cfg.risk.daily_loss_stop_new_entries:
             return
-        self._resume(reason="new trading day; daily loss limit reset", now=now)
+        self._resume(reason="new trading day; daily loss limit reset", now=now, expected_state=pause_state)
 
-    def _resume(self, *, reason: str, now: datetime) -> None:
-        if self.killswitch.auto_resume(reason=reason):
+    def _resume(self, *, reason: str, now: datetime, expected_state: dict[str, Any]) -> None:
+        # A pre-existing L1 may have a different trigger; never lift it while a
+        # critical component is flapping, even at the daily-loss boundary.
+        if any(self.health.components[name].critical for name in self.health.flapping(now=now)):
+            self._healthy_since = None
+            self._healthy_pause_state = None
+            return
+        # An L1 from infrastructure can mask a later same-level weekly/daily loss.
+        # Recheck all account limits immediately before attempting any automatic L0.
+        equity = self.equity()
+        if equity <= 0 or self.risk.account_alerts(self._account_risk_context(equity)):
+            self._healthy_since = None
+            self._healthy_pause_state = None
+            self._log("autonomy_refused", {"actor": "engine", "action": "auto_resume",
+                                         "reason": "account risk remains or equity unavailable"},
+                      level="WARN", actor="engine", ts=now)
+            return
+        trigger = str(expected_state.get("trigger", ""))
+        if self.killswitch.auto_resume(reason=reason, expected_state=expected_state):
+            self._healthy_since = None
+            self._healthy_pause_state = None
+            self.autonomy.record(
+                "engine", "auto_resume", AutonomyLevel.PROTECT, f"L1 {trigger} lifted: {reason}", ts=now
+            )
             self._reconcile_state = self._reconcile_state or "ok"
             self._log(
                 "kill_switch_auto_resume",
                 {
-                    "trigger": self.killswitch.state.get("trigger", ""),
+                    "trigger": trigger,
                     "reason": reason,
                     "equity": to_str(self.equity(), 2),
                     "market_time": iso(now),
@@ -1729,7 +1954,11 @@ class Engine:
         return errors / attempts if attempts else 0.0
 
     async def reconcile(self) -> str:
-        """Compare the ledger with the venue. Any mismatch is an incident."""
+        """Compare paper state; venue reconciliation is not yet independently verified."""
+        if self.cfg.mode is not Mode.PAPER:
+            # CCXT open orders are process-local and balances are free, not total.
+            # Neither proves the venue/account matches the ledger after a restart.
+            return "venue reconciliation unverified: independent orders and total balances required"
         if self.unapplied_fills > 0:
             # the venue is ahead of us by design: our own fill queue has not drained
             return "ok"
@@ -1965,8 +2194,16 @@ class Engine:
         self.killswitch.trigger(KillLevel.L2, trigger="manual_kill", reason=reason, actor=actor)
         await self.flatten_all(reason)
 
-    async def resume(self, reason: str = "manual resume", actor: str = "operator") -> None:
-        self.killswitch.reset(reason=reason, actor=actor)
+    async def resume(
+        self, reason: str = "manual resume", actor: str = "operator", *, l1_only: bool = False,
+    ) -> None:
+        if l1_only:
+            reviewed = self.killswitch.state
+            if reviewed.get("level") != KillLevel.L1.value:
+                raise PermissionError("remote resume may only clear L1; L2/L3 require local review")
+            self.killswitch.reset(reason=reason, actor=actor, expected_state=reviewed)
+        else:
+            self.killswitch.reset(reason=reason, actor=actor)
 
     def status(self) -> dict[str, Any]:
         marks = self.marks
@@ -1984,7 +2221,11 @@ class Engine:
             "pending_orders": len(self.om.pending),
             "stats": self.stats.to_dict(),
             "order_stats": self.om.stats.to_dict(),
-            "ramp": self.ramp.load().to_dict(),
+            "ramp": self.ramp.load().to_dict() | {
+                "recorded_stage_multiplier": to_str(self.ramp.load().multiplier, 4),
+                "multiplier": to_str(self.ramp.multiplier(), 4),
+                "advancement_authorized": False,
+            },
             "now": iso(self.clock.now()),
         }
 

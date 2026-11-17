@@ -282,3 +282,12 @@ class TestReport:
             trials=[Trial("a", sharpe=1.0)], iterations=50,
         )
         assert report["multiple_testing"]["trials"] == 1
+
+
+def test_stress_scales_modeled_slippage_and_rejects_invalid_factors(cfg):
+    stressed = stress_config(cfg, 2)
+    assert stressed.settings.paper.slippage_multiplier == D("2")
+    assert cfg.settings.paper.slippage_multiplier == D("1")
+    for factor in (0, -1, float("nan"), float("inf"), 11):
+        with pytest.raises(ValueError):
+            stress_config(cfg, factor)

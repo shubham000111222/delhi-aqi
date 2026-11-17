@@ -287,3 +287,46 @@ class TestTheTail:
         assert report.kept == 7
         assert report.complete is False
         assert round(report.coverage, 4) == 0.7
+
+
+@pytest.mark.parametrize('offset', [timedelta(seconds=30), timedelta(microseconds=1)])
+def test_demo_source_obeys_half_open_unaligned_window(offset):
+    fetch = synthetic_fetcher(page_size=100)
+    rows = asyncio.run(fetch('BTC/USDT', '1m', START + offset,
+                             START + timedelta(minutes=3) + offset, 100))
+    assert [row.ts for row in rows] == [START + timedelta(minutes=i) for i in (1, 2, 3)]
+
+
+def test_demo_source_aligned_end_is_exclusive():
+    fetch = synthetic_fetcher(page_size=100)
+    rows = asyncio.run(fetch('BTC/USDT', '1m', START, START + timedelta(minutes=3), 100))
+    assert [row.ts for row in rows] == [START + timedelta(minutes=i) for i in (0, 1, 2)]
+
+
+def test_demo_backfill_unaligned_past_end_keeps_last_eligible_bar():
+    backfill = Backfill(synthetic_fetcher(page_size=100))
+    rows, report = asyncio.run(backfill.run('BTC/USDT', '1m', START,
+                             START + timedelta(minutes=3, seconds=30), now=NOW))
+    assert len(rows) == report.expected_bars == 4
+    assert report.complete
+
+
+@pytest.mark.parametrize('missing', ['all', 'head', 'tail', 'middle'])
+def test_source_exhaustion_never_certifies_missing_closed_history(missing):
+    bars = series(START, 5)
+    selected = {'all': [], 'head': bars[1:], 'tail': bars[:-1],
+                'middle': bars[:2] + bars[3:]}[missing]
+
+    async def fetch(symbol, timeframe, since, until, limit):
+        return [row for row in selected if since <= row.ts < until][:limit]
+
+    rows, report = asyncio.run(Backfill(fetch).run('BTC/USDT', '1m', START,
+                               START + timedelta(minutes=5), now=NOW))
+    assert len(rows) < report.expected_bars == 5
+    assert report.complete is False
+
+
+def test_no_closed_bars_requested_is_complete_without_invented_candles():
+    rows, report = asyncio.run(Backfill(synthetic_fetcher()).run('BTC/USDT', '1m', START,
+                               START + timedelta(seconds=30), now=START))
+    assert rows == [] and report.expected_bars == 0 and report.complete

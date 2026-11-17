@@ -35,3 +35,6 @@ dist/
 
 # os
 .DS_Store
+
+# local public-key trust bundle; provision outside Git
+/operator-keys.json
