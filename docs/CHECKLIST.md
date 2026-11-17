@@ -19,7 +19,7 @@ For the full Windows installation, implementation and validation procedure, see
 For the consolidated item-by-item implementation and external-evidence backlog, see
 [`REMAINING_WORK.md`](REMAINING_WORK.md). It does not mark unfinished work complete.
 
-**Last updated:** 2026-11-02 · **Suite:** 1501 passed, 2 skipped on the working branch.
+**Last updated:** 2026-11-02 · **Suite:** 1506 passed, 2 skipped on the working branch.
 The previously reported archive (30 days × 5 symbols, 216,198 bars) was on the user's
 machine; this workspace has no real-price archive.
 
@@ -322,3 +322,5 @@ Fill this in as phases complete — it is what `docs/RESULTS.md` is built from.
 - [x] Synthetic backfill half-open start/end semantics and microsecond-precise shared grid alignment; unclosed-bar refusal unchanged.
 
 - [x] Backfill completion requires exact closed-bar coverage and no gaps/error/stuck cursor; exhaustion alone cannot certify missing edges or empty history.
+
+- [x] Resume state binds source/seed or exchange/testnet and archive root; legacy/mismatched/corrupt/oversized state refuses unchanged. Archive content authentication remains open.

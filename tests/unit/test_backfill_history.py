@@ -147,3 +147,26 @@ def test_invalid_calendar_months_fail_without_backfill(history_cfg, months, caps
                     '--to', '2024-02-29T12:00:00Z']) == 2
     assert 'error:' in capsys.readouterr().err
     assert not (history_cfg.settings.data_dir / 'backfill-history.json').exists()
+
+
+@pytest.mark.parametrize('change', ['seed', 'source', 'root', 'legacy', 'corrupt'])
+def test_resume_identity_mismatch_is_refused_without_rewriting(history_cfg, tmp_path, change):
+    argv = ['backfill-history', '--source', 'demo', '--from', '2024-01-01T00:00:00Z',
+            '--to', '2024-01-01T00:05:00Z', '--symbols', 'BTC/USDT']
+    assert run_cli(argv) == 0
+    path = Path(history_cfg.settings.data_dir) / 'backfill-history.json'
+    if change == 'legacy':
+        state = json.loads(path.read_text())
+        state.pop('identity')
+        path.write_text(json.dumps(state))
+    elif change == 'corrupt':
+        path.write_text('{broken')
+    elif change == 'seed':
+        argv += ['--seed', '999']
+    elif change == 'source':
+        argv[argv.index('demo')] = 'ccxt'
+    elif change == 'root':
+        argv += ['--root', str(tmp_path / 'different-archive')]
+    before = path.read_bytes()
+    assert run_cli(argv) == 2
+    assert path.read_bytes() == before

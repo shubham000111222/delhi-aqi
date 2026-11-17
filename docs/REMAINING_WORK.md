@@ -94,7 +94,8 @@ Full criteria and honest limits: [TIMEMACHINE_PLAN.md](TIMEMACHINE_PLAN.md).
 ## Data, strategy and live acceptance — cannot be simulated into completion
 
 - [x] Fix backfill calendar subtraction for 12+ months and test year/leap-day boundaries plus invalid ranges.
-- [ ] Acquire and verify sufficient real historical data, symbol/time coverage, timestamps, missing chunks and cost sources; preserve provenance and resumability.
+- [x] Bind backfill resume metadata to source/settings/archive root; refuse legacy/unbound/mismatched state rather than reuse completion across sources.
+- [ ] Acquire and verify sufficient real historical data, symbol/time coverage, timestamps, missing chunks and cost sources; authenticate archive contents and revalidate saved completed chunks.
 - [ ] Integrate verified input/cost/OOS provenance with walk-forward, robustness and all promotion consumers; compare identical nominal and actual 2× modeled-cost reruns.
 - [ ] Evaluate at least three real OOS windows and the §19.2 approximately 10% net-edge criterion without parameter leakage.
 - [ ] Require OOS PF >1.3, Sharpe >1.0, drawdown <15%, at least 200 OOS trades, a profitable actual 2× cost rerun and Monte Carlo p95 drawdown <20%. A failed strategy is a valid result, not permission to relax gates.

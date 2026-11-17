@@ -2083,11 +2083,26 @@ def cmd_backfill_history(args: argparse.Namespace) -> int:
         return 2
     root = args.root or cfg.settings.archive_dir or (cfg.settings.data_dir / "archive")
     state_path = Path(args.state) if args.state else cfg.settings.data_dir / "backfill-history.json"
-    state: dict[str, Any] = {}
+    identity = {
+        "version": 1, "source": args.source, "archive_root": str(Path(root).resolve()),
+        "source_settings": ({"seed": args.seed} if args.source == "demo" else {
+            "exchange_id": cfg.settings.ccxt.exchange_id, "testnet": cfg.settings.ccxt.testnet}),
+    }
+    state: dict[str, Any] = {"identity": identity, "chunks": {}}
     if state_path.exists():
-        with contextlib.suppress(json.JSONDecodeError, OSError):
-            state = json.loads(state_path.read_text() or "{}")
-    chunks = state.setdefault("chunks", {})
+        try:
+            if state_path.stat().st_size > 4 * 1024 * 1024:
+                raise ValueError("resume file exceeds 4 MiB")
+            loaded = json.loads(state_path.read_text())
+            if (not isinstance(loaded, dict) or loaded.get("identity") != identity
+                    or not isinstance(loaded.get("chunks"), dict)):
+                raise ValueError("resume identity missing/mismatched or chunks invalid")
+            state = loaded
+        except (ValueError, OSError) as exc:
+            print(f"error: refusing resume state: {exc}; use a new state file and separate archive "
+                  "for a different source; legacy records require reinspection", file=sys.stderr)
+            return 2
+    chunks = state["chunks"]
     fetcher = (
         synthetic_fetcher(seed=args.seed, page_size=args.page_limit)
         if args.source == "demo"
