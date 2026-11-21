@@ -137,3 +137,21 @@ class TestTapeToArchive:
         archive = Archive(tmp_path)
         with pytest.raises(RuntimeError, match="needs pyarrow"):
             archive.write_candles(candles(1))
+
+
+@pytest.mark.parametrize('text', ["BTC/USDT' OR 1=1 --", "'", ''])
+def test_archive_filters_are_literal_not_sql(tmp_path, text):
+    archive = Archive(tmp_path)
+    archive.write_candles(candles(2))
+    archive.write_books(books(2))
+    assert archive.candles(symbol=text) == []
+    assert archive.candles(timeframe=text) == []
+    assert archive.spread_stats(symbol=text)['observations'] == 0
+    assert len(archive.candles()) == 2
+    assert archive.spread_stats()['observations'] == 2
+
+
+@pytest.mark.parametrize('limit', [True, 0, -1, 1.5, '10', 5_000_001])
+def test_archive_candle_limit_is_strict_and_bounded(tmp_path, limit):
+    with pytest.raises(ValueError, match='candle limit'):
+        Archive(tmp_path).candles(limit=limit)
