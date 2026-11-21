@@ -25,6 +25,7 @@ import contextlib
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from ..core.clock import timeframe_seconds
@@ -140,6 +141,12 @@ class Backfill:
             if not page:
                 report.complete = True
                 break
+            try:
+                for candle in page:
+                    _validate_candle(candle, symbol, timeframe, step)
+            except (ValueError, TypeError, AttributeError, ArithmeticError):
+                report.error = "invalid candle identity, timestamp or OHLCV"
+                break
             newest = cursor
             for candle in page:
                 ts = _utc(candle.ts)
@@ -151,9 +158,14 @@ class Backfill:
                     continue
                 if ts in bars:
                     report.duplicates += 1
+                    if bars[ts] != candle:
+                        report.error = "conflicting duplicate candle"
+                        break
                     continue
                 bars[ts] = candle
                 newest = max(newest, ts)
+            if report.error is not None:
+                break
             if newest <= cursor:
                 # Nothing in this page could move the cursor. If every row the exchange
                 # sent is simply not closed yet, that is the end of the data - not an
@@ -175,6 +187,20 @@ class Backfill:
             and report.kept == report.expected_bars and not report.gaps
         )
         return ordered, report
+
+
+def _validate_candle(candle: Candle, symbol: str, timeframe: str, step: timedelta) -> None:
+    """Structural input checks only, not authenticated exchange provenance."""
+    if (not isinstance(candle, Candle) or candle.symbol != symbol or candle.timeframe != timeframe
+            or not isinstance(candle.ts, datetime) or candle.ts.tzinfo is None
+            or candle.ts.utcoffset() is None or _align(candle.ts, step, up=False) != candle.ts):
+        raise ValueError("invalid candle identity/time")
+    prices = (candle.open, candle.high, candle.low, candle.close)
+    if (any(not isinstance(v, Decimal) or not v.is_finite() or v <= 0 for v in prices)
+            or not isinstance(candle.volume, Decimal) or not candle.volume.is_finite() or candle.volume < 0
+            or candle.low > min(candle.open, candle.close)
+            or candle.high < max(candle.open, candle.close)):
+        raise ValueError("invalid candle OHLCV")
 
 
 def _align(ts: datetime, step: timedelta, *, up: bool) -> datetime:
