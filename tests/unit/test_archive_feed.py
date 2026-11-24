@@ -18,7 +18,6 @@ from tradebot.config import load_config  # noqa: E402
 from tradebot.core.clock import SimClock  # noqa: E402
 from tradebot.core.models import Candle  # noqa: E402
 from tradebot.core.money import D  # noqa: E402
-from tradebot.data import archive as archive_mod  # noqa: E402
 from tradebot.data.archive import Archive, read_candles  # noqa: E402
 from tradebot.data.feed import ReplayFeed, make_feed  # noqa: E402
 
@@ -38,9 +37,7 @@ def archive_cfg(tmp_path: Path):
         },
     )
     config.ensure_dirs()
-    archive_mod._CANDLE_CACHE.clear()
     yield config
-    archive_mod._CANDLE_CACHE.clear()
 
 
 def bars(count: int, *, start: datetime, symbol: str = "BTC/USDT", price: str = "100") -> list[Candle]:
@@ -80,22 +77,36 @@ class TestReadCandles:
             read_candles(archive_cfg)
         assert "backfill" in str(exc.value)
 
-    def test_repeated_reads_do_not_re_read_the_files(self, archive_cfg, monkeypatch):
+    def test_repeated_reads_are_independent(self, archive_cfg):
         Archive(archive_cfg.settings.archive_dir).write_candles(
             bars(5, start=datetime(2026, 3, 2, tzinfo=UTC))
         )
-        calls = {"n": 0}
-        real = Archive.candles
-
-        def counting(self, *args, **kwargs):
-            calls["n"] += 1
-            return real(self, *args, **kwargs)
-
-        monkeypatch.setattr(Archive, "candles", counting)
         first = read_candles(archive_cfg)
+        first["BTC/USDT"].clear()
+        first['injected'] = []
         second = read_candles(archive_cfg)
-        assert first is second
-        assert calls["n"] < 20  # one query per symbol, not per engine build
+        assert len(second['BTC/USDT']) == 5
+        assert 'injected' not in second
+
+    def test_repeated_reads_observe_appended_archive(self, archive_cfg):
+        start = datetime(2026, 3, 2, tzinfo=UTC)
+        archive = Archive(archive_cfg.settings.archive_dir)
+        archive.write_candles(bars(5, start=start))
+        assert len(read_candles(archive_cfg)['BTC/USDT']) == 5
+        archive.write_candles(bars(2, start=start + timedelta(minutes=5)))
+        assert len(read_candles(archive_cfg)['BTC/USDT']) == 7
+
+    def test_repeated_reads_observe_replaced_archive(self, archive_cfg):
+        archive = Archive(archive_cfg.settings.archive_dir)
+        start = datetime(2026, 3, 2, tzinfo=UTC)
+        paths = archive.write_candles(bars(5, start=start))
+        assert len(read_candles(archive_cfg)['BTC/USDT']) == 5
+        for path in paths:
+            path.unlink()
+        archive.write_candles(bars(2, start=start, price='200'))
+        current = read_candles(archive_cfg)['BTC/USDT']
+        assert len(current) == 2
+        assert current[0].open == D('200')
 
 
 class TestMakeFeed:

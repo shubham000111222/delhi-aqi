@@ -119,3 +119,5 @@ The operator's quote currency, symbols, capital cap, hosting and optional integr
 - [x] Continuation: structural backfill candle validation and conflicting-duplicate refusal; real provenance and stored archive reinspection remain open.
 
 - [x] Continuation: atomic bounded resume-state replacement; independent archive verification and concurrent-writer protection remain open.
+
+- [x] Continuation: remove archive reader stale/shared-mutable process cache. Atomic multisymbol snapshots and authenticated provenance remain open.

@@ -258,9 +258,6 @@ def write_tape_to_archive(archive: Archive, events: Iterable[tuple[str, Any, Any
     )
 
 
-_CANDLE_CACHE: dict[tuple[str, str, tuple[str, ...], int], dict[str, list[Candle]]] = {}
-
-
 def read_candles(
     config: Any,
     *,
@@ -276,16 +273,16 @@ def read_candles(
     """
     from ..core.clock import parse_iso
 
+    # No process-wide path-only cache: archives may change between research runs,
+    # and returned mutable containers must not become shared hidden input state.
+    if type(limit) is not int or not 1 <= limit <= 5_000_000:
+        raise ValueError("candle limit must be an integer from 1 to 5000000")
     directory = Path(root or (config.settings.archive_dir or Path(config.settings.data_dir) / "archive"))
     if not any(directory.glob("candles/**/*.parquet")):
         raise ValueError(
             f"no candles in {directory}: run `python -m tradebot backfill --days 30 --write` first"
         )
     wanted = timeframe or config.settings.base_timeframe
-    key = (str(directory), wanted, tuple(config.symbol_names()), limit)
-    cached = _CANDLE_CACHE.get(key)
-    if cached is not None:
-        return cached  # a walk-forward builds one engine per window; read the files once
     archive = Archive(directory)
     bars: dict[str, list[Candle]] = {}
     for symbol in config.symbol_names():
@@ -310,7 +307,6 @@ def read_candles(
         raise ValueError(
             f"{directory} has candles but none for {config.symbol_names()} at {wanted}"
         )
-    _CANDLE_CACHE[key] = bars
     return bars
 
 
