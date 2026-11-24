@@ -330,3 +330,31 @@ def test_no_closed_bars_requested_is_complete_without_invented_candles():
     rows, report = asyncio.run(Backfill(synthetic_fetcher()).run('BTC/USDT', '1m', START,
                                START + timedelta(seconds=30), now=START))
     assert rows == [] and report.expected_bars == 0 and report.complete
+
+
+@pytest.mark.parametrize('change', [
+    {'symbol': 'ETH/USDT'}, {'timeframe': '5m'}, {'ts': START.replace(tzinfo=None)},
+    {'ts': START + timedelta(microseconds=1)}, {'open': Decimal('NaN')},
+    {'high': Decimal('Infinity')}, {'low': Decimal('0')}, {'volume': Decimal('-1')},
+    {'close': Decimal('200')}, {'volume': True},
+])
+def test_malformed_candle_page_is_not_archived_as_complete(change):
+    from dataclasses import replace
+
+    async def fetch(*args):
+        return [replace(bar(START), **change)]
+
+    rows, report = asyncio.run(Backfill(fetch).run('BTC/USDT', '1m', START,
+                               START + timedelta(minutes=1), now=NOW))
+    assert rows == [] and not report.complete
+    assert report.error == 'invalid candle identity, timestamp or OHLCV'
+
+
+def test_conflicting_duplicate_cannot_be_silently_deduplicated():
+    async def fetch(*args):
+        return [bar(START), bar(START, close=101), bar(START + timedelta(minutes=1))]
+
+    _, report = asyncio.run(Backfill(fetch).run('BTC/USDT', '1m', START,
+                            START + timedelta(minutes=2), now=NOW))
+    assert report.error == 'conflicting duplicate candle'
+    assert not report.complete and report.duplicates == 1

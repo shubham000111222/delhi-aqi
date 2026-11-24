@@ -154,22 +154,28 @@ class Archive:
     def candles(
         self, *, symbol: str | None = None, timeframe: str | None = None, limit: int = 10_000
     ) -> list[dict[str, Any]]:
+        if type(limit) is not int or not 1 <= limit <= 5_000_000:
+            raise ValueError("candle limit must be an integer from 1 to 5000000")
         clauses: list[str] = []
-        if symbol:
-            clauses.append(f"symbol = '{symbol}'")
-        if timeframe:
-            clauses.append(f"timeframe = '{timeframe}'")
+        parameters: list[Any] = []
+        if symbol is not None:
+            clauses.append("symbol = ?")
+            parameters.append(symbol)
+        if timeframe is not None:
+            clauses.append("timeframe = ?")
+            parameters.append(timeframe)
         where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
-        return self.query(f"SELECT * FROM candles {where}ORDER BY ts LIMIT {int(limit)}")
+        return self.query(f"SELECT * FROM candles {where}ORDER BY ts LIMIT ?", [*parameters, limit])
 
     def spread_stats(self, *, symbol: str | None = None) -> dict[str, Any]:
         """Empirical spread distribution: the input to an honest slippage model."""
-        where = f"WHERE symbol = '{symbol}' " if symbol else ""
+        where = "WHERE symbol = ? " if symbol is not None else ""
         rows = self.query(
             "SELECT count(*) AS observations, avg(spread_bps) AS mean_spread_bps, "
             f"quantile_cont(spread_bps, 0.5) AS median_spread_bps, "
             f"quantile_cont(spread_bps, 0.95) AS p95_spread_bps, "
-            f"max(spread_bps) AS max_spread_bps FROM books {where}"
+            f"max(spread_bps) AS max_spread_bps FROM books {where}",
+            [symbol] if symbol is not None else [],
         )
         return rows[0] if rows else {}
 
@@ -252,9 +258,6 @@ def write_tape_to_archive(archive: Archive, events: Iterable[tuple[str, Any, Any
     )
 
 
-_CANDLE_CACHE: dict[tuple[str, str, tuple[str, ...], int], dict[str, list[Candle]]] = {}
-
-
 def read_candles(
     config: Any,
     *,
@@ -270,16 +273,16 @@ def read_candles(
     """
     from ..core.clock import parse_iso
 
+    # No process-wide path-only cache: archives may change between research runs,
+    # and returned mutable containers must not become shared hidden input state.
+    if type(limit) is not int or not 1 <= limit <= 5_000_000:
+        raise ValueError("candle limit must be an integer from 1 to 5000000")
     directory = Path(root or (config.settings.archive_dir or Path(config.settings.data_dir) / "archive"))
     if not any(directory.glob("candles/**/*.parquet")):
         raise ValueError(
             f"no candles in {directory}: run `python -m tradebot backfill --days 30 --write` first"
         )
     wanted = timeframe or config.settings.base_timeframe
-    key = (str(directory), wanted, tuple(config.symbol_names()), limit)
-    cached = _CANDLE_CACHE.get(key)
-    if cached is not None:
-        return cached  # a walk-forward builds one engine per window; read the files once
     archive = Archive(directory)
     bars: dict[str, list[Candle]] = {}
     for symbol in config.symbol_names():
@@ -304,7 +307,6 @@ def read_candles(
         raise ValueError(
             f"{directory} has candles but none for {config.symbol_names()} at {wanted}"
         )
-    _CANDLE_CACHE[key] = bars
     return bars
 
 

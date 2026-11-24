@@ -170,3 +170,33 @@ def test_resume_identity_mismatch_is_refused_without_rewriting(history_cfg, tmp_
     before = path.read_bytes()
     assert run_cli(argv) == 2
     assert path.read_bytes() == before
+
+
+def test_intraday_resume_does_not_alias_longer_window(history_cfg, capsys):
+    argv = ['backfill-history', '--source', 'demo', '--from', '2024-01-01T00:00:00Z',
+            '--to', '2024-01-01T00:05:00Z', '--symbols', 'BTC/USDT', '--json']
+    assert run_cli(argv) == 0
+    capsys.readouterr()
+    argv[argv.index('2024-01-01T00:05:00Z')] = '2024-01-01T00:10:00Z'
+    assert run_cli(argv) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['kept_total'] == 10
+    assert result['rows'][0]['skipped'] is False
+    assert run_cli(argv) == 0
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated['rows'][0]['skipped'] is True
+
+
+def test_resume_metadata_must_match_exact_requested_bounds(history_cfg, capsys):
+    argv = ['backfill-history', '--source', 'demo', '--from', '2024-01-01T00:00:00Z',
+            '--to', '2024-01-01T00:05:00Z', '--symbols', 'BTC/USDT', '--json']
+    assert run_cli(argv) == 0
+    capsys.readouterr()
+    path = Path(history_cfg.settings.data_dir) / 'backfill-history.json'
+    state = json.loads(path.read_text())
+    next(iter(state['chunks'].values()))['chunk'][1] = '2024-01-01T00:01:00+00:00'
+    path.write_text(json.dumps(state))
+    assert run_cli(argv) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['rows'][0]['skipped'] is False
+    assert result['kept_total'] == 5
